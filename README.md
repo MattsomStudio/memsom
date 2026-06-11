@@ -110,6 +110,62 @@ when Claude Code runs inside this repo. No global config is touched.
 | `corroborate`    | memdag_corroborate | Mint a lift node when k independent roots agree |
 | `claims-list`    | memdag_corroborate | List all claims and their corroboration status |
 | `roots-list`     | memdag_corroborate | List all registered independence roots |
+| `ingest`         | memdag_ingest      | Ingest a single file (channel stamped by caller; SHA-256 dedup; auto-chunked) |
+| `ingest-dir`     | memdag_ingest      | Ingest all `*.md` (or `--glob`) files under a directory tree |
+| `ingest-url`     | memdag_ingest      | Fetch a URL (GET) and ingest the body (channel always `external`) |
+| `ingest-text`    | memdag_ingest      | Ingest raw text at a declared channel |
+| `retrieve`       | memdag_retrieve    | Hybrid BM25 + optional-Ollama-vector ranked retrieval |
+| `reindex`        | memdag_retrieve    | Rebuild BM25 postings for all live source nodes |
+| `compact`        | memdag_compact     | Consolidate related episodes into a semantic node (edge-preserving, archived) |
+| `archived-list`  | memdag_compact     | List all archived (compacted) episodes |
+
+## Spine v1
+
+### Ingestion adapters
+
+Channel is stamped by the **adapter/transport**, never inferred from content. Three file-based and one raw-text adapter are available:
+
+| Subcommand      | What it ingests                                              | Channel |
+|-----------------|--------------------------------------------------------------|---------|
+| `ingest <path>` | Single UTF-8 file (chunked if > 1 200 chars)                | caller declares |
+| `ingest-dir <dir> --channel <c>` | All `*.md` (or `--glob`) files under a directory | caller declares |
+| `ingest-url <url>` | HTTP GET response body                                  | always `external` |
+| `ingest-text <text> --channel <c>` | Raw text string                              | caller declares |
+
+Content is SHA-256-deduplicated (`content_hash` column, normalised whitespace). Duplicate content reuses the existing live node — no duplicate rows. Long text is auto-chunked on paragraph/sentence boundaries; each chunk is a separate node with `source_ref="…#chunkN"`. Every newly ingested node is automatically indexed for retrieval (best-effort — ingest never crashes if the retrieve module is absent or Ollama is down).
+
+### Hybrid retrieval
+
+BM25 is **pure stdlib** — works offline with zero external services. Ollama `nomic-embed-text` vectors are **optional**: Ollama unreachable → silent fallback to BM25-only, never a crash. Results are fused with Reciprocal Rank Fusion (RRF).
+
+```powershell
+# Build (or rebuild) the BM25 postings index
+python memdag_cli.py reindex
+
+# Query — returns ranked (id, content, channel, label, source_ref) rows
+python memdag_cli.py retrieve "How does Nebula hole punching work?"
+
+# Opt-in retrieval inside ask: uses retrieve() to build the source pool
+python memdag_cli.py ask --retrieve --topk 5 "How does Nebula hole punching work?"
+```
+
+Without `--retrieve`, `ask` is **unchanged** — it uses all live sources exactly as before. Every existing test still passes.
+
+### Edge-preserving compaction
+
+`compact` consolidates groups of related live episodes into a single semantic (agent-derived) node, preserving every edge for provenance:
+
+- The semantic node is minted via `derive_node()` — **edges point back to every episode**, label = `min(parents)` (no trust laundering).
+- Episodes are **archived** (`archived = 1`), **never deleted** — rows and edges survive; `explain` and `blame` still walk them.
+- `archived-list` shows all archived episodes.
+- The quarantine integrity gate (`consolidate`) runs automatically after compaction.
+
+```powershell
+python memdag_cli.py compact                         # similarity grouping (Jaccard)
+python memdag_cli.py compact --group-by claim        # group by corroboration claim
+python memdag_cli.py compact --llm                   # Ollama summary (extractive fallback)
+python memdag_cli.py archived-list
+```
 
 ## Two integrity/confidentiality axes
 

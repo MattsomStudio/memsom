@@ -117,6 +117,63 @@ adds 80+ tests across 13 modules + CLI + MCP.
 - **Lift-drop is native revoke-cascade**: The lift node is a child of every asserting node. Revoking any asserting node cascades the tombstone to the lift automatically — no special teardown path.
 - **MCP tool count 10 -> 12**: `profile` and `check_action` added; `SERVER_VERSION` bumped to `0.3.0`.
 
+## Spine v1 (2026-06-11)
+
+### New modules
+
+| Module          | File                   | Capability                                                                                   | Test file                   | Tests |
+|-----------------|------------------------|----------------------------------------------------------------------------------------------|-----------------------------|-------|
+| ingest          | memdag_ingest.py       | Write path: channel-stamped adapters (file/dir/url/text), SHA-256 dedup, auto-chunking       | test_memdag_ingest.py       | 33    |
+| retrieve        | memdag_retrieve.py     | Hybrid BM25 (stdlib) + optional Ollama-vector (RRF fusion); degrades silently to BM25-only   | test_memdag_retrieve.py     | 35    |
+| compact         | memdag_compact.py      | Edge-preserving compaction: derive_node from episodes, archive (never delete), integrity gate| test_memdag_compact.py      | 22    |
+
+### CLI wiring (memdag_cli.py)
+
+- `migrate_all()` now runs `memdag_ingest.migrate`, `memdag_retrieve.migrate`, `memdag_compact.migrate` — guarantees `content_hash`, `postings`, and `archived` exist on every CLI path.
+- `_build_pool()` adds `AND archived = 0` — DEFAULT 0 means no behaviour change until something is actually compacted; all existing CLI tests stay green.
+- `ask` gains two opt-in flags: `--retrieve` (use ranked retrieval pool instead of all-live) and `--topk N` (default 8). Without `--retrieve`, ask is byte-identical to prior behaviour.
+- New subcommands mounted: `ingest`, `ingest-dir`, `ingest-url`, `ingest-text`, `retrieve`, `reindex`, `compact`, `archived-list`.
+
+### MCP wiring (memdag_mcp.py)
+
+- Two new tools added: `retrieve` (ranked hits) and `ingest_text` (stamp + store).
+- MCP tool count: 12 → **14**.
+- `--selfcheck` exits 0.
+
+### New schema columns (additive; all DEFAULT-safe)
+
+| Column         | Type / Default              | Added by         |
+|----------------|-----------------------------|------------------|
+| `content_hash` | TEXT (nullable)             | memdag_ingest    |
+| `archived`     | INTEGER NOT NULL DEFAULT 0  | memdag_compact   |
+| `archived_at`  | TEXT                        | memdag_compact   |
+
+### New tables
+
+| Table       | Owner           | Purpose |
+|-------------|-----------------|---------|
+| `postings`  | memdag_retrieve | BM25 term→doc inverted index (term, node_id, tf) |
+| `docstats`  | memdag_retrieve | Per-document token count for BM25 normalization |
+| `embeddings`| memdag_retrieve | Optional Ollama float32 vectors (node_id, model, dim, vec BLOB) |
+
+### New index
+
+| Index                    | Table | Purpose |
+|--------------------------|-------|---------|
+| `idx_nodes_content_hash` | nodes | Fast dedup lookup by SHA-256 hash |
+
+### Test counts (Spine v1 additions)
+
+| Test file              | New tests | Notes |
+|------------------------|-----------|-------|
+| test_memdag_ingest.py  | 33        | Migration, dedup, chunking, file/dir/url adapters, CLI register, frozen-core compat |
+| test_memdag_retrieve.py| 35        | BM25, vector (mocked), RRF, pool filters, CLI smoke |
+| test_memdag_compact.py | 22        | Grouping, extractive summary, archiving, edges, integrity gate |
+| test_memdag_cli.py     | +4        | Retrieve-flag tests (unchanged path, ranked pool, empty-pool exit-1, parse smoke) |
+| test_memdag_mcp.py     | +2        | ingest_text stores node, retrieve returns hits; tool count 12→14 |
+
+Full suite after Spine v1: **339 tests, 0 failures**.
+
 ## Regression guarantee
 
 The frozen TestEndToEndDemo suite (`test_memdag.py`, 18 tests) runs against

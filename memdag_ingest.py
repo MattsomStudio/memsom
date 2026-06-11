@@ -1,0 +1,445 @@
+"""memdag_ingest — real write path for the derivation DAG.
+
+SPINE invariant: channel is stamped by the ADAPTER (transport), NEVER inferred
+from content.  This module is that adapter — the caller declares the channel,
+and this code enforces it without peeking at content.
+
+Schema migration: adds content_hash TEXT (nullable, no default) to nodes, plus
+a covering index idx_nodes_content_hash.  Existing rows get NULL — safe for all
+frozen-core behaviour (content_hash is never read by memdag.py).
+
+Public API
+----------
+migrate(conn)
+    Idempotent: add content_hash column + index.
+
+ingest_text(conn, text, channel, source_ref=None, chunk=True, chunk_chars=1200)
+    -> list[int]
+    Split long text into ~chunk_chars chunks on paragraph/sentence boundaries.
+    For each chunk, sha256(normalized) -> if a LIVE node with that content_hash
+    exists, reuse it (dedup); else insert_node(channel, source_ref=f"{ref}#chunk{i}")
+    and store content_hash.  Best-effort: after insert, try to call
+    memdag_retrieve.index_node(conn, nid) inside try/except.
+    Returns list of node ids (reused or newly created).
+
+ingest_file(conn, path, channel) -> list[int]
+    Read UTF-8 (errors=replace), call ingest_text with source_ref=str(path).
+
+ingest_dir(conn, dirpath, channel, glob="*.md") -> list[int]
+    Walk + ingest each matching file.  Returns flat list of all node ids.
+
+ingest_url(conn, url) -> list[int]
+    urllib GET (User-Agent, timeout=15), channel forced "external", source_ref=url.
+    Raises OSError / urllib.error.URLError on failure — callers decide to retry/log.
+
+CLI sub-commands (via register(subparsers))
+-------------------------------------------
+ingest <path> --channel <c>
+ingest-dir <dir> --channel <c> [--glob G]
+ingest-url <url>
+"""
+
+import argparse
+import fnmatch
+import hashlib
+import os
+import sqlite3
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import memdag
+import memdag_schema
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CHUNK_CHARS = 1200
+
+# ---------------------------------------------------------------------------
+# Migration
+# ---------------------------------------------------------------------------
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent: add content_hash column to nodes and create covering index."""
+    memdag_schema.add_column(conn, "nodes", "content_hash", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nodes_content_hash ON nodes(content_hash)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalize(text: str) -> str:
+    """Normalize text for hashing: collapse all whitespace runs to single space,
+    strip leading/trailing whitespace.  Ensures semantically identical chunks
+    produce the same hash regardless of whitespace noise.
+    """
+    import re
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _content_hash(text: str) -> str:
+    """Return hex-encoded SHA-256 of the normalized text."""
+    return hashlib.sha256(_normalize(text).encode("utf-8")).hexdigest()
+
+
+def _split_chunks(text: str, chunk_chars: int) -> list:
+    """Split *text* into chunks of at most *chunk_chars* characters each.
+
+    Splitting strategy (in order of preference):
+      1. Double-newline (paragraph boundary) — keeps semantic units together.
+      2. Single newline.
+      3. '. ' (sentence boundary).
+      4. Whitespace boundary nearest to chunk_chars (avoids mid-word cuts).
+      5. Hard split at chunk_chars (absolute last resort when no whitespace found).
+
+    Guarantees: every yielded chunk is non-empty; no content is dropped
+    (all characters from the input appear in some chunk, in order).
+    """
+    if len(text) <= chunk_chars:
+        stripped = text.strip()
+        return [stripped] if stripped else []
+
+    chunks = []
+    remaining = text
+
+    while len(remaining) > chunk_chars:
+        window = remaining[:chunk_chars]
+
+        # 1. Try paragraph break
+        pos = window.rfind("\n\n")
+        if pos > 0:
+            cut = pos + 2
+        else:
+            # 2. Try single newline
+            pos = window.rfind("\n")
+            if pos > 0:
+                cut = pos + 1
+            else:
+                # 3. Try sentence boundary
+                pos = window.rfind(". ")
+                if pos > 0:
+                    cut = pos + 2
+                else:
+                    # 4. Whitespace nearest to chunk_chars (avoid mid-word cut)
+                    pos = window.rfind(" ")
+                    if pos > 0:
+                        cut = pos + 1  # include the space in the consumed slice
+                    else:
+                        # 5. True hard cut (no whitespace at all in window)
+                        cut = chunk_chars
+
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:]
+
+    tail = remaining.strip()
+    if tail:
+        chunks.append(tail)
+
+    return chunks
+
+
+def _find_live_by_hash(conn: sqlite3.Connection, h: str):
+    """Return the id of a LIVE node with content_hash == h, or None."""
+    row = conn.execute(
+        "SELECT id FROM nodes WHERE content_hash = ? AND tombstoned = 0 LIMIT 1",
+        (h,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _try_index(conn: sqlite3.Connection, nid: int) -> None:
+    """Best-effort call to memdag_retrieve.index_node(conn, nid).
+
+    Silently ignores ImportError (memdag_retrieve absent) and any other
+    exception — ingest must work without the retrieve module.
+    """
+    try:
+        import memdag_retrieve  # noqa: PLC0415
+        memdag_retrieve.index_node(conn, nid)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def ingest_text(
+    conn: sqlite3.Connection,
+    text: str,
+    channel: str,
+    source_ref: str = None,
+    chunk: bool = True,
+    chunk_chars: int = _DEFAULT_CHUNK_CHARS,
+) -> list:
+    """Ingest *text* into the DAG under *channel*.
+
+    Parameters
+    ----------
+    conn        : open sqlite3.Connection (get_connection() already called)
+    text        : raw UTF-8 text
+    channel     : one of endorsed / user / agent-derived / external
+    source_ref  : optional string reference (file path, URL, etc.)
+    chunk       : if True, split long text into ~chunk_chars chunks
+    chunk_chars : target chunk size in characters
+
+    Returns
+    -------
+    list[int] — node ids for each chunk, in order (may include reused ids)
+    """
+    migrate(conn)
+
+    if not chunk or len(text) <= chunk_chars:
+        chunks = [text.strip()] if text.strip() else []
+    else:
+        chunks = _split_chunks(text, chunk_chars)
+
+    if not chunks:
+        # Nothing to store
+        return []
+
+    ids = []
+    base_ref = source_ref or ""
+
+    for i, chunk_text in enumerate(chunks):
+        h = _content_hash(chunk_text)
+
+        # Dedup: reuse LIVE node with same hash
+        existing = _find_live_by_hash(conn, h)
+        if existing is not None:
+            ids.append(existing)
+            continue
+
+        # Build source_ref: if multi-chunk, append #chunk{i}; else use as-is
+        if len(chunks) > 1:
+            ref = f"{base_ref}#chunk{i}" if base_ref else f"#chunk{i}"
+        else:
+            ref = source_ref  # keep None as None for single-chunk text
+
+        with conn:
+            nid = memdag.insert_node(conn, chunk_text, channel, source_ref=ref)
+            conn.execute(
+                "UPDATE nodes SET content_hash = ? WHERE id = ?", (h, nid)
+            )
+
+        _try_index(conn, nid)
+        ids.append(nid)
+
+    return ids
+
+
+def ingest_file(conn: sqlite3.Connection, path, channel: str) -> list:
+    """Ingest the file at *path* (UTF-8, errors replaced) under *channel*.
+
+    Returns list[int] of node ids.
+    Raises OSError if the file cannot be read.
+    """
+    path = Path(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return ingest_text(conn, text, channel, source_ref=str(path))
+
+
+def ingest_dir(
+    conn: sqlite3.Connection,
+    dirpath,
+    channel: str,
+    glob: str = "*.md",
+) -> list:
+    """Ingest all files matching *glob* under *dirpath* (recursive walk).
+
+    Returns flat list[int] of all node ids across all files.
+    Files that cannot be read are silently skipped (OSError caught per file).
+    """
+    dirpath = Path(dirpath)
+    ids = []
+    for root, _dirs, files in os.walk(dirpath):
+        for fname in sorted(files):  # sorted = deterministic order
+            if fnmatch.fnmatch(fname, glob):
+                fpath = Path(root) / fname
+                try:
+                    ids.extend(ingest_file(conn, fpath, channel))
+                except OSError:
+                    pass  # unreadable file: skip, don't abort the batch
+    return ids
+
+
+def ingest_url(conn: sqlite3.Connection, url: str) -> list:
+    """Fetch *url* (GET) and ingest the response body.
+
+    Channel is ALWAYS forced to "external" — the transport dictates the channel,
+    never the content (SPINE invariant).
+    source_ref is set to the URL.
+
+    Returns list[int] of node ids.
+    Raises urllib.error.URLError / OSError on network/HTTP failure.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "memdag-ingest/0.1"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+
+    # Decode: try UTF-8, fall back to latin-1 (always succeeds)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1", errors="replace")
+
+    return ingest_text(conn, text, "external", source_ref=url)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _cmd_ingest(args) -> None:
+    conn = memdag.get_connection()
+    try:
+        migrate(conn)
+        path = Path(args.path)
+        ids = ingest_file(conn, path, args.channel)
+        print(f"ingested {len(ids)} node(s) from {path} [channel={args.channel}]")
+        for nid in ids:
+            node = memdag.get_node(conn, nid)
+            print(
+                f"  [{nid}] {node['channel']:<13}"
+                f" integrity={memdag.NAME[node['label']]:<13}"
+                f" {len(node['content']):>6} chars"
+                f"  {node['source_ref'] or ''}"
+            )
+    except OSError as exc:
+        print(f"[memdag-ingest] {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_ingest_dir(args) -> None:
+    conn = memdag.get_connection()
+    try:
+        migrate(conn)
+        ids = ingest_dir(conn, args.dir, args.channel, glob=args.glob)
+        print(
+            f"ingested {len(ids)} node(s) from {args.dir}"
+            f" [channel={args.channel}, glob={args.glob}]"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[memdag-ingest] {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_ingest_url(args) -> None:
+    conn = memdag.get_connection()
+    try:
+        migrate(conn)
+        ids = ingest_url(conn, args.url)
+        print(f"ingested {len(ids)} node(s) from {args.url} [channel=external]")
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"[memdag-ingest] fetch failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def _cmd_ingest_text(args) -> None:
+    conn = memdag.get_connection()
+    try:
+        migrate(conn)
+        ids = ingest_text(conn, args.text, args.channel, source_ref=args.ref)
+        if not ids:
+            print("[memdag-ingest] empty text - nothing stored", file=sys.stderr)
+            sys.exit(1)
+        print(f"ingested {len(ids)} node(s) [channel={args.channel}]")
+        for nid in ids:
+            node = memdag.get_node(conn, nid)
+            print(
+                f"  [{nid}] {node['channel']:<13}"
+                f" integrity={memdag.NAME[node['label']]:<13}"
+                f" {len(node['content']):>6} chars"
+            )
+    finally:
+        conn.close()
+
+
+def register(subparsers) -> None:
+    """Mount ingest sub-commands onto an existing argparse subparsers object."""
+    # ingest <path> --channel <c>
+    p_ingest = subparsers.add_parser(
+        "ingest", help="ingest a single file into the DAG"
+    )
+    p_ingest.add_argument("path", help="path to file")
+    p_ingest.add_argument(
+        "--channel",
+        required=True,
+        choices=list(memdag.RANK.keys()),
+        help="channel to stamp the ingested node(s) with",
+    )
+    p_ingest.set_defaults(func=_cmd_ingest)
+
+    # ingest-dir <dir> --channel <c> [--glob G]
+    p_dir = subparsers.add_parser(
+        "ingest-dir", help="ingest all matching files in a directory tree"
+    )
+    p_dir.add_argument("dir", help="root directory")
+    p_dir.add_argument(
+        "--channel",
+        required=True,
+        choices=list(memdag.RANK.keys()),
+        help="channel to stamp the ingested node(s) with",
+    )
+    p_dir.add_argument(
+        "--glob",
+        default="*.md",
+        help="file glob pattern (default: *.md)",
+    )
+    p_dir.set_defaults(func=_cmd_ingest_dir)
+
+    # ingest-url <url>
+    p_url = subparsers.add_parser(
+        "ingest-url", help="fetch a URL and ingest the body (always external channel)"
+    )
+    p_url.add_argument("url", help="URL to fetch")
+    p_url.set_defaults(func=_cmd_ingest_url)
+
+    # ingest-text <text> --channel <c> [--ref R]
+    p_txt = subparsers.add_parser(
+        "ingest-text", help="ingest raw text directly (channel stamped by caller)"
+    )
+    p_txt.add_argument("text")
+    p_txt.add_argument(
+        "--channel",
+        required=True,
+        choices=list(memdag.RANK.keys()),
+    )
+    p_txt.add_argument("--ref", default=None, help="optional source reference")
+    p_txt.set_defaults(func=_cmd_ingest_text)
+
+
+def main(argv=None) -> None:
+    """Thin CLI wrapper — for direct invocation."""
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")
+        except AttributeError:
+            pass
+    p = argparse.ArgumentParser(prog="memdag-ingest")
+    sub = p.add_subparsers(dest="command", required=True)
+    register(sub)
+    args = p.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

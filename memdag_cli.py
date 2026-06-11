@@ -50,6 +50,9 @@ import memdag_llm
 import memdag_profile
 import memdag_gate
 import memdag_corroborate
+import memdag_ingest
+import memdag_retrieve
+import memdag_compact
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +77,9 @@ def migrate_all(conn):
     memdag_profile.migrate(conn)
     memdag_gate.migrate(conn)
     memdag_corroborate.migrate(conn)
+    memdag_ingest.migrate(conn)
+    memdag_retrieve.migrate(conn)
+    memdag_compact.migrate(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +106,7 @@ def _build_pool(conn, clearance_name):
         "   AND channel != 'agent-derived'"
         "   AND status != 'quarantined'"
         "   AND redacted = 0"
+        "   AND archived = 0"
         "   AND conf_label <= ?"
         " ORDER BY label DESC, id ASC",
         (clearance,)
@@ -151,6 +158,9 @@ def cmd_ask(args):
 
         clearance = args.clearance  # default 'topsecret' = no filter
         pool = _build_pool(conn, clearance)
+
+        if args.retrieve:
+            pool = memdag_retrieve.retrieve(conn, args.question, k=args.topk, clearance=clearance)
 
         # Count total sources for summary
         total_sources = conn.execute(
@@ -358,6 +368,10 @@ def main(argv=None):
                        help="use local Ollama LLM (opt-in; falls back to deterministic on error)")
     s_ask.add_argument("--model", default=None,
                        help="Ollama model name (overrides MEMDAG_LLM_MODEL)")
+    s_ask.add_argument("--retrieve", action="store_true",
+                       help="build the source pool via hybrid BM25+vector retrieval instead of all-live")
+    s_ask.add_argument("--topk", type=int, default=8,
+                       help="max results when using --retrieve (default 8)")
     s_ask.set_defaults(func=cmd_ask)
 
     # ---- Core explain ----
@@ -404,6 +418,9 @@ def main(argv=None):
     memdag_profile.register(sub)
     memdag_gate.register(sub)
     memdag_corroborate.register(sub)
+    memdag_ingest.register(sub)
+    memdag_retrieve.register(sub)
+    memdag_compact.register(sub)
 
     args = p.parse_args(argv)
     args.func(args)

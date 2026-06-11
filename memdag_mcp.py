@@ -172,6 +172,32 @@ TOOLS = [
             "required": ["id", "required"],
         },
     },
+    {
+        "name": "retrieve",
+        "description": "Hybrid BM25 + optional-vector ranked retrieval over live sources.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "description": "max results (default 8)"},
+                "clearance": {"type": "string"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "ingest_text",
+        "description": "Stamp and store raw text at a declared channel (channel set by transport, never inferred).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "channel": {"type": "string", "description": "endorsed|user|agent-derived|external"},
+                "source_ref": {"type": "string"},
+            },
+            "required": ["text", "channel"],
+        },
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -254,6 +280,20 @@ def _tool_argv(name, arguments):
 
     if name == "check_action":
         return ["check-action", str(arguments["id"]), "--require", str(arguments["required"])]
+
+    if name == "retrieve":
+        argv = ["retrieve", arguments["query"]]
+        if arguments.get("k") is not None:
+            argv += ["--k", str(arguments["k"])]
+        if arguments.get("clearance"):
+            argv += ["--clearance", str(arguments["clearance"])]
+        return argv
+
+    if name == "ingest_text":
+        argv = ["ingest-text", arguments["text"], "--channel", str(arguments["channel"])]
+        if arguments.get("source_ref"):
+            argv += ["--ref", str(arguments["source_ref"])]
+        return argv
 
     raise ValueError(f"unknown tool: {name!r}")
 

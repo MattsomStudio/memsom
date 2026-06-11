@@ -22,6 +22,7 @@ import memdag
 import memdag_quarantine
 import memdag_confid
 import memdag_cli
+import memdag_retrieve
 
 HERE = Path(__file__).resolve().parent
 
@@ -314,6 +315,107 @@ class TestCoreDelegation(Base):
         out = self.run_cli("revoke", str(src), "--yes")
         self.assertIn("done -", out)
         self.assertIn("0 rows deleted", out)
+
+
+class TestAskWithoutRetrieveUnchanged(Base):
+    """(9) ask without --retrieve produces identical output (existing behaviour preserved)."""
+
+    def test_ask_without_retrieve_unchanged(self):
+        self.add("Nebula static_host_map must point at the lighthouse.", "endorsed")
+        self.add("Use UDP port 4242 for nebula tunnels.", "user")
+        q = "How should I configure Nebula?"
+
+        # First ask — baseline
+        out1 = self.run_cli("ask", q)
+        self.assertIn("[mem:", out1)
+        self.assertIn("stored as node", out1)
+
+        # Revoke the derived node so we get a fresh identical result
+        derived = self.conn.execute(
+            "SELECT id FROM nodes WHERE channel='agent-derived' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if derived:
+            memdag.revoke_cascade(self.conn, derived[0], "reset for test")
+
+        # Second ask with no --retrieve flag — should produce the same citation pattern
+        out2 = self.run_cli("ask", q)
+        import re
+        cites1 = set(re.findall(r'\[mem:\d+\|\w[\w-]*\]', out1))
+        cites2 = set(re.findall(r'\[mem:\d+\|\w[\w-]*\]', out2))
+        self.assertEqual(cites1, cites2, "Citations must match when --retrieve is not used")
+
+
+class TestAskRetrieveUsesRankedPool(Base):
+    """(10) ask --retrieve --topk 2 with a focused query cites only relevant sources."""
+
+    def test_ask_retrieve_uses_ranked_pool(self):
+        # Add 3 nodes with distinct vocab
+        nid1 = self.add("Nebula lighthouse needs a public IP for UDP hole punching.", "endorsed")
+        nid2 = self.add("The static_host_map maps lighthouse names to their IP addresses.", "endorsed")
+        nid3 = self.add("Python decorators are syntactic sugar for higher-order functions.", "user")
+
+        # Build BM25 index
+        self.run_cli("reindex")
+
+        # ask --retrieve with a Nebula-specific query, topk=2
+        out = self.run_cli("ask", "--retrieve", "--topk", "2", "How does Nebula hole punching work?")
+
+        # The Python/decorator node (nid3) should NOT appear in the answer
+        import re
+        cited = set(re.findall(r'\[mem:(\d+)\|', out))
+        self.assertNotIn(str(nid3), cited,
+                         "Unrelated node should not be cited when using --retrieve")
+
+
+class TestAskRetrieveEmptyPoolExits1(Base):
+    """(11) ask --retrieve on an empty (unindexed) corpus -> exit 1, stderr, nothing stored."""
+
+    def test_ask_retrieve_empty_pool_exits_1(self):
+        # Do NOT add any nodes — pool is empty, retrieve() returns []
+        # (no postings exist so BM25 returns []; no embeddings so vector returns [])
+        os.environ["MEMDAG_EMBED_URL"] = "http://127.0.0.1:9/api/embeddings"
+        try:
+            out, err, code = self.run_cli_stderr("ask", "--retrieve", "Nebula lighthouse config")
+            self.assertEqual(code, 1)
+            self.assertIn("no live sources", err)
+
+            # Nothing stored
+            agents = self.conn.execute(
+                "SELECT COUNT(*) FROM nodes WHERE channel='agent-derived'"
+            ).fetchone()[0]
+            self.assertEqual(agents, 0)
+        finally:
+            os.environ.pop("MEMDAG_EMBED_URL", None)
+
+
+class TestSpineSubcommandsParse(Base):
+    """(12) compact / retrieve / ingest-text parse cleanly via re-registered parser."""
+
+    def test_spine_subcommands_parse(self):
+        import argparse
+        import memdag_ingest
+        import memdag_compact
+
+        p = argparse.ArgumentParser(prog="memdag_test_spine")
+        sub = p.add_subparsers(dest="command", required=True)
+        memdag_ingest.register(sub)
+        memdag_retrieve.register(sub)
+        memdag_compact.register(sub)
+
+        # compact
+        args = p.parse_args(["compact"])
+        self.assertEqual(args.command, "compact")
+
+        # retrieve
+        args = p.parse_args(["retrieve", "some query"])
+        self.assertEqual(args.command, "retrieve")
+        self.assertEqual(args.query, "some query")
+
+        # ingest-text
+        args = p.parse_args(["ingest-text", "hello world", "--channel", "user"])
+        self.assertEqual(args.command, "ingest-text")
+        self.assertEqual(args.text, "hello world")
+        self.assertEqual(args.channel, "user")
 
 
 if __name__ == "__main__":

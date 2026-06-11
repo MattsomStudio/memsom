@@ -64,10 +64,10 @@ class TestHandleInProcess(Base):
         self.assertIn("name", si)
         self.assertIn("version", si)
 
-    def test_tools_list_returns_12_tools(self):
+    def test_tools_list_returns_14_tools(self):
         resp = memdag_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
-        self.assertEqual(len(tools), 12)
+        self.assertEqual(len(tools), 14)
         names = {t["name"] for t in tools}
         self.assertEqual(names, memdag_mcp.TOOL_NAMES)
 
@@ -127,6 +127,58 @@ class TestHandleInProcess(Base):
             "method": "some/notification",
         })
         self.assertIsNone(resp)
+
+    def test_tools_call_ingest_text_stores_node(self):
+        """ingest_text tool stores a node at the declared channel; isError false."""
+        resp = memdag_mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "ingest_text",
+                "arguments": {
+                    "text": "Nebula requires a lighthouse node with a reachable public IP.",
+                    "channel": "endorsed",
+                    "source_ref": "mcp_test_ref",
+                },
+            },
+        })
+        self.assertFalse(resp["result"]["isError"],
+                         f"ingest_text returned error: {resp['result']['content'][0]['text']}")
+        # The node should now be in the DB
+        row = self.conn.execute(
+            "SELECT id, channel FROM nodes WHERE source_ref = 'mcp_test_ref'"
+        ).fetchone()
+        self.assertIsNotNone(row, "ingest_text should have stored a node")
+        self.assertEqual(row[1], "endorsed")
+
+    def test_tools_call_retrieve_returns_hits(self):
+        """retrieve tool returns text containing a [N] citation after seeding + reindex."""
+        import memdag_cli
+        # Seed two nodes via CLI
+        memdag_cli.main(["add", "Nebula uses UDP port 4242 for overlay tunnels.", "--channel", "endorsed"])
+        memdag_cli.main(["add", "Configure the Nebula lighthouse static_host_map entry.", "--channel", "user"])
+        # Build BM25 index
+        memdag_cli.main(["reindex"])
+        # Call retrieve via MCP
+        resp = memdag_mcp.handle({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {
+                "name": "retrieve",
+                "arguments": {"query": "Nebula lighthouse"},
+            },
+        })
+        self.assertFalse(resp["result"]["isError"],
+                         f"retrieve returned error: {resp['result']['content'][0]['text']}")
+        text = resp["result"]["content"][0]["text"]
+        # Should contain at least one [N] citation
+        import re
+        self.assertTrue(
+            bool(re.search(r'\[\d+\]', text)),
+            f"retrieve output should contain a [N] citation; got: {text!r}",
+        )
 
 
 # ---------------------------------------------------------------------------
