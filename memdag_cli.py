@@ -17,7 +17,7 @@ Subcommands (38 total):
     memdag_federation -> export import
     memdag_blame      -> blame
     memdag_relate     -> relate neighborhood
-    memdag_anticipatory -> observe prefetch
+    memdag_anticipatory -> observe prefetch anticipate-status
     memdag_distill    -> export-training distill-plan
     memdag_heal       -> check rebuild-derived
     memdag_trust      -> elevate meet join elevations
@@ -186,11 +186,33 @@ def cmd_ask(args):
         created = True
 
         if args.anticipate:
-            # surprise_gated: cite existing if low-novelty, else derive new
+            # Phase 2: serve a warm prefetched answer on an exact query match.
+            # serve_warm re-validates the cached node against the untainted
+            # filter (tombstoned/redacted/quarantined/archived/external-tainted/
+            # above-clearance all refuse) — a stale or poisoned cache entry is
+            # dropped, never served.
+            warm = memdag_anticipatory.serve_warm(conn, args.question,
+                                                  clearance=clearance)
+            if warm is not None:
+                memdag_anticipatory.observe(conn, args.question, warm["node_id"])
+                print(warm["content"])
+                print(
+                    f"\nserved WARM from prefetch cache: node [{warm['node_id']}]"
+                    f" | integrity: {memdag.NAME[warm['label']]}"
+                    f" | prefetched {warm['prefetched_at']} | hits {warm['hits']}"
+                )
+                p = memdag_profile.profile(conn, warm["node_id"])
+                print(memdag_profile.format_profile(p))
+                return
+
+            # surprise_gated_write: semantic dedup — cite existing if
+            # low-novelty (BM25-IDF cosine + optional Ollama vectors over the
+            # untainted derived corpus), else derive new (label = min(parents)).
             threshold = args.threshold
             try:
-                nid, created, score = memdag_anticipatory.surprise_gated(
-                    conn, args.question, threshold=threshold, sources=pool
+                nid, created, score = memdag_anticipatory.surprise_gated_write(
+                    conn, args.question, threshold=threshold, sources=pool,
+                    clearance=clearance
                 )
             except ValueError:
                 print(
@@ -222,6 +244,20 @@ def cmd_ask(args):
                     f" | sources considered: {total_sources}, used: {len(used_ids)},"
                     f" excluded: {excl_total} ({excl_detail})"
                 )
+                # Phase 2: episode-recombination warning — flag a parent SET
+                # that has never produced a derived node before.
+                parent_ids = [r[0] for r in conn.execute(
+                    "SELECT parent FROM edges WHERE child = ?", (nid,)
+                ).fetchall()]
+                is_novel, prior = memdag_anticipatory.novel_recombination(
+                    conn, parent_ids, exclude_node=nid, clearance=clearance
+                )
+                if is_novel:
+                    print("new inference: this combination of sources has"
+                          " not been seen before.")
+                else:
+                    seen = ", ".join(f"[{p_}]" for p_ in prior)
+                    print(f"combination previously derived in node(s): {seen}")
                 p = memdag_profile.profile(conn, nid)
                 print(memdag_profile.format_profile(p))
             return

@@ -436,5 +436,58 @@ class TestSpineSubcommandsParse(Base):
         self.assertEqual(args.channel, "user")
 
 
+class TestAnticipatoryPhase2Cli(Base):
+    """Phase 2: warm prefetch serving, recombination warning, anticipate-status."""
+
+    def setUp(self):
+        super().setUp()
+        # Deterministic + fast: no vector path even if local Ollama is up
+        os.environ["MEMDAG_EMBED_URL"] = "invalid://embeddings-disabled"
+
+    def tearDown(self):
+        os.environ.pop("MEMDAG_EMBED_URL", None)
+        super().tearDown()
+
+    def test_prefetch_then_ask_anticipate_serves_warm(self):
+        self.add("Nebula static_host_map must point at the lighthouse.", "endorsed")
+        q = "How should I configure the Nebula lighthouse?"
+
+        self.run_cli("observe", q)
+        self.run_cli("observe", q)
+        out_pre = self.run_cli("prefetch", "--k", "1")
+        self.assertIn("+warm", out_pre)
+        self.assertIn("prefetch cache: 1 entry", out_pre)
+
+        count_before = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE channel='agent-derived'"
+        ).fetchone()[0]
+
+        out = self.run_cli("ask", "--anticipate", q)
+        self.assertIn("served WARM from prefetch cache", out)
+        self.assertIn("[mem:", out)  # honest provenance citations in the body
+
+        count_after = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE channel='agent-derived'"
+        ).fetchone()[0]
+        self.assertEqual(count_before, count_after,
+                         "a warm hit must not mint a new node")
+
+    def test_anticipate_new_mint_flags_novel_recombination(self):
+        self.add("Nebula static_host_map must point at the lighthouse.", "endorsed")
+        self.add("Use UDP port 4242 for nebula tunnels.", "user")
+        out = self.run_cli("ask", "--anticipate", "How should I configure Nebula?")
+        self.assertIn("stored as node", out)
+        self.assertIn("new inference: this combination of sources has not been seen before.",
+                      out)
+
+    def test_anticipate_status_smoke(self):
+        self.run_cli("observe", "how do I rotate Nebula certs?")
+        self.run_cli("observe", "how do I rotate Nebula certs?")
+        out = self.run_cli("anticipate-status")
+        self.assertIn("query log: 2 row(s), 1 distinct query", out)
+        self.assertIn("how do I rotate Nebula certs?", out)
+        self.assertIn("prefetch cache: empty", out)
+
+
 if __name__ == "__main__":
     unittest.main()

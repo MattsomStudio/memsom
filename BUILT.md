@@ -248,3 +248,72 @@ fixed at the caller layer. Suite: **372 passing, 0 failures** (was 357).
   hard-locked to `external` and is always under any ceiling. Enforced once in
   `memdag_ingest.enforce_channel_ceiling()` (shared by all paths).
   Regression: `test_memdag_ingest.TestChannelCeiling`.
+
+---
+
+## Anticipatory (Phase 2) — retrieval-backed coprocess (2026-06-11)
+
+Turns the `memdag_anticipatory` stub (Jaccard novelty, observe-only prefetch)
+into a real coprocess on top of the spine. `memdag.py` / `test_memdag.py`
+stayed frozen; default `ask` (no `--anticipate`) is byte-identical. Suite:
+**394 passing, 0 failures** (was 372).
+
+**THE security property (why taint precedes anticipatory):** the coprocess
+reads/learns/prefetches ONLY from untainted memory. Every corpus it touches
+goes through `_untainted_clauses()` — mirroring the spine's pool filters —
+which excludes `tombstoned=1`, `redacted=1`, `status='quarantined'`,
+`archived=1`, above-clearance (`conf_label`), plus `label > 0` on the derived
+corpus so EXTERNAL-tainted derivations (the ones the consolidation gate
+quarantines) are refused directly as defense in depth. It never elevates
+trust: every mint goes through the frozen `memdag.derive_node`
+(label = min(parents), honest provenance edges), and warm answers are
+RE-validated against the same filter at serve time. Proven by
+`test_memdag_anticipatory.TestCoprocessNeverTouchesTainted` (six tests:
+poisoned sources out of the pool; poisoned derived answers vanish from the
+surprise corpus and are never cited; above-clearance answers invisible below
+clearance; external-tainted derivations never cited, cached, or served warm —
+even via a forced cache row; prefetch never composes from a quarantined
+source; recombination never lists a tainted prior).
+
+- **Real surprise + surprise-gated writes** (`surprise`, `rank_similar`,
+  `surprise_gated_write`). Novelty against the untainted corpus via
+  BM25-IDF-weighted TF cosine over `memdag_retrieve.tokenize` stems (stdlib,
+  deterministic), refined by Ollama vector cosine on the top-k lexical
+  candidates when reachable (per-node sim = max(lexical, vector); Ollama down
+  -> lexical-only, never a crash). `surprise_gated_write` is SEMANTIC dedup on
+  the write path — a reworded question whose composition differs in bytes
+  (different content hash) still CITES the existing node instead of minting a
+  duplicate (`TestSemanticDedupBeyondExactHash`). Old API preserved:
+  `surprise_gated` delegates; legacy Jaccard `novelty()` kept. CLI: `ask
+  --anticipate` upgraded in place (also clearance-aware now — the derived
+  comparison corpus previously ignored clearance).
+
+- **Real prefetch (warm cache)** (`prefetch`, `serve_warm`; additive
+  `prefetch_cache` table: query UNIQUE, answer_node, created_at, hits,
+  last_served). Top-k queries by `query_log` frequency+recency; pool built by
+  real `memdag_retrieve.retrieve()` (untainted by construction; falls back to
+  the full untainted pool when the BM25 index is empty); answers minted/cited
+  via `surprise_gated_write` and cached ONLY if the answer node itself passes
+  the untainted-derived filter. `ask --anticipate` serves an exact-match warm
+  hit ("served WARM from prefetch cache", with prefetch timestamp + hits) and
+  logs the hit to `query_log`. Stale/poisoned cache rows are dropped at serve
+  time, never served.
+
+- **Episode-recombination warning** (`novel_recombination(parent_ids)`).
+  Deterministic over the edges history: a prior derivation counts only if its
+  parent set EQUALS the probe set (subset/superset are different
+  combinations) and the prior node is itself untainted. `ask --anticipate`
+  prints "new inference: this combination of sources has not been seen
+  before." on a first-time parent-set, or lists the precedent node ids.
+
+- **Observe + status surface.** `observe` unchanged; new `status()` +
+  `anticipate-status` CLI showing query-log totals, top queries, and every
+  cache row with its serve-time validity (stale rows flagged "STALE (will not
+  serve)"). `prefetch` CLI gained `--clearance` and a cache summary line.
+
+- **Scoped down, deliberately:** warm hits are exact-string query matches (no
+  fuzzy matching — deterministic, no false serves); derived-node embeddings
+  are computed on the fly for the top-k candidates rather than persisted in
+  the `embeddings` table (keeps the source-only index invariant); surprise's
+  vector arm is uncalibrated max(lex, vec) — threshold tuning on real corpora
+  is future work.
