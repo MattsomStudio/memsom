@@ -1,0 +1,14 @@
+# runtime / generated databases (carry seeded vault content — never commit)
+*.db
+*.db-journal
+*.sqlite
+__pycache__/
+*.pyc
+
+# build orchestration (internal scaffolding, machine-specific paths)
+_build/
+
+# distill artifacts — regenerate per-machine via `distill-plan` / `export-training`
+training.jsonl
+distill_config.json
+distill.ps1

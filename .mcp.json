@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "memdag": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["C:\\Users\\you\\memdag\\memdag_mcp.py"],
+      "env": {}
+    }
+  }
+}
