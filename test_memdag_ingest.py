@@ -627,5 +627,68 @@ class TestFrozenCoreCompat(Base):
         self.assertIsNone(row[0])
 
 
+# ---------------------------------------------------------------------------
+# F-14 / F-13: caller-layer trust guards
+# ---------------------------------------------------------------------------
+
+
+class TestChannelLabelLock(Base):
+    """F-14 (AUDIT 2026-06-11): a source node's label is pinned to its channel."""
+
+    def test_authoritative_label_matches_channel(self):
+        for ch, rank in memdag.RANK.items():
+            self.assertEqual(memdag_ingest.authoritative_label(ch), rank)
+        with self.assertRaises(ValueError):
+            memdag_ingest.authoritative_label("superuser")
+
+    def test_ingest_text_stamps_channel_label_not_caller_label(self):
+        """No ingest path can produce a node whose label != RANK[channel]."""
+        for ch in ("external", "user", "endorsed"):
+            ids = memdag_ingest.ingest_text(
+                self.conn, f"some {ch} content line about nebula", ch)
+            for nid in ids:
+                node = memdag.get_node(self.conn, nid)
+                self.assertEqual(node["channel"], ch)
+                self.assertEqual(node["label"], memdag.RANK[ch],
+                                 f"{ch} node must carry label RANK[{ch}]")
+
+
+class TestChannelCeiling(Base):
+    """F-13 (AUDIT 2026-06-11): optional channel ceiling, permissive by default."""
+
+    def tearDown(self):
+        os.environ.pop(memdag_ingest.CHANNEL_CEILING_ENV, None)
+        super().tearDown()
+
+    def test_default_is_permissive(self):
+        self.assertIsNone(memdag_ingest.channel_ceiling())
+        # endorsed allowed when no ceiling set
+        ids = memdag_ingest.ingest_text(self.conn, "endorsed line one two", "endorsed")
+        self.assertEqual(len(ids), 1)
+
+    def test_ceiling_blocks_over_rank_channel(self):
+        os.environ[memdag_ingest.CHANNEL_CEILING_ENV] = "user"
+        self.assertEqual(memdag_ingest.channel_ceiling(), memdag.RANK["user"])
+        # user and below are fine
+        self.assertEqual(memdag_ingest.enforce_channel_ceiling("user"), "user")
+        self.assertEqual(memdag_ingest.enforce_channel_ceiling("external"), "external")
+        # endorsed exceeds the ceiling -> refused
+        with self.assertRaises(ValueError):
+            memdag_ingest.enforce_channel_ceiling("endorsed")
+        with self.assertRaises(ValueError):
+            memdag_ingest.ingest_text(self.conn, "attacker endorsed text", "endorsed")
+
+    def test_ceiling_accepts_numeric_value(self):
+        os.environ[memdag_ingest.CHANNEL_CEILING_ENV] = "1"
+        self.assertEqual(memdag_ingest.channel_ceiling(), 1)
+        with self.assertRaises(ValueError):
+            memdag_ingest.enforce_channel_ceiling("user")  # rank 2 > 1
+
+    def test_ceiling_invalid_value_raises(self):
+        os.environ[memdag_ingest.CHANNEL_CEILING_ENV] = "bogus"
+        with self.assertRaises(ValueError):
+            memdag_ingest.channel_ceiling()
+
+
 if __name__ == "__main__":
     unittest.main()

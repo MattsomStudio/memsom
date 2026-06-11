@@ -89,6 +89,17 @@ def redact_node(conn, nid, reason, cascade=True):
             if changed:
                 redacted_ids.append(tid)
 
+    # F-15: purge the retrieval index (postings/docstats/embeddings) for every
+    # node whose payload was just destroyed, so a stale BM25/vector posting can't
+    # surface the node id after redaction. Best-effort: retrieval is optional.
+    if redacted_ids:
+        try:
+            import memdag_retrieve  # noqa: PLC0415
+            for tid in redacted_ids:
+                memdag_retrieve.deindex_node(conn, tid)
+        except Exception:  # noqa: BLE001
+            pass
+
     # Record redaction EVENTS for any redacted node carrying a federation uuid,
     # so the redaction propagates as a first-class record (F-07 closeable part).
     if redacted_ids and memdag_schema.column_exists(conn, 'nodes', 'uuid'):

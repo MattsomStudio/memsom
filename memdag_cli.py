@@ -282,9 +282,18 @@ def cmd_add(args):
     conn = memdag.get_connection()
     try:
         migrate_all(conn)
+        # Caller-layer trust guards: enforce the optional channel ceiling (F-13)
+        # and pin the integrity label to the channel (F-14) so a mismatched label
+        # can never be stamped through the `add` path.
+        try:
+            memdag_ingest.enforce_channel_ceiling(args.channel)
+            label = memdag_ingest.authoritative_label(args.channel)
+        except ValueError as exc:
+            print(f"[memdag] {exc}", file=sys.stderr)
+            sys.exit(1)
         with conn:
             nid = memdag.insert_node(conn, args.content, args.channel,
-                                     source_ref=args.ref)
+                                     label=label, source_ref=args.ref)
         node = memdag.get_node(conn, nid)
         print(f"[{nid}] {node['channel']:<13} integrity={memdag.NAME[node['label']]:<13}"
               f" {len(node['content']):>6} chars")
@@ -320,6 +329,13 @@ def cmd_explain(args):
     conn = memdag.get_connection()
     try:
         migrate_all(conn)
+        # F-16: the frozen explain renders a redacted node as an empty snippet,
+        # indistinguishable from a genuinely empty node. Surface an explicit
+        # [REDACTED] marker (with date + reason) via the redact module's describe().
+        with contextlib.suppress(ValueError):
+            if memdag_redact.is_redacted(conn, args.id):
+                for line in memdag_redact.describe(conn, args.id):
+                    print(line)
         with contextlib.suppress(ValueError):
             p = memdag_profile.profile(conn, args.id)
             print(memdag_profile.format_profile(p))

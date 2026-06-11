@@ -14,6 +14,8 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memdag
 import memdag_confid
+import memdag_compact
+import memdag_retrieve
 
 HERE = Path(__file__).resolve().parent
 
@@ -293,6 +295,96 @@ class TestCli(Base):
         memdag.derive_node(self.conn, "derived answer node text", [n])
         out = self.run_main("conf-recompute", "--all")
         self.assertIn("nothing changed", out)
+
+
+# ---------------------------------------------------------------------------
+# 8. Bypass-2G/2H: archived-parent conf laundering is blocked
+# ---------------------------------------------------------------------------
+
+class TestArchivedConfLaunderingBlocked(Base):
+    """Operator-class regression for Bypass-2G/2H (AUDIT 2026-06-11).
+
+    Compact two SECRET episodes into a summary, then try to declassify the
+    now-archived source parents to PUBLIC and re-run recompute_conf. The
+    summary must stay SECRET and no SECRET content may surface at public
+    clearance.
+    """
+
+    def setUp(self):
+        super().setUp()
+        memdag_compact.migrate(self.conn)
+        memdag_retrieve.migrate(self.conn)
+
+    def test_classify_archived_parents_cannot_launder_summary(self):
+        s1 = memdag.insert_node(
+            self.conn, "Secret eta: master-crypto-key-ZZ never distribute", "user")
+        s2 = memdag.insert_node(
+            self.conn, "Secret theta: master-crypto-key-WW never distribute backup", "user")
+        memdag_confid.classify(self.conn, s1, "secret")
+        memdag_confid.classify(self.conn, s2, "secret")
+
+        minted = memdag_compact.compact(
+            self.conn, group_by="similarity", min_group=2, sim_threshold=0.0)
+        self.assertTrue(minted)
+        nid = minted[0]
+        self.assertEqual(self.get_conf(nid), 2)  # summary born SECRET (high-water)
+
+        # Both sources are now archived. Downgrading them must be refused.
+        for sid in (s1, s2):
+            self.assertEqual(
+                self.conn.execute(
+                    "SELECT archived FROM nodes WHERE id=?", (sid,)).fetchone()[0], 1)
+            with self.assertRaises(ValueError):
+                memdag_confid.classify(self.conn, sid, "public")
+            self.assertEqual(self.get_conf(sid), 2)  # unchanged
+
+        # Even after a recompute pass the summary stays SECRET (parents still 2).
+        memdag_confid.recompute_conf(self.conn, nid)
+        self.assertEqual(self.get_conf(nid), 2)
+
+        # sources_for_clearance(public) must not surface the archived sources.
+        pub = memdag_confid.sources_for_clearance(self.conn, "public")
+        self.assertNotIn(s1, pub)
+        self.assertNotIn(s2, pub)
+
+    def test_archived_node_can_still_be_raised(self):
+        """The guard only blocks DOWNGRADES — raising an archived node is allowed."""
+        s = memdag.insert_node(self.conn, "internal alpha note one two three", "user")
+        memdag_confid.classify(self.conn, s, "internal")  # 1
+        memdag.insert_node(self.conn, "internal alpha note one two four", "user")
+        # second source so a group of >=2 forms on shared tokens
+        for extra in self.conn.execute(
+                "SELECT id FROM nodes WHERE channel='user'").fetchall():
+            memdag_confid.classify(self.conn, extra[0], "internal")
+        memdag_compact.compact(self.conn, group_by="similarity",
+                               min_group=2, sim_threshold=0.0)
+        # s is archived now; raising it to secret is fine
+        memdag_confid.classify(self.conn, s, "secret")
+        self.assertEqual(self.get_conf(s), 2)
+
+    def test_retrieve_public_never_surfaces_secret_after_launder_attempt(self):
+        s1 = memdag.insert_node(
+            self.conn, "Secret iota final-key-alpha-99 never distribute anywhere", "user")
+        s2 = memdag.insert_node(
+            self.conn, "Secret kappa final-key-beta-88 never distribute anywhere", "user")
+        memdag_confid.classify(self.conn, s1, "secret")
+        memdag_confid.classify(self.conn, s2, "secret")
+        minted = memdag_compact.compact(
+            self.conn, group_by="similarity", min_group=2, sim_threshold=0.0)
+        nid = minted[0]
+        memdag_retrieve.index_node(self.conn, s1)
+        memdag_retrieve.index_node(self.conn, s2)
+        memdag_retrieve.index_node(self.conn, nid)
+
+        # Launder attempt (each classify raises, swallow it) + recompute.
+        for sid in (s1, s2):
+            with contextlib.suppress(ValueError):
+                memdag_confid.classify(self.conn, sid, "public")
+        memdag_confid.recompute_conf(self.conn, nid)
+
+        results = memdag_retrieve.retrieve(
+            self.conn, "final-key distribute", clearance="public", k=10)
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":

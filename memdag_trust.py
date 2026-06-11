@@ -165,13 +165,22 @@ def elevate(conn, nid, to_label, reason, by, force=False):
     if to_int < from_int:
         raise ValueError("elevate only raises; lowering is what recompute/revoke are for")
 
-    # Policy: external(0) -> endorsed(3) requires --force
-    if from_int == 0 and to_int == 3 and not force:
+    # Policy: an external-origin node reaching ENDORSED(3) requires --force.
+    # KEY ON THE IMMUTABLE CHANNEL, not the current (mutable) label.  Keying on
+    # from_int let a stepwise 0->1->2->3 walk slip past the gate entirely (F-08):
+    # once the node moved to label 1 the single-hop check never fired again.
+    # channel never changes post-insert, so the cumulative distance from the
+    # node's channel-natural rank is what matters — whether reached in one hop or
+    # several, an external node landing on ENDORSED needs force + a forced=1 row.
+    chan_rank = memdag.RANK.get(node["channel"], from_int)
+    needs_force = (chan_rank == 0 and to_int == 3)
+    if needs_force and not force:
         raise ValueError(
-            "external -> endorsed jump blocked: elevate stepwise, or pass --force (logged)"
+            "external -> endorsed blocked: this node's channel is external; "
+            "reaching ENDORSED requires --force (logged as forced=1)"
         )
 
-    forced_int = 1 if (from_int == 0 and to_int == 3) else 0
+    forced_int = 1 if needs_force else 0
     ts = memdag.now_iso()
 
     # Apply in one transaction: UPDATE nodes + INSERT elevation audit row

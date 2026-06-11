@@ -76,11 +76,29 @@ def classify(conn: sqlite3.Connection, nid: int, level) -> None:
     Raises ValueError for unknown id or bad level.
     Works on any channel — sources are classification roots; derived nodes can
     also be manually classified (overridable later by recompute_conf).
+
+    Bypass-2G guard (conf-laundering): an *archived* node is frozen — it has
+    already been consolidated into one or more derived summary nodes whose
+    confidentiality is the high-water mark of these very parents.  Lowering an
+    archived source's conf would let the next recompute_conf drag the
+    SECRET-derived summary down to PUBLIC.  Archived nodes therefore accept
+    raises but REFUSE any downgrade.  (Live, non-archived sources remain freely
+    reclassifiable by the operator — that is the legitimate classification root.)
     """
     level = parse_conf(level)
     node = memdag.get_node(conn, nid)
     if node is None:
         raise ValueError(f"unknown node id {nid}")
+    row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
+    current = row[0]
+    if level < current and memdag_schema.column_exists(conn, "nodes", "archived"):
+        arow = conn.execute("SELECT archived FROM nodes WHERE id = ?", (nid,)).fetchone()
+        if arow and arow[0]:
+            raise ValueError(
+                f"cannot lower confidentiality on archived node {nid} "
+                f"({CONF_NAME[current]} -> {CONF_NAME[level]}): archived nodes are "
+                f"frozen — downgrading them would launder a derived summary"
+            )
     with conn:
         conn.execute("UPDATE nodes SET conf_label = ? WHERE id = ?", (level, nid))
 
@@ -172,10 +190,16 @@ def sources_for_clearance(conn: sqlite3.Connection, clearance) -> list:
     Clearance is parsed via parse_conf (int 0-3 or string name).
     """
     clearance = parse_conf(clearance)
+    # Defense-in-depth (Bypass-2G): archived nodes are consolidated-away and must
+    # never re-enter a clearance read pool — exclude them when the column exists.
+    archived_clause = ""
+    if memdag_schema.column_exists(conn, "nodes", "archived"):
+        archived_clause = " AND archived = 0"
     rows = conn.execute(
         "SELECT id FROM nodes "
-        "WHERE tombstoned = 0 AND channel != 'agent-derived' AND conf_label <= ? "
-        "ORDER BY id",
+        "WHERE tombstoned = 0 AND channel != 'agent-derived' AND conf_label <= ?"
+        + archived_clause +
+        " ORDER BY id",
         (clearance,)
     ).fetchall()
     return [r[0] for r in rows]

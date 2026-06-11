@@ -23,6 +23,7 @@ import memdag_confid
 import memdag_quarantine
 import memdag_redact
 import memdag_retrieve
+import memdag_schema
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +508,52 @@ class TestRetrieve(Base):
         with patch.object(memdag_retrieve, "_call_ollama_embed", _no_embed):
             results = memdag_retrieve.retrieve(self.conn, "anything", k=5)
         self.assertEqual(results, [])
+
+    # F-15: redaction must purge the retrieval index and never surface the node,
+    # even via the non-default exclude_redacted=False path (fail-safe).
+    def test_redaction_deindexes_and_never_surfaces(self):
+        nid = self.add("ultrasecret missile launch code foxtrot niner", "user")
+
+        def _no_embed(*a, **kw):
+            raise OSError("down")
+        with patch.object(memdag_retrieve, "_call_ollama_embed", _no_embed):
+            memdag_retrieve.index_node(self.conn, nid)
+            before = self.conn.execute(
+                "SELECT COUNT(*) FROM postings WHERE node_id=?", (nid,)).fetchone()[0]
+            self.assertGreater(before, 0)
+
+            # Redact -> the redact cascade calls deindex_node
+            memdag_redact.redact_node(self.conn, nid, "test redact")
+
+            after = self.conn.execute(
+                "SELECT COUNT(*) FROM postings WHERE node_id=?", (nid,)).fetchone()[0]
+            self.assertEqual(after, 0, "postings must be purged on redaction")
+            doc = self.conn.execute(
+                "SELECT COUNT(*) FROM docstats WHERE node_id=?", (nid,)).fetchone()[0]
+            self.assertEqual(doc, 0)
+
+            # Even the widened flag must not leak the redacted node id.
+            leaky = memdag_retrieve.retrieve(
+                self.conn, "missile launch code foxtrot", k=5, exclude_redacted=False)
+        self.assertNotIn(nid, [r[0] for r in leaky])
+
+    def test_deindex_node_no_op_without_schema(self):
+        """deindex_node must never create retrieval tables when they don't exist."""
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db = Path(tmp.name) / "bare.db"
+            os.environ["MEMDAG_DB"] = str(db)
+            conn = memdag.get_connection()
+            try:
+                nid = memdag.insert_node(conn, "x", "user", memdag.RANK["user"])
+                memdag_retrieve.deindex_node(conn, nid)  # must not raise / create tables
+                self.assertFalse(
+                    memdag_schema.table_exists(conn, "postings"))
+            finally:
+                conn.close()
+        finally:
+            os.environ.pop("MEMDAG_DB", None)
+            tmp.cleanup()
 
     def test_retrieve_result_shape(self):
         """Each result row must be (id, content, channel, label, source_ref)."""

@@ -58,6 +58,68 @@ import memdag_schema
 
 _DEFAULT_CHUNK_CHARS = 1200
 
+# F-13: optional channel ceiling. The operator is the trust authority for this
+# single-user tool, so the default (env unset) is permissive. When set, it caps
+# the highest channel any stamping entry point (CLI add/ingest, MCP ingest_text)
+# may declare — e.g. MEMDAG_CHANNEL_CEILING=user disallows stamping `endorsed`
+# from these untrusted-by-policy entry points. ingest-url is already hard-locked
+# to external and is therefore always under any ceiling.
+CHANNEL_CEILING_ENV = "MEMDAG_CHANNEL_CEILING"
+
+
+# ---------------------------------------------------------------------------
+# Caller-layer trust guards (F-13 channel ceiling, F-14 channel/label lock)
+# ---------------------------------------------------------------------------
+
+
+def authoritative_label(channel: str) -> int:
+    """F-14: a SOURCE node's integrity label is dictated SOLELY by its channel.
+
+    The frozen insert_node() accepts an explicit label that may disagree with
+    the channel; this is the caller-layer enforcement point. Entry points stamp
+    RANK[channel] and never a caller-supplied label, so a channel/label mismatch
+    cannot be injected through add/ingest. Raises ValueError on unknown channel.
+    """
+    if channel not in memdag.RANK:
+        raise ValueError(f"unknown channel: {channel!r}")
+    return memdag.RANK[channel]
+
+
+def channel_ceiling():
+    """Return the configured max channel RANK (int 0-3) or None if unset/permissive."""
+    raw = os.environ.get(CHANNEL_CEILING_ENV)
+    if raw is None or not raw.strip():
+        return None
+    key = raw.strip().lower()
+    if key in memdag.RANK:
+        return memdag.RANK[key]
+    try:
+        v = int(key)
+    except ValueError:
+        raise ValueError(
+            f"invalid {CHANNEL_CEILING_ENV}={raw!r}: expected a channel name or 0-3"
+        ) from None
+    if v not in memdag.NAME:
+        raise ValueError(f"{CHANNEL_CEILING_ENV} out of range 0-3: {v}")
+    return v
+
+
+def enforce_channel_ceiling(channel: str) -> str:
+    """F-13: reject *channel* if a ceiling is configured and the channel exceeds it.
+
+    Default (no ceiling configured) is permissive — returns the channel unchanged.
+    Raises ValueError on an unknown channel or a ceiling violation.
+    """
+    if channel not in memdag.RANK:
+        raise ValueError(f"unknown channel: {channel!r}")
+    ceil = channel_ceiling()
+    if ceil is not None and memdag.RANK[channel] > ceil:
+        raise ValueError(
+            f"channel {channel!r} (rank {memdag.RANK[channel]}) exceeds "
+            f"{CHANNEL_CEILING_ENV}={ceil} ({memdag.NAME[ceil]}); refused by entry-point policy"
+        )
+    return channel
+
 # ---------------------------------------------------------------------------
 # Migration
 # ---------------------------------------------------------------------------
@@ -200,6 +262,11 @@ def ingest_text(
     """
     migrate(conn)
 
+    # Caller-layer trust guards: refuse an over-ceiling channel (F-13) and pin the
+    # integrity label to the channel (F-14) — never trust a caller-supplied label.
+    enforce_channel_ceiling(channel)
+    label = authoritative_label(channel)
+
     if not chunk or len(text) <= chunk_chars:
         chunks = [text.strip()] if text.strip() else []
     else:
@@ -228,7 +295,8 @@ def ingest_text(
             ref = source_ref  # keep None as None for single-chunk text
 
         with conn:
-            nid = memdag.insert_node(conn, chunk_text, channel, source_ref=ref)
+            nid = memdag.insert_node(conn, chunk_text, channel,
+                                     label=label, source_ref=ref)
             conn.execute(
                 "UPDATE nodes SET content_hash = ? WHERE id = ?", (h, nid)
             )
@@ -307,7 +375,11 @@ def _cmd_ingest(args) -> None:
     try:
         migrate(conn)
         path = Path(args.path)
-        ids = ingest_file(conn, path, args.channel)
+        try:
+            ids = ingest_file(conn, path, args.channel)
+        except ValueError as exc:
+            print(f"[memdag-ingest] {exc}", file=sys.stderr)
+            sys.exit(1)
         print(f"ingested {len(ids)} node(s) from {path} [channel={args.channel}]")
         for nid in ids:
             node = memdag.get_node(conn, nid)
@@ -357,7 +429,11 @@ def _cmd_ingest_text(args) -> None:
     conn = memdag.get_connection()
     try:
         migrate(conn)
-        ids = ingest_text(conn, args.text, args.channel, source_ref=args.ref)
+        try:
+            ids = ingest_text(conn, args.text, args.channel, source_ref=args.ref)
+        except ValueError as exc:
+            print(f"[memdag-ingest] {exc}", file=sys.stderr)
+            sys.exit(1)
         if not ids:
             print("[memdag-ingest] empty text - nothing stored", file=sys.stderr)
             sys.exit(1)

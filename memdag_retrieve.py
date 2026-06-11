@@ -171,7 +171,15 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
         return  # unknown id; caller's problem
     content, channel, tombstoned = row
     if tombstoned or channel == "agent-derived":
+        deindex_node(conn, nid)  # purge any stale postings for a now-dead node
         return  # only index live source nodes
+    # F-15: never (re)index a redacted node — purge its postings instead so a
+    # reindex pass can't resurrect stale term frequencies from wiped content.
+    if memdag_schema.column_exists(conn, "nodes", "redacted"):
+        r = conn.execute("SELECT redacted FROM nodes WHERE id = ?", (nid,)).fetchone()
+        if r and r[0]:
+            deindex_node(conn, nid)
+            return
 
     tokens = tokenize(content)
     length = len(tokens)
@@ -212,6 +220,26 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
     except Exception:
         # Ollama down, model not pulled, network error — skip vector silently
         pass
+
+
+# ---------------------------------------------------------------------------
+# Deindex (F-15): remove a node from all retrieval structures
+# ---------------------------------------------------------------------------
+
+def deindex_node(conn: sqlite3.Connection, nid: int) -> None:
+    """Remove *nid* from postings, docstats, and embeddings.
+
+    Called from the redact cascade (and from index_node for dead/redacted nodes)
+    so a redacted/tombstoned node can never resurface via BM25 or vector ranking.
+    No-op (never creates tables) if the retrieval schema is absent.
+    """
+    if not memdag_schema.table_exists(conn, "postings"):
+        return
+    with conn:
+        conn.execute("DELETE FROM postings WHERE node_id = ?", (nid,))
+        conn.execute("DELETE FROM docstats WHERE node_id = ?", (nid,))
+        if memdag_schema.table_exists(conn, "embeddings"):
+            conn.execute("DELETE FROM embeddings WHERE node_id = ?", (nid,))
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +390,10 @@ def _build_retrieve_pool(
 
     if exclude_quarantined and has_status:
         clauses.append("status != 'quarantined'")
-    if exclude_redacted and has_redacted:
+    # F-15 fail-safe: tombstoned (above), redacted, and archived are ALWAYS
+    # excluded regardless of the exclude_* flags. The flags may only widen a
+    # pool; they must never widen it far enough to leak a node's liveness.
+    if has_redacted:
         clauses.append("redacted = 0")
     if has_archived:
         clauses.append("archived = 0")

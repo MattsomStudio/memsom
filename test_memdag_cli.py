@@ -304,6 +304,24 @@ class TestCoreDelegation(Base):
         self.assertIn(f"[{nid_src}]", out)
         self.assertIn(f"[{src2}]", out)
 
+    def test_explain_redacted_node_shows_marker(self):
+        """F-16 (AUDIT 2026-06-11): explain on a redacted node shows [REDACTED]."""
+        import memdag_redact
+        src = self.add("private_key=PEM_SECRET_ABCDEF must stay hidden", "user")
+        memdag_redact.redact_node(self.conn, src, "secret leaked")
+        out = self.run_cli("explain", str(src))
+        self.assertIn("[REDACTED", out)
+        self.assertIn("secret leaked", out)
+
+    def test_add_stamps_channel_label(self):
+        """F-14 (AUDIT 2026-06-11): the add path pins label to RANK[channel]."""
+        out = self.run_cli("add", "an external tip", "--channel", "external")
+        self.assertIn("external", out)
+        nid = self.conn.execute(
+            "SELECT id FROM nodes WHERE channel='external' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        self.assertEqual(memdag.get_node(self.conn, nid)["label"], memdag.RANK["external"])
+
     def test_revoke_dry_run_contains_frozen_string(self):
         src = self.add("Nebula config source.", "user")
         out = self.run_cli("revoke", str(src))

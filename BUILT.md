@@ -196,3 +196,55 @@ python -W error::DeprecationWarning -m unittest discover -s C:\Users\you\memdag 
 ```
 
 > Keep `memdag.db` out of Syncthing-synced trees — same rule as `sessions.db`.
+
+---
+
+## Operator-class hardening (2026-06-11)
+
+Closes the remaining operator-class findings from the adversarial audit
+(`_build/AUDIT.md`). `memdag.py` and `test_memdag.py` stayed frozen; F-14 was
+fixed at the caller layer. Suite: **372 passing, 0 failures** (was 357).
+
+- **Bypass-2G/2H — archived-parent conf laundering (HIGH).**
+  `memdag_confid.classify()` now refuses to LOWER `conf_label` on an *archived*
+  node (frozen post-compaction), and `sources_for_clearance()` excludes
+  `archived=1` rows. A SECRET-derived compact summary can no longer be dragged
+  to PUBLIC by declassifying its archived sources + recompute. *Chosen over a
+  stored high-water floor because the floor would break the legitimate
+  tombstone-drop semantics pinned by `TestTombstonedParentExcluded`.*
+  Regression: `test_memdag_confid.TestArchivedConfLaunderingBlocked`.
+
+- **F-08 — stepwise elevation bypass (HIGH).** `memdag_trust.elevate()` keys the
+  external→endorsed force gate on the node's IMMUTABLE `channel` (rank 0) rather
+  than its current label, so `0→1→2→3` can no longer reach ENDORSED without
+  `--force`; the reaching-ENDORSED step records `forced=1`.
+  Regression: `test_memdag_trust.TestStepwiseElevationBlocked`.
+
+- **F-15 — stale retrieval index after redaction (MEDIUM).** Added
+  `memdag_retrieve.deindex_node()` (postings + docstats + embeddings), called
+  from the `memdag_redact` cascade and from `index_node()` for dead/redacted
+  nodes. `retrieve()` now ALWAYS excludes tombstoned + redacted + archived
+  regardless of the `exclude_*` flags (fail-safe — flags may widen, never leak
+  liveness). Regression: `test_memdag_retrieve.test_redaction_deindexes_and_never_surfaces`.
+
+- **F-14 — channel/label mismatch at the API (MEDIUM).** Frozen `insert_node()`
+  still accepts a mismatched `label`, so enforcement lives at the caller layer:
+  `memdag_ingest.authoritative_label(channel)` pins a source node's label to
+  `RANK[channel]`, used by the CLI `add` path and `ingest_text`. No entry point
+  can stamp a mismatched label. Regression: `test_memdag_ingest.TestChannelLabelLock`,
+  `test_memdag_cli.test_add_stamps_channel_label`.
+
+- **F-16 — explain shows empty snippet for redacted node (LOW).** The CLI
+  `explain` bridge now prints the `memdag_redact.describe()` `[REDACTED <date>:
+  <reason>]` marker for a redacted node. Regression:
+  `test_memdag_cli.test_explain_redacted_node_shows_marker`.
+
+- **F-13 — entry points accept caller-declared `endorsed` (MEDIUM).** This is BY
+  DESIGN for a single-user tool — the operator is the trust authority — so the
+  default is permissive. Added an OPTIONAL guard: env var
+  `MEMDAG_CHANNEL_CEILING` (channel name or 0-3). When set, the CLI/MCP/ingest
+  stamping entry points (`add`, `ingest`, `ingest-text`, MCP `ingest_text`)
+  refuse any channel whose rank exceeds the ceiling; `ingest-url` is already
+  hard-locked to `external` and is always under any ceiling. Enforced once in
+  `memdag_ingest.enforce_channel_ceiling()` (shared by all paths).
+  Regression: `test_memdag_ingest.TestChannelCeiling`.

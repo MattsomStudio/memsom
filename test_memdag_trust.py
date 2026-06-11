@@ -152,6 +152,49 @@ class TestExternalToEndorsedPolicy(Base):
 
 
 # ---------------------------------------------------------------------------
+# 4b. F-08: stepwise elevation can't launder external -> endorsed past the gate
+# ---------------------------------------------------------------------------
+
+class TestStepwiseElevationBlocked(Base):
+    """Operator-class regression for F-08 (AUDIT 2026-06-11).
+
+    The force gate is keyed on the IMMUTABLE channel, so 0->1->2->3 cannot
+    reach ENDORSED without --force the way the old current-label check allowed.
+    """
+
+    def test_stepwise_to_endorsed_blocked_without_force(self):
+        x = self.add("external content", "external")  # channel external, label 0
+        # 0->1 and 1->2 are allowed (still below ENDORSED)
+        memdag_trust.elevate(self.conn, x, 1, "step 1", "attacker")
+        memdag_trust.elevate(self.conn, x, 2, "step 2", "attacker")
+        self.assertEqual(memdag.get_node(self.conn, x)["label"], 2)
+        # 2->3 on an external-channel node is the force-requiring step
+        with self.assertRaises(ValueError) as ctx:
+            memdag_trust.elevate(self.conn, x, 3, "step 3", "attacker")
+        self.assertIn("blocked", str(ctx.exception))
+        # Label never reached ENDORSED
+        self.assertEqual(memdag.get_node(self.conn, x)["label"], 2)
+        # And no forced=1 row was silently written
+        rows = memdag_trust.elevations_for(self.conn, x)
+        self.assertTrue(all(r["forced"] == 0 for r in rows))
+        self.assertEqual(max(r["to_label"] for r in rows), 2)
+
+    def test_stepwise_to_endorsed_with_force_records_forced(self):
+        x = self.add("external content", "external")
+        memdag_trust.elevate(self.conn, x, 1, "step 1", "matt")
+        memdag_trust.elevate(self.conn, x, 2, "step 2", "matt")
+        result = memdag_trust.elevate(self.conn, x, 3, "step 3", "matt", force=True)
+        self.assertEqual(result["to"], 3)
+        self.assertTrue(result["forced"])
+        self.assertEqual(memdag.get_node(self.conn, x)["label"], 3)
+        # The reaching-ENDORSED step is audited as forced=1
+        rows = memdag_trust.elevations_for(self.conn, x)
+        endorsed_rows = [r for r in rows if r["to_label"] == 3]
+        self.assertEqual(len(endorsed_rows), 1)
+        self.assertEqual(endorsed_rows[0]["forced"], 1)
+
+
+# ---------------------------------------------------------------------------
 # 5. test_lattice_laws
 # ---------------------------------------------------------------------------
 
