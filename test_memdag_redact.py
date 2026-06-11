@@ -268,5 +268,102 @@ class TestCliDryRunThenYes(Base):
             self.assertEqual(row[0], 1)
 
 
+class TestDefaultRedactCascadesToDescendants(Base):
+    """Regression: mirrors poc1_compose_leak.py — default redact MUST cascade.
+
+    F-05: non-cascade redaction left verbatim secret in derived (compose/ask) nodes.
+    With cascade=True as the default, redacting a source must also wipe every
+    transitive descendant that baked the secret via compose()+derive_node().
+    """
+
+    def test_default_redact_cascades_to_descendants(self):
+        SECRET = "MyTopSecretPassword is hunter2 and nobody should know this."
+
+        # Insert source containing the secret
+        src_id = self.add(SECRET, "user")
+
+        # Compose an answer that bakes the verbatim sentence into a derived node
+        sources = memdag.live_sources(self.conn)
+        text, used = memdag.compose("password secret", sources)
+        self.assertIsNotNone(text, "compose() should produce output from a live source")
+        self.assertIn("hunter2", text, "compose() should bake verbatim sentence")
+
+        derived_id, _ = memdag.derive_node(self.conn, text, used)
+
+        # Confirm derived node contains the secret before redaction
+        derived_pre = self.conn.execute(
+            "SELECT content FROM nodes WHERE id=?", (derived_id,)
+        ).fetchone()[0]
+        self.assertIn("hunter2", derived_pre)
+
+        # Redact source with NO cascade kwarg — default must cascade
+        newly = memdag_redact.redact_node(self.conn, src_id, "audit-poc1")
+        self.assertIn(src_id, newly)
+        self.assertIn(derived_id, newly, "derived node must be cascade-redacted by default")
+
+        # Derived node content must now be empty and marked redacted
+        row = self.conn.execute(
+            "SELECT content, redacted FROM nodes WHERE id=?", (derived_id,)
+        ).fetchone()
+        self.assertEqual(row[0], "", "derived node content must be wiped")
+        self.assertEqual(row[1], 1, "derived node must be marked redacted=1")
+
+        # Secret must not appear in ANY node's content
+        all_contents = self.conn.execute(
+            "SELECT content FROM nodes"
+        ).fetchall()
+        for (c,) in all_contents:
+            self.assertNotIn(
+                "hunter2", c,
+                f"secret 'hunter2' leaked in node content: {c!r}"
+            )
+
+        # compose() over live_sources must not surface the secret
+        sources_after = memdag.live_sources(self.conn)
+        text_after, _ = memdag.compose("password secret", sources_after)
+        if text_after is not None:
+            self.assertNotIn(
+                "hunter2", text_after,
+                "secret 'hunter2' must not appear in compose() output after redaction"
+            )
+
+        # Edges must be intact (derived->source edge still exists)
+        parents = memdag.parents_of(self.conn, derived_id)
+        parent_ids = [p[0] for p in parents]
+        self.assertIn(src_id, parent_ids, "edge from derived to source must survive redaction")
+
+
+class TestRedactSingleOptOut(Base):
+    """Regression: --single / cascade=False escape hatch still redacts only the seed.
+
+    Verifies that explicitly passing cascade=False leaves the child node untouched,
+    proving the opt-out path is still functional.
+    """
+
+    def test_redact_single_opt_out(self):
+        src_id = self.add("source content with a secret value abc123", "user")
+        child_id, _ = memdag.derive_node(
+            self.conn, "child content derived from source abc123", [src_id]
+        )
+
+        # Redact ONLY the source, explicitly opting out of cascade
+        newly = memdag_redact.redact_node(self.conn, src_id, "single-redact", cascade=False)
+        self.assertEqual(newly, [src_id], "only the source should be newly redacted")
+
+        # Source must be redacted
+        src_row = self.conn.execute(
+            "SELECT content, redacted FROM nodes WHERE id=?", (src_id,)
+        ).fetchone()
+        self.assertEqual(src_row[0], "")
+        self.assertEqual(src_row[1], 1)
+
+        # Child must NOT be redacted — escape hatch preserved
+        child_row = self.conn.execute(
+            "SELECT content, redacted FROM nodes WHERE id=?", (child_id,)
+        ).fetchone()
+        self.assertNotEqual(child_row[0], "", "child content must survive with cascade=False")
+        self.assertEqual(child_row[1], 0, "child must remain redacted=0 with cascade=False")
+
+
 if __name__ == "__main__":
     unittest.main()

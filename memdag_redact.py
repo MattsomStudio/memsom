@@ -44,6 +44,10 @@ def migrate(conn):
     memdag_schema.add_column(conn, "nodes", "redacted",      "INTEGER NOT NULL DEFAULT 0")
     memdag_schema.add_column(conn, "nodes", "redacted_at",   "TEXT")
     memdag_schema.add_column(conn, "nodes", "redact_reason", "TEXT")
+    memdag_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS redaction_log (
+    uuid        TEXT PRIMARY KEY,
+    redacted_at TEXT
+  );""")
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +58,7 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def redact_node(conn, nid, reason, cascade=False):
+def redact_node(conn, nid, reason, cascade=True):
     """Destroy payload of *nid* (and optionally all descendants).
 
     Returns a sorted list of node ids that were newly redacted in this call.
@@ -84,6 +88,18 @@ def redact_node(conn, nid, reason, cascade=False):
             changed = conn.execute("SELECT changes()").fetchone()[0]
             if changed:
                 redacted_ids.append(tid)
+
+    # Record redaction EVENTS for any redacted node carrying a federation uuid,
+    # so the redaction propagates as a first-class record (F-07 closeable part).
+    if redacted_ids and memdag_schema.column_exists(conn, 'nodes', 'uuid'):
+        with conn:
+            for tid in redacted_ids:
+                u = conn.execute('SELECT uuid FROM nodes WHERE id=?', (tid,)).fetchone()
+                if u and u[0]:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO redaction_log(uuid, redacted_at) VALUES (?,?)',
+                        (u[0], ts)
+                    )
 
     return sorted(redacted_ids)
 
@@ -164,8 +180,11 @@ def cmd_redact(args):
             print(f"[memdag-redact] no node [{args.id}]", file=sys.stderr)
             sys.exit(1)
 
+        # cascade=True by default; --single opts out
+        cascade = not getattr(args, "single", False)
+
         # Build target set for dry-run display
-        if args.cascade:
+        if cascade:
             targets_raw = memdag.cascade_set(conn, args.id)
             target_ids = [r[0] for r in targets_raw]
             target_channels = {r[0]: r[1] for r in targets_raw}
@@ -194,7 +213,7 @@ def cmd_redact(args):
             print("dry run - re-run with --yes to apply.")
             return
 
-        newly = redact_node(conn, args.id, args.reason, cascade=args.cascade)
+        newly = redact_node(conn, args.id, args.reason, cascade=cascade)
         print(f"done - {len(newly)} redacted, 0 rows deleted, all edges intact.")
     finally:
         conn.close()
@@ -205,7 +224,9 @@ def register(subparsers):
     p.add_argument("id", type=int)
     p.add_argument("--reason", required=True, help="why the payload is being destroyed")
     p.add_argument("--cascade", action="store_true",
-                   help="also redact all transitive descendants")
+                   help="(default) redact all transitive descendants")
+    p.add_argument("--single", action="store_true",
+                   help="redact ONLY this node (opt out of cascade)")
     p.add_argument("--yes", action="store_true",
                    help="apply; without this flag the command is a dry run")
     p.set_defaults(func=cmd_redact)

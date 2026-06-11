@@ -20,6 +20,8 @@ import memdag
 import memdag_federation
 import memdag_confid
 import memdag_quarantine
+import memdag_recompute
+import memdag_redact
 
 
 HERE = Path(__file__).resolve().parent
@@ -44,6 +46,12 @@ class Base(unittest.TestCase):
         # Apply federation migration to both
         memdag_federation.migrate(self.conn_a)
         memdag_federation.migrate(self.conn_b)
+        # Register all legit test origins on both connections so the trust
+        # boundary does not clamp channels for legitimate sync tests.
+        for o in ("machineA", "machineB", "A", "B", "local", "test-machine",
+                  "machine-α"):
+            memdag_federation.register_origin(self.conn_a, o, by="test")
+            memdag_federation.register_origin(self.conn_b, o, by="test")
 
     def tearDown(self):
         self.conn_a.close()
@@ -89,8 +97,10 @@ class TestRoundTripPreservesGraph(Base):
             used = [e, u, x]
         d, _ = memdag.derive_node(self.conn_a, text, used)
 
-        # Classify one as secret
+        # Classify one as secret; recompute so A is canonical before export.
         memdag_confid.classify(self.conn_a, x, "secret")
+        memdag_recompute.recompute_all(self.conn_a)
+        memdag_confid.recompute_conf_all(self.conn_a)
 
         # Quarantine a node (uses quarantine_node which already sets quarantined_at)
         memdag_quarantine.quarantine_node(self.conn_a, x, "suspicious")
@@ -462,6 +472,93 @@ class TestImportValidation(Base):
         bad_cs = {"format": "unknown-v99", "nodes": [], "edges": []}
         with self.assertRaises(ValueError):
             memdag_federation.import_changeset(self.conn_b, bad_cs)
+
+
+# ---------------------------------------------------------------------------
+# Test — FIX D: redaction-record propagation (F-07 closeable part + honest residual)
+# ---------------------------------------------------------------------------
+
+class TestRedactionRecordPropagation(Base):
+    """Regression: mirrors poc5 Test 2 / bypass04 — redaction-event propagation."""
+
+    def test_redaction_record_scrubs_stale_changeset_when_record_held(self):
+        """Warm-machine case: B holds the redaction record BEFORE a stale changeset arrives.
+
+        The redaction EVENT reaches B first (record-only changeset), then a stale
+        pre-redaction changeset with full content follows. Because B already holds the
+        record, the content MUST be scrubbed — FIX D closeable part.
+        """
+        SECRET = "FederationSecret warm-machine-key-9f3a never travel"
+        sid = self.add(self.conn_a, SECRET, "user")
+        memdag_federation.backfill_uuids(self.conn_a, "machineA")
+        uuid = self.conn_a.execute(
+            "SELECT uuid FROM nodes WHERE id=?", (sid,)
+        ).fetchone()[0]
+
+        # Export PRE-redaction (full content captured in stale changeset).
+        stale = memdag_federation.export_changeset(self.conn_a, origin="machineA")
+
+        # Redact on A — this also writes the redaction_log entry.
+        memdag_redact.redact_node(self.conn_a, sid, "redact-warm", cascade=True)
+
+        # The redaction EVENT reaches B first as a minimal record-only changeset.
+        # (No node payload — B has never seen this UUID yet.)
+        redaction_cs = {
+            "format": "memdag-changeset-v1",
+            "origin": "machineA",
+            "exported_at": "2026-01-01T00:00:00+00:00",
+            "nodes": [],
+            "edges": [],
+            "redactions": [{"uuid": uuid, "redacted_at": "2026-01-01T00:00:00+00:00"}],
+        }
+        memdag_federation.import_changeset(self.conn_b, redaction_cs)
+
+        # THEN the stale pre-redaction changeset arrives with full content.
+        memdag_federation.import_changeset(self.conn_b, stale)
+
+        row = self.conn_b.execute(
+            "SELECT content, redacted FROM nodes WHERE uuid=?", (uuid,)
+        ).fetchone()
+        self.assertIsNotNone(row, "node must be inserted on B")
+        self.assertEqual(row[0], "", "FIXED: content must be scrubbed by held record")
+        self.assertEqual(row[1], 1, "FIXED: redacted flag must be 1")
+
+    def test_known_limit_cold_machine_stale_changeset(self):
+        """HONEST RESIDUAL (Guarantee #6): a cold machine that NEVER received the
+        redaction record gets the content from a stale changeset.
+
+        This is the deletion-vs-immutability limit (Git's secret-in-history problem).
+        Passing test encodes the boundary so the suite states it honestly.
+        Mitigations: (1) deliver redaction events first; (2) never distribute stale
+        changesets; (3) do not federate a source you may need to hard-delete.
+        """
+        SECRET = "FederationSecret cold-machine-key-77 never travel"
+        sid = self.add(self.conn_a, SECRET, "user")
+        memdag_federation.backfill_uuids(self.conn_a, "machineA")
+        uuid = self.conn_a.execute(
+            "SELECT uuid FROM nodes WHERE id=?", (sid,)
+        ).fetchone()[0]
+
+        # Export PRE-redaction — redactions=[] at this point (no events yet).
+        stale = memdag_federation.export_changeset(self.conn_a, origin="machineA")
+
+        # Redact on A AFTER the stale export.
+        memdag_redact.redact_node(self.conn_a, sid, "redact-cold", cascade=True)
+
+        # B never receives the redaction record; only the stale changeset arrives.
+        memdag_federation.import_changeset(self.conn_b, stale)
+
+        row = self.conn_b.execute(
+            "SELECT content, redacted FROM nodes WHERE uuid=?", (uuid,)
+        ).fetchone()
+        self.assertIsNotNone(row, "node must be inserted on B")
+        # KNOWN RESIDUAL: content arrives because B never held the redaction record.
+        self.assertIn(
+            "cold-machine-key",
+            row[0] or "",
+            "RESIDUAL: content arrives on cold machine — deletion-vs-immutability limit",
+        )
+        self.assertEqual(row[1], 0, "RESIDUAL: redacted=0 on cold machine without record")
 
 
 if __name__ == "__main__":

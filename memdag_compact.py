@@ -37,6 +37,7 @@ import memdag
 import memdag_schema
 import memdag_quarantine
 import memdag_llm
+import memdag_confid
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +301,7 @@ def compact(
     """
     migrate(conn)
     memdag_quarantine.migrate(conn)
+    memdag_confid.migrate(conn)   # ensure conf_label exists for high-water recompute
 
     if group_by not in ("similarity", "claim"):
         raise ValueError(f"unknown group_by: {group_by!r}")
@@ -359,6 +361,11 @@ def compact(
                 "UPDATE nodes SET archived = 1, archived_at = ? WHERE id = ?",
                 [(now, i) for i in group_ids],
             )
+
+        # Bell-LaPadula high-water: a node summarizing SECRET episodes is SECRET.
+        # derive_node() leaves conf_label at the DEFAULT (0/PUBLIC); recompute it to
+        # max(live-parent conf) so compact cannot launder confidentiality (PoC 03).
+        memdag_confid.recompute_conf(conn, nid)
 
         consumed.update(group_ids)
         minted.append(nid)

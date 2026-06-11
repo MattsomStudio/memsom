@@ -24,6 +24,9 @@ import memdag
 import memdag_schema
 import memdag_compact
 import memdag_quarantine
+import memdag_redact
+import memdag_federation
+import memdag_confid
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +532,129 @@ class TestListArchived(Base):
             self.assertIn("archived_at", r)
             self.assertIn("content", r)
             self.assertIsNotNone(r["archived_at"])
+
+
+# ---------------------------------------------------------------------------
+# 20. test_redact_episode_scrubs_semantic (regression for F-06 / poc2_compact_leak.py)
+# ---------------------------------------------------------------------------
+
+class TestRedactEpisodeScrubsSemantic(Base):
+    """Regression: mirrors poc2_compact_leak.py — redacting an episode after compact()
+    must cascade to the semantic node that baked its verbatim sentences.
+
+    F-06: compact() copies verbatim sentences into the summary node; non-cascade
+    source redaction left the secret in the summary. With cascade=True as the default,
+    redacting an episode wipes the semantic node too.
+    """
+
+    def test_redact_episode_scrubs_semantic(self):
+        memdag_redact.migrate(self.conn)
+        memdag_federation.migrate(self.conn)
+
+        SECRET_TOKEN = "alpha-key-99"
+        # SECRET_TOKEN appears ONLY in source A; SECRET_B shares tokens for clustering
+        # but does NOT contain the secret token itself.
+        SECRET_A = f"TopSecret: {SECRET_TOKEN} credential must not be shared externally ever."
+        SECRET_B = "TopSecret: beta-key-77 credential must not be shared externally either."
+
+        id_a = self.add(SECRET_A, "user")
+        id_b = self.add(SECRET_B, "user")
+
+        # Compact with a low sim_threshold to guarantee clustering
+        minted = memdag_compact.compact(
+            self.conn, group_by="similarity", min_group=2, sim_threshold=0.1
+        )
+        self.assertTrue(minted, "compact() must mint at least one semantic node")
+        semantic_id = minted[0]
+
+        # Semantic node must contain the secret before redaction
+        semantic_pre = self.conn.execute(
+            "SELECT content FROM nodes WHERE id=?", (semantic_id,)
+        ).fetchone()[0]
+        self.assertIn(
+            SECRET_TOKEN, semantic_pre,
+            "semantic node must contain the secret before redaction"
+        )
+
+        # Redact source A with the default cascade (no cascade= kwarg)
+        newly = memdag_redact.redact_node(self.conn, id_a, "audit-poc2")
+        self.assertIn(id_a, newly)
+        self.assertIn(
+            semantic_id, newly,
+            "semantic node must be cascade-redacted when its episode is redacted"
+        )
+
+        # Semantic node content must now be empty and marked redacted
+        sem_row = self.conn.execute(
+            "SELECT content, redacted FROM nodes WHERE id=?", (semantic_id,)
+        ).fetchone()
+        self.assertEqual(sem_row[0], "", "semantic node content must be wiped after cascade redaction")
+        self.assertEqual(sem_row[1], 1, "semantic node must be marked redacted=1")
+
+        # Secret must not appear in ANY node's content
+        all_contents = self.conn.execute("SELECT content FROM nodes").fetchall()
+        for (c,) in all_contents:
+            self.assertNotIn(
+                SECRET_TOKEN, c,
+                f"secret '{SECRET_TOKEN}' leaked in node content: {c!r}"
+            )
+
+        # Edges from semantic node to its episodes must still exist
+        parent_ids = {p[0] for p in memdag.parents_of(self.conn, semantic_id)}
+        self.assertIn(id_a, parent_ids, "semantic->episode_a edge must survive redaction")
+        self.assertIn(id_b, parent_ids, "semantic->episode_b edge must survive redaction")
+
+        # Federation export must not carry the secret in any non-redacted node
+        changeset = memdag_federation.export_changeset(self.conn, origin="test-machine")
+        for node_rec in changeset.get("nodes", []):
+            if node_rec.get("redacted", 0) == 0:
+                self.assertNotIn(
+                    SECRET_TOKEN, node_rec.get("content", ""),
+                    f"secret '{SECRET_TOKEN}' leaked in federation export for "
+                    f"non-redacted node uuid={node_rec.get('uuid')}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# 21. TestCompactConfHighWater — regression for PoC 03 (compact conf laundering)
+# ---------------------------------------------------------------------------
+
+class TestCompactConfHighWater(Base):
+    def test_compact_propagates_secret_conf_not_public(self):
+        s1 = self.add('Nebula mesh secret key rotation procedure revoke certs quarterly', 'user')
+        s2 = self.add('Nebula mesh secret key rotation the CA private key path quarterly', 'user')
+        memdag_confid.migrate(self.conn)
+        memdag_confid.classify(self.conn, s1, 'secret')   # conf=2
+        memdag_confid.classify(self.conn, s2, 'secret')   # conf=2
+        minted = memdag_compact.compact(self.conn, group_by='similarity', min_group=2, sim_threshold=0.0)
+        self.assertTrue(minted)
+        nid = minted[0]
+        conf = self.conn.execute('SELECT conf_label FROM nodes WHERE id=?', (nid,)).fetchone()[0]
+        self.assertEqual(conf, 2)   # SECRET high-water, NOT 0/PUBLIC (laundering blocked)
+        # Spine invariants still hold:
+        node = memdag.get_node(self.conn, nid)
+        parents = [p[0] for p in memdag.parents_of(self.conn, nid)]
+        self.assertEqual(sorted(parents), sorted([s1, s2]))         # edge to every episode
+        self.assertEqual(node['label'], min(memdag.RANK['user'], memdag.RANK['user']))  # min(parents)
+        for sid in (s1, s2):
+            arch = self.conn.execute('SELECT archived, tombstoned, content FROM nodes WHERE id=?', (sid,)).fetchone()
+            self.assertEqual(arch[0], 1)          # archived
+            self.assertEqual(arch[1], 0)          # NOT tombstoned
+            self.assertNotEqual(arch[2], None)    # not deleted
+
+    def test_public_clearance_does_not_surface_secret_summary(self):
+        s1 = self.add('alpha mesh secret rotation key material quarterly cadence', 'user')
+        s2 = self.add('alpha mesh secret rotation key material quarterly schedule', 'user')
+        memdag_confid.migrate(self.conn)
+        memdag_confid.classify(self.conn, s1, 'secret')
+        memdag_confid.classify(self.conn, s2, 'secret')
+        memdag_compact.compact(self.conn, group_by='similarity', min_group=2, sim_threshold=0.0)
+        import memdag_retrieve
+        hits = memdag_retrieve.retrieve(self.conn, 'mesh secret rotation key', clearance='public')
+        # No public-clearance hit may carry the secret material (defense-in-depth:
+        # derived nodes are excluded from the retrieve pool AND conf is now SECRET).
+        for (_id, content, _ch, _lbl, _sr) in hits:
+            self.assertNotIn('key material', content or '')
 
 
 if __name__ == "__main__":

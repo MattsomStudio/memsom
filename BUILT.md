@@ -89,6 +89,11 @@ adds 80+ tests across 13 modules + CLI + MCP.
   never delete them. Rows and edges always survive (invariant #3).
 - **LLM is opt-in**: `--llm` only. The default `ask` path is 100% deterministic
   and has zero network calls.
+- **Redaction propagation**: redaction events propagate as priority records and
+  scrub stale changesets on any machine that holds the record; a cold machine that
+  never received the record still gets content from a stale changeset —
+  deletion-vs-immutability limit, encoded as a known-limit test
+  (`test_known_limit_cold_machine_stale_changeset`).
 
 ## Biba-fatigue v1 (2026-06-11)
 

@@ -33,6 +33,15 @@ import memdag_schema
 import memdag_redact
 import memdag_quarantine
 import memdag_confid
+import memdag_recompute
+
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+# Untrusted (unregistered) origins may never self-classify as PUBLIC(0).
+CONF_FLOOR_UNTRUSTED = 1  # internal — untrusted nodes may never self-classify as PUBLIC(0).
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +75,21 @@ def migrate(conn):
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_uuid ON nodes(uuid)"
     )
 
+    # Trust allowlist: default-deny federation boundary.
+    memdag_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS trusted_origins (
+    origin   TEXT PRIMARY KEY,
+    descr    TEXT,
+    added_by TEXT,
+    added_at TEXT
+  );""")
+    # Auto-trust this machine so local round-trips always work.
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO trusted_origins(origin,descr,added_by,added_at)"
+            " VALUES (?,?,?,?)",
+            (default_origin(), "self (auto-registered)", "system", memdag.now_iso())
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,6 +98,44 @@ def migrate(conn):
 def default_origin():
     """Return the default origin for this machine."""
     return os.environ.get("MEMDAG_ORIGIN") or platform.node() or "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Trust-origin management (default-deny allowlist)
+# ---------------------------------------------------------------------------
+
+def is_trusted(conn, origin):
+    """Return True if *origin* is in the trusted_origins allowlist."""
+    if not origin:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM trusted_origins WHERE origin=?", (origin,)
+    ).fetchone() is not None
+
+
+def register_origin(conn, origin, by="user", descr=None):
+    """Add *origin* to the trusted_origins allowlist (idempotent).
+
+    Calls migrate() to ensure the table exists.
+    Returns True if the origin is now trusted (always True on success).
+    No print/sys.exit — library discipline.
+    """
+    migrate(conn)
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO trusted_origins(origin,descr,added_by,added_at)"
+            " VALUES (?,?,?,?)",
+            (origin, descr, by, memdag.now_iso())
+        )
+    return is_trusted(conn, origin)
+
+
+def list_origins(conn):
+    """Return list of (origin, descr, added_by, added_at) ordered by origin."""
+    migrate(conn)
+    return conn.execute(
+        "SELECT origin, descr, added_by, added_at FROM trusted_origins ORDER BY origin"
+    ).fetchall()
 
 
 def backfill_uuids(conn, origin):
@@ -108,7 +170,7 @@ def _row_to_node_dict(row):
     return {
         "uuid": uuid,
         "origin": origin,
-        "content": content,
+        "content": "" if (redacted if redacted is not None else 0) else content,
         "channel": channel,
         "label": label,
         "conf_label": conf_label if conf_label is not None else 0,
@@ -171,6 +233,13 @@ def export_changeset(conn, since=None, origin=None):
 
     node_dicts = [_row_to_node_dict(r) for r in rows]
 
+    # Export ALL redaction records regardless of `since` (priority propagation —
+    # redaction events must never be filtered out).
+    redaction_rows = conn.execute(
+        'SELECT uuid, redacted_at FROM redaction_log ORDER BY uuid'
+    ).fetchall()
+    redactions = [{'uuid': u, 'redacted_at': at} for (u, at) in redaction_rows]
+
     # Build uuid -> local id map for edge resolution
     selected_ids = set()
     for r in rows:
@@ -211,6 +280,7 @@ def export_changeset(conn, since=None, origin=None):
         "exported_at": now,
         "nodes": node_dicts,
         "edges": edge_rows,
+        "redactions": redactions,
     }
 
 
@@ -242,6 +312,11 @@ def write_jsonl(path, changeset):
                 {"type": "edge", "child": child_uuid, "parent": parent_uuid},
                 ensure_ascii=False
             ) + "\n")
+        for r in changeset.get("redactions", []):
+            f.write(json.dumps(
+                {"type": "redaction", "uuid": r["uuid"], "redacted_at": r.get("redacted_at")},
+                ensure_ascii=False
+            ) + "\n")
 
 
 def read_jsonl(path):
@@ -262,6 +337,7 @@ def read_jsonl(path):
 
     nodes = []
     edges = []
+    redactions = []
     for line in lines[1:]:
         rec = json.loads(line)
         rec_type = rec.get("type")
@@ -270,6 +346,8 @@ def read_jsonl(path):
             nodes.append(d)
         elif rec_type == "edge":
             edges.append([rec["child"], rec["parent"]])
+        elif rec_type == "redaction":
+            redactions.append({"uuid": rec["uuid"], "redacted_at": rec.get("redacted_at")})
 
     return {
         "format": header["format"],
@@ -277,6 +355,7 @@ def read_jsonl(path):
         "exported_at": header["exported_at"],
         "nodes": nodes,
         "edges": edges,
+        "redactions": redactions,
     }
 
 
@@ -290,12 +369,24 @@ def import_changeset(conn, changeset):
     Returns stats dict: nodes_new, nodes_updated, edges_new, edges_skipped,
     resurrections_blocked.
 
-    Monotonic rules (all applied in a single transaction):
-      Tombstone: incoming dead + local live -> mark dead (copy fields).
+    TRUST BOUNDARY (default-deny):
+      - If the changeset origin is NOT in trusted_origins, all new nodes are
+        clamped to channel='external', label=RANK['external'](0), and
+        conf_label >= CONF_FLOOR_UNTRUSTED(1).
+      - Tombstone/redact/quarantine state changes are honoured only if the
+        changeset header origin matches the node's stored origin (you can only
+        kill/redact/quarantine what you own).
+      - Edges are only inserted if both endpoints arrived in this changeset OR
+        the child's stored origin matches the changeset header origin.
+      - After import, recompute_all() and recompute_conf_all() re-floor every
+        accepted agent-derived label and conf_label to the correct values.
+
+    Monotonic rules (applied in a single transaction):
+      Tombstone: incoming dead + local live -> mark dead IFF owned.
                  incoming live + local dead -> BLOCKED (resurrection prevented).
-      Redact:    incoming redacted + local unredacted -> redact locally.
+      Redact:    incoming redacted + local unredacted -> redact locally IFF owned.
                  incoming unredacted + local redacted -> BLOCKED.
-      Quarantine: incoming quarantined + local live -> quarantine locally.
+      Quarantine: incoming quarantined + local live -> quarantine IFF owned.
                   incoming live + local quarantined -> BLOCKED (promote is a local act).
       Content/label/channel/created_at: NEVER overwritten on existing rows.
     """
@@ -306,6 +397,18 @@ def import_changeset(conn, changeset):
 
     migrate(conn)
 
+    # --- Trust determination ---
+    header_origin = changeset.get("origin")
+    trusted = is_trusted(conn, header_origin)
+
+    # Collect the set of UUIDs arriving in this changeset (for edge validation).
+    changeset_uuids = {
+        n.get("uuid") for n in changeset.get("nodes", []) if n.get("uuid")
+    }
+
+    # Cascade tombstones to apply AFTER the main transaction commits.
+    cascade_tombstones = []  # list of (local_id, reason)
+
     stats = {
         "nodes_new": 0,
         "nodes_updated": 0,
@@ -315,6 +418,24 @@ def import_changeset(conn, changeset):
     }
 
     with conn:
+        # ----- Pass 0: merge redaction RECORDS (priority propagation) -----
+        # A redaction event is a first-class record. Merge incoming records from
+        # TRUSTED origins (consistent with the default-deny boundary — prevents an
+        # untrusted attacker from injecting redaction-DoS), then scrub ANY node whose
+        # uuid is known-redacted regardless of the (possibly stale) changeset fields.
+        if trusted:
+            for rec in changeset.get("redactions", []):
+                ru = rec.get("uuid")
+                if ru:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO redaction_log(uuid, redacted_at) VALUES (?,?)',
+                        (ru, rec.get("redacted_at"))
+                    )
+        redacted_at_by_uuid = {
+            r[0]: r[1]
+            for r in conn.execute("SELECT uuid, redacted_at FROM redaction_log")
+        }
+
         # ----- Pass 1: nodes -----
         for node in changeset.get("nodes", []):
             uuid = node.get("uuid")
@@ -324,13 +445,46 @@ def import_changeset(conn, changeset):
             local = conn.execute(
                 "SELECT id, tombstoned, tombstoned_at, revoke_reason, "
                 "redacted, redacted_at, redact_reason, "
-                "COALESCE(status, 'live') as status, quarantined_at, quarantine_reason "
+                "COALESCE(status, 'live') as status, quarantined_at, quarantine_reason, "
+                "origin "
                 "FROM nodes WHERE uuid=?",
                 (uuid,)
             ).fetchone()
 
             if local is None:
-                # --- New node: INSERT with all fields ---
+                # --- New node: INSERT with clamped values ---
+                inc_channel = node.get("channel", "external")
+                inc_redacted = 1 if node.get("redacted", 0) else 0
+                # F-07 (closeable part): if we ALREADY hold the redaction record for this
+                # uuid, force-scrub even though THIS changeset is stale (redacted=0, full
+                # content). KNOWN RESIDUAL: a cold machine that never received the record
+                # still gets the content — see test_known_limit_cold_machine_stale_changeset.
+                record_redacted = 1 if uuid in redacted_at_by_uuid else 0
+                forced_redacted = 1 if (inc_redacted or record_redacted) else 0
+
+                if trusted:
+                    # Trusted origin: keep channel if valid, but NEVER trust label
+                    # for source channels; derived labels will be recomputed below.
+                    channel = inc_channel if inc_channel in memdag.RANK else "external"
+                    if channel == "agent-derived":
+                        # Label from node dict; recompute_all re-floors it in step (e).
+                        label = node.get("label", 0)
+                    else:
+                        # Source channel: derive label from channel, never from node.label
+                        label = memdag.RANK[channel]
+                    # Trusted: keep conf_label as-is; recompute_conf_all re-floors derived.
+                    conf_label = node.get("conf_label", 0)
+                else:
+                    # Untrusted origin: clamp channel and label to external floor.
+                    channel = "external"
+                    label = memdag.RANK["external"]  # 0
+                    # Untrusted: never self-classify as PUBLIC(0) — floor to INTERNAL(1).
+                    conf_label = max(int(node.get("conf_label", 0) or 0), CONF_FLOOR_UNTRUSTED)
+
+                # F-04 / F-07: arriving-redacted node carries NO payload.
+                # Also scrub if we already hold the redaction record for this uuid.
+                content = "" if forced_redacted else node.get("content", "")
+
                 conn.execute(
                     "INSERT INTO nodes("
                     "  content, channel, label, conf_label, status, source_ref, created_at,"
@@ -340,23 +494,23 @@ def import_changeset(conn, changeset):
                     "  uuid, origin"
                     ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        node.get("content", ""),
-                        node.get("channel", "external"),
-                        node.get("label", 0),
-                        node.get("conf_label", 0),
+                        content,
+                        channel,
+                        label,
+                        conf_label,
                         node.get("status", "live"),
                         node.get("source_ref"),
                         node.get("created_at", memdag.now_iso()),
                         node.get("tombstoned", 0),
                         node.get("tombstoned_at"),
                         node.get("revoke_reason"),
-                        node.get("redacted", 0),
-                        node.get("redacted_at"),
-                        node.get("redact_reason"),
+                        forced_redacted,
+                        node.get("redacted_at") or (redacted_at_by_uuid.get(uuid) if record_redacted else None),
+                        node.get("redact_reason") or ("redacted (federated record)" if record_redacted else None),
                         node.get("quarantined_at"),
                         node.get("quarantine_reason"),
                         uuid,
-                        node.get("origin"),
+                        node.get("origin"),   # provenance stored; NOT used for authz
                     )
                 )
                 stats["nodes_new"] += 1
@@ -365,60 +519,92 @@ def import_changeset(conn, changeset):
                 # --- Existing node: monotonic merge ---
                 (local_id, local_tomb, local_tomb_at, local_tomb_reason,
                  local_redacted, local_redacted_at, local_redact_reason,
-                 local_status, local_q_at, local_q_reason) = local
+                 local_status, local_q_at, local_q_reason,
+                 local_origin) = local
+
+                # Authorization rule for state changes: only the same origin may
+                # tombstone/redact/quarantine what it owns.
+                # header_origin is the CHANGESET header (not the node-dict field —
+                # that is attacker-controlled and is NOT used for authz).
+                owned = (
+                    header_origin is not None
+                    and header_origin == local_origin
+                )
 
                 updated = False
 
-                # (a) Tombstone monotonic rule
+                # (a) Tombstone monotonic rule — F-03 / F-11
                 inc_tomb = node.get("tombstoned", 0)
                 if inc_tomb and not local_tomb:
-                    # incoming dead, local live -> propagate death
-                    conn.execute(
-                        "UPDATE nodes SET tombstoned=1, tombstoned_at=?, revoke_reason=?"
-                        " WHERE id=?",
-                        (node.get("tombstoned_at"), node.get("revoke_reason"), local_id)
-                    )
-                    updated = True
+                    if owned:
+                        # Incoming dead, local live, same origin -> propagate death.
+                        conn.execute(
+                            "UPDATE nodes SET tombstoned=1, tombstoned_at=?, revoke_reason=?"
+                            " WHERE id=?",
+                            (node.get("tombstoned_at"), node.get("revoke_reason"), local_id)
+                        )
+                        updated = True
+                        # Queue cascade: revoke_cascade runs AFTER txn closes (F-11).
+                        cascade_tombstones.append(
+                            (local_id, node.get("revoke_reason") or "cascade from federation import")
+                        )
+                    # else: not owned -> ignore (F-03 blocked)
                 elif not inc_tomb and local_tomb:
-                    # incoming live, local dead -> BLOCK resurrection
+                    # Incoming live, local dead -> BLOCK resurrection (always, regardless of origin).
                     stats["resurrections_blocked"] += 1
 
-                # (b) Redact monotonic rule
+                # (b) Redact monotonic rule — F-04 / F-07
                 inc_redacted = node.get("redacted", 0)
-                if inc_redacted and not local_redacted:
-                    # incoming redacted, local unredacted -> redact locally
-                    conn.execute(
-                        "UPDATE nodes SET content='', redacted=1, redacted_at=?, redact_reason=?"
-                        " WHERE id=?",
-                        (node.get("redacted_at"), node.get("redact_reason"), local_id)
-                    )
-                    updated = True
+                record_redacted = uuid in redacted_at_by_uuid
+                if (inc_redacted or record_redacted) and not local_redacted:
+                    if record_redacted or owned:
+                        # Incoming redacted (or redaction record held), local unredacted -> scrub.
+                        conn.execute(
+                            "UPDATE nodes SET content='', redacted=1, redacted_at=?, redact_reason=?"
+                            " WHERE id=?",
+                            (
+                                node.get("redacted_at") or redacted_at_by_uuid.get(uuid),
+                                node.get("redact_reason") or "redacted (federated record)",
+                                local_id,
+                            )
+                        )
+                        updated = True
+                    # else: incoming redacted but not owned and no record -> ignore (F-03 preserved)
                 elif not inc_redacted and local_redacted:
-                    # incoming unredacted over local redacted -> BLOCK
+                    # Incoming unredacted over local redacted -> BLOCK (F-07 / F-04 old-changeset restore).
                     stats["resurrections_blocked"] += 1
 
-                # (c) Quarantine monotonic rule (status field)
+                # (c) Quarantine monotonic rule (status field) — F-12
                 inc_status = node.get("status", "live")
                 if inc_status == "quarantined" and local_status == "live":
-                    conn.execute(
-                        "UPDATE nodes SET status='quarantined', quarantine_reason=?,"
-                        " quarantined_at=? WHERE id=?",
-                        (node.get("quarantine_reason"), node.get("quarantined_at"), local_id)
-                    )
-                    updated = True
+                    if owned:
+                        conn.execute(
+                            "UPDATE nodes SET status='quarantined', quarantine_reason=?,"
+                            " quarantined_at=? WHERE id=?",
+                            (node.get("quarantine_reason"), node.get("quarantined_at"), local_id)
+                        )
+                        updated = True
+                    # else: not owned -> ignore (F-12 blocked)
                 elif inc_status == "live" and local_status == "quarantined":
-                    # incoming live over local quarantined -> BLOCK
-                    # (promote is a deliberate local act, never an import side effect)
+                    # Incoming live over local quarantined -> BLOCK.
                     stats["resurrections_blocked"] += 1
 
                 if updated:
                     stats["nodes_updated"] += 1
 
-        # ----- Pass 2: edges -----
-        # Build uuid -> local id map (all local nodes, including just-inserted)
+        # ----- Pass 2: edges (F-02) -----
+        # Build uuid -> local id map (all local nodes, including just-inserted).
         uuid_to_id = {
             r[0]: r[1]
             for r in conn.execute("SELECT uuid, id FROM nodes WHERE uuid IS NOT NULL")
+        }
+
+        # Build uuid -> stored origin map for edge authorization.
+        origin_by_uuid = {
+            uuid: origin
+            for uuid, origin in conn.execute(
+                "SELECT uuid, origin FROM nodes WHERE uuid IS NOT NULL"
+            )
         }
 
         for child_uuid, parent_uuid in changeset.get("edges", []):
@@ -427,18 +613,41 @@ def import_changeset(conn, changeset):
             if child_id is None or parent_id is None:
                 stats["edges_skipped"] += 1
                 continue
+
+            # Authorization: allow the edge if BOTH endpoints arrived in this
+            # changeset (full round-trip) OR the child's stored origin matches
+            # the changeset header origin (child_owned).
+            # Reject: child is a pre-existing local-origin node and the
+            # changeset origin differs — blocks forged provenance (F-02 Attack A).
+            both_in_changeset = (
+                child_uuid in changeset_uuids and parent_uuid in changeset_uuids
+            )
+            child_owned = origin_by_uuid.get(child_uuid) == header_origin
+
+            if not (both_in_changeset or child_owned):
+                stats["edges_skipped"] += 1
+                continue
+
             # INSERT OR IGNORE: idempotent
             conn.execute(
                 "INSERT OR IGNORE INTO edges(child, parent) VALUES (?,?)",
                 (child_id, parent_id)
             )
-            # Check if it was actually inserted
-            # (sqlite3 doesn't easily tell us, so we track via changes())
             n = conn.execute("SELECT changes()").fetchone()[0]
             if n:
                 stats["edges_new"] += 1
             else:
                 stats["edges_skipped"] += 1
+
+    # ----- Post-transaction: cascade tombstones + recompute -----
+    # These run AFTER the main txn commits so nested-context double-commit is avoided.
+    for local_id, reason in cascade_tombstones:
+        memdag.revoke_cascade(conn, local_id, reason)  # F-11: propagate to all descendants
+
+    # F-09 / F-02-B: re-floor every accepted agent-derived label to min(parents).
+    memdag_recompute.recompute_all(conn)
+    # F-10: re-floor every derived conf_label to max(parents).
+    memdag_confid.recompute_conf_all(conn)
 
     return stats
 
@@ -446,6 +655,27 @@ def import_changeset(conn, changeset):
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def cmd_register_origin(args):
+    conn = memdag.get_connection()
+    try:
+        ok = register_origin(conn, args.origin, by=args.by, descr=args.descr)
+        print(f"registered origin: {args.origin}" if ok else f"failed to register origin: {args.origin}")
+    finally:
+        conn.close()
+
+
+def cmd_origins_list(args):
+    conn = memdag.get_connection()
+    try:
+        rows = list_origins(conn)
+        if not rows:
+            print("(no trusted origins)")
+        for origin, descr, added_by, added_at in rows:
+            print(f"{origin!r}  descr={descr!r}  by={added_by!r}  at={added_at!r}")
+    finally:
+        conn.close()
+
 
 def cmd_export(args):
     conn = memdag.get_connection()
@@ -485,6 +715,15 @@ def register(subparsers):
     p_imp = subparsers.add_parser("import", help="import a changeset from JSONL")
     p_imp.add_argument("file", help="input .jsonl path")
     p_imp.set_defaults(func=cmd_import)
+
+    p_reg = subparsers.add_parser("register-origin", help="trust a federation origin (default-deny)")
+    p_reg.add_argument("origin")
+    p_reg.add_argument("--by", default="user")
+    p_reg.add_argument("--descr", default=None)
+    p_reg.set_defaults(func=cmd_register_origin)
+
+    p_ls = subparsers.add_parser("origins-list", help="list trusted origins")
+    p_ls.set_defaults(func=cmd_origins_list)
 
 
 def main(argv=None):
