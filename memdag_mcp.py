@@ -27,7 +27,7 @@ import traceback
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "memdag"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 
 TOOLS = [
     {
@@ -149,6 +149,29 @@ TOOLS = [
             "required": ["id"],
         },
     },
+    {
+        "name": "profile",
+        "description": "Leaf-origin provenance histogram + floor (display-only; never gates).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Node id"},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "check_action",
+        "description": "Action-time integrity gate: allow/deny by floor, with weakest-leaf culprit. The ONLY gate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Node id"},
+                "required": {"type": "string", "description": "Minimum integrity floor (external|agent-derived|user|endorsed or 0-3)"},
+            },
+            "required": ["id", "required"],
+        },
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -225,6 +248,12 @@ def _tool_argv(name, arguments):
         if arguments.get("clearance") is not None:
             argv += ["--clearance", str(arguments["clearance"])]
         return argv
+
+    if name == "profile":
+        return ["profile", str(arguments["id"])]
+
+    if name == "check_action":
+        return ["check-action", str(arguments["id"]), "--require", str(arguments["required"])]
 
     raise ValueError(f"unknown tool: {name!r}")
 

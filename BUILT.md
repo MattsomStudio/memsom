@@ -21,8 +21,8 @@ adds 80+ tests across 13 modules + CLI + MCP.
 | distill               | memdag_distill.py        | Provenance-filtered JSONL export; distill_plan runner stub     | test_memdag_distill.py        | 10    |
 | heal                  | memdag_heal.py           | Invariant check (5 violation kinds); rebuild-derived           | test_memdag_heal.py           | 10    |
 | llm                   | memdag_llm.py            | Opt-in Ollama LLM path; citation firewall; LlmUnavailable      | test_memdag_llm.py            | 10    |
-| **CLI**               | **memdag_cli.py**        | **Unified 30-subcommand CLI; enhanced ask**                    | **test_memdag_cli.py**        | **10**|
-| **MCP server**        | **memdag_mcp.py**        | **stdio JSON-RPC 2.0 MCP server; 10 tools; --selfcheck**       | **test_memdag_mcp.py**        | **9** |
+| **CLI**               | **memdag_cli.py**        | **Unified 38-subcommand CLI; enhanced ask**                    | **test_memdag_cli.py**        | **10**|
+| **MCP server**        | **memdag_mcp.py**        | **stdio JSON-RPC 2.0 MCP server; 12 tools; --selfcheck**       | **test_memdag_mcp.py**        | **9** |
 
 ## Schema additions (all additive, all defaulted — demo #1 byte-identical)
 
@@ -89,6 +89,33 @@ adds 80+ tests across 13 modules + CLI + MCP.
   never delete them. Rows and edges always survive (invariant #3).
 - **LLM is opt-in**: `--llm` only. The default `ask` path is 100% deterministic
   and has zero network calls.
+
+## Biba-fatigue v1 (2026-06-11)
+
+### New modules
+
+| Module                 | File                        | Test file                        | Tests |
+|------------------------|-----------------------------|----------------------------------|-------|
+| profile                | memdag_profile.py           | test_memdag_profile.py           | 13    |
+| gate                   | memdag_gate.py              | test_memdag_gate.py              | 11    |
+| corroborate            | memdag_corroborate.py       | test_memdag_corroborate.py       | 12    |
+
+### New tables (all additive — no nodes-table columns touched)
+
+| Table                | Owner               | Purpose |
+|----------------------|---------------------|---------|
+| `gate_log`           | memdag_gate         | One row per check_action() call: node, required, floor, decision, culprit, ts |
+| `independence_roots` | memdag_corroborate  | Registered independence roots; unregistered sources earn zero credit |
+| `claims`             | memdag_corroborate  | Structured (subject, predicate, value) triples with extractor version |
+| `claim_assertions`   | memdag_corroborate  | Maps (claim_id, node_id) -> independence_root; PK prevents double-assertion |
+| `corroborations`     | memdag_corroborate  | Maps (claim_id, lift_node_id) with k_used, roots_count, ts |
+
+### Design deviations
+
+- **`check-action` not `check`**: `check` is already registered by `memdag_heal`. Collision avoided; programmatic function is still `check_action` (no hyphen).
+- **Lift node elevation fixed-point**: The lift node minted by `corroborate()` gets an `elevations` row marking it as a fixed point so `recompute_all` cannot claw label 1 back down to `min(parents)=0`.
+- **Lift-drop is native revoke-cascade**: The lift node is a child of every asserting node. Revoking any asserting node cascades the tombstone to the lift automatically — no special teardown path.
+- **MCP tool count 10 -> 12**: `profile` and `check_action` added; `SERVER_VERSION` bumped to `0.3.0`.
 
 ## Regression guarantee
 

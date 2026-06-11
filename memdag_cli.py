@@ -3,10 +3,10 @@
 
 Entry point: `python memdag_cli.py <subcommand>`.
 
-This file wires all 13 feature modules into a single argparse CLI.
+This file wires all 16 feature modules into a single argparse CLI.
 memdag.py (demo #1) is NOT touched — it stays byte-identical.
 
-Subcommands (30 total):
+Subcommands (38 total):
   Core (delegated to memdag.*):   seed ask explain revoke dump
   CLI-owned enhanced:             ask (enhanced), add, migrate
   Modules via register():
@@ -22,6 +22,9 @@ Subcommands (30 total):
     memdag_heal       -> check rebuild-derived
     memdag_trust      -> elevate meet join elevations
     memdag_llm        -> llm-check
+    memdag_profile    -> profile
+    memdag_gate       -> check-action gate-log
+    memdag_corroborate -> register-root assert-claim corroborate claims-list roots-list
 """
 
 import argparse
@@ -44,6 +47,9 @@ import memdag_distill
 import memdag_heal
 import memdag_trust
 import memdag_llm
+import memdag_profile
+import memdag_gate
+import memdag_corroborate
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +71,9 @@ def migrate_all(conn):
     memdag_heal.migrate(conn)
     memdag_trust.migrate(conn)
     memdag_llm.migrate(conn)
+    memdag_profile.migrate(conn)
+    memdag_gate.migrate(conn)
+    memdag_corroborate.migrate(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +196,8 @@ def cmd_ask(args):
             print(text)
             if not created:
                 print(f"\ncited EXISTING node [{nid}] (novelty {score:.2f} < threshold)")
+                p = memdag_profile.profile(conn, nid)
+                print(memdag_profile.format_profile(p))
             else:
                 # Count used from the content citations
                 import re
@@ -201,6 +212,8 @@ def cmd_ask(args):
                     f" | sources considered: {total_sources}, used: {len(used_ids)},"
                     f" excluded: {excl_total} ({excl_detail})"
                 )
+                p = memdag_profile.profile(conn, nid)
+                print(memdag_profile.format_profile(p))
             return
 
         if args.llm:
@@ -243,6 +256,8 @@ def cmd_ask(args):
             f" | sources considered: {total_sources}, used: {len(used)},"
             f" excluded: {excl_total} ({excl_detail})"
         )
+        p = memdag_profile.profile(conn, nid)
+        print(memdag_profile.format_profile(p))
 
     finally:
         conn.close()
@@ -291,6 +306,15 @@ def cmd_seed(args):
 
 def cmd_explain(args):
     memdag.cmd_explain(args)
+    # After the frozen explain tree, append profile (Move 1 display — print-only, never gates)
+    conn = memdag.get_connection()
+    try:
+        migrate_all(conn)
+        with contextlib.suppress(ValueError):
+            p = memdag_profile.profile(conn, args.id)
+            print(memdag_profile.format_profile(p))
+    finally:
+        conn.close()
 
 
 def cmd_revoke(args):
@@ -377,6 +401,9 @@ def main(argv=None):
     memdag_heal.register(sub)
     memdag_trust.register(sub)
     memdag_llm.register(sub)
+    memdag_profile.register(sub)
+    memdag_gate.register(sub)
+    memdag_corroborate.register(sub)
 
     args = p.parse_args(argv)
     args.func(args)

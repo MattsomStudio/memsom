@@ -102,11 +102,52 @@ when Claude Code runs inside this repo. No global config is touched.
 | `join`           | memdag_trust       | Lattice join (max) of two integrity labels |
 | `elevations`     | memdag_trust       | Show elevation audit history for a node |
 | `llm-check`      | memdag_llm         | Check whether local Ollama is reachable |
+| `profile`        | memdag_profile     | Leaf-origin provenance histogram (display-only; floor gates, profile never does) |
+| `check-action`   | memdag_gate        | Action-time integrity gate: allow/deny by floor (the ONLY gate; audited in gate_log) |
+| `gate-log`       | memdag_gate        | Show recent gate decisions (audit log) |
+| `register-root`  | memdag_corroborate | Register an independence root for corroboration |
+| `assert-claim`   | memdag_corroborate | Assert a structured claim under a registered root |
+| `corroborate`    | memdag_corroborate | Mint a lift node when k independent roots agree |
+| `claims-list`    | memdag_corroborate | List all claims and their corroboration status |
+| `roots-list`     | memdag_corroborate | List all registered independence roots |
 
 ## Two integrity/confidentiality axes
 
 - **Integrity** (Biba, low-water-mark): `label = min(parents)`. Computed at derive time, re-computed on request. Trust can only FALL unless manually elevated (with an audit trail in the elevations table).
 - **Confidentiality** (Bell-LaPadula, high-water-mark): `conf_label = max(parents)`. Reading one secret source makes the derived answer secret. New columns default to 0 (public) so the frozen core is byte-identical.
+
+## Biba-fatigue v1
+
+### FLOOR vs PROFILE
+
+The **floor** (`label` column = `min(parents)`) is the only thing that gates action decisions. It is enforced by `check-action` and nowhere else.
+
+The **profile** is a display-only leaf-origin histogram. A derived node with 44 endorsed/user leaves and 1 external leaf reads as:
+
+```
+floor: EXTERNAL (gates) | provenance: 44 of 45 leaves endorsed/user, 1 external [mem:N] - inspect
+```
+
+...instead of a flat `EXTERNAL` scare label on every answer that touched the internet once. The fatigue fix does not weaken the gate — the floor still controls action decisions exactly as before.
+
+`ask` and `explain` both append the profile line automatically (display-only; neither call `check_action`).
+
+### Action gate
+
+READ paths are always free: `ask`, `explain`, `profile`, `blame` never gate. They always return the answer regardless of integrity level.
+
+`check-action <id> --require <level>` is the single enforcement point. It:
+- reads the stored floor (never recomputes),
+- compares floor >= required,
+- writes one row to `gate_log` (audited),
+- exits 0 on ALLOW, 2 on DENY,
+- names the weakest live leaf ancestor (culprit) on DENY.
+
+### Corroboration v1
+
+Registered independence roots only. An assertion only earns credit if its `independence_root` is registered — unregistered and open-web sources get zero credit (fail-closed).
+
+`k`-of-`n` distinct roots lifts `external(0)` -> `agent-derived(1)` **only**. The cap is load-bearing and never exceeded. The lift is a normal child node, so revoking any corroborating node cascades the lift away natively — no special teardown path needed.
 
 ## Tests
 
