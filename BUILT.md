@@ -317,3 +317,47 @@ source; recombination never lists a tainted prior).
   the `embeddings` table (keeps the source-only index invariant); surprise's
   vector arm is uncalibrated max(lex, vec) — threshold tuning on real corpora
   is future work.
+
+## Phase 3 — weights/distillation pipeline (2026-06-11, `_weights\`)
+
+**Thesis tested:** does a reflex-distilled adapter add anything over RAG-ing
+the DAG?  Per the 2026-06-03 pivot, NO knowledge was distilled — only the
+house response SCHEMA (Verdict / Evidence with `[mem:id|channel]` cites /
+Integrity floor / Next move, plus cite-or-refuse).  CLS framing: slow
+weights = schema, fast DAG = episodes.
+
+- **`memdag_reflex.py`** (+10 tests, suite now 404) — `export-reflex` CLI:
+  reflex-shaped chat pairs from UNTAINTED CONSOLIDATED memory only.
+  Eligibility = the full distill gate (alive, unredacted, unquarantined,
+  label floor, no live external ancestor — same CTE) AND consolidation
+  signature (all immediate parents archived by compact). `assert_clean()`
+  enforces the poison gate at export; 4 seeded poison cases (external-tainted
+  / tombstoned / quarantined / redacted) verifiably never reach the JSONL.
+- **Pipeline** (`_weights\`): `build_dataset.py` (own DB, 63 train + 10
+  held-out) → `train_reflex_planb.py` (QLoRA r=16, 127 s on the 5070) →
+  `merge_streaming.py` → `gguf_export.ps1` → ollama `memdag-reflex` (q4_k_m)
+  + `memdag-reflex-q8`.
+- **EOS saga closed:** root cause of the bug that survived 3 nmap retrains is
+  in `tok_surgery.py` — Foundation-Sec-8B is a continued-PRETRAIN base whose
+  chat tokens (`<|eot_id|>`, headers, pad) are UNTRAINED rows (embed norms
+  ~0.02 vs 0.67; pad row all-zero). Surgery (copy `<|end_of_text|>` rows +
+  mean-init) + LoRA on lm_head/embed_tokens fixed it: adapter stops on
+  `<|eot_id|>` every probe.
+- **⚠ Env regression (NOT memdag):** unsloth/triton training is broken
+  box-wide since ~06-03 (`KeyError: 'cubin'` in rms_layernorm backward —
+  repros on the KNOWN-GOOD `train_nmap.py`; suspect the GPU driver
+  reinstall).  Plan-B trainer (plain transformers+peft+bnb, no triton) is the
+  workaround and lives in `_weights\`.
+- **Eval verdict** (10 held-out probes, strict/lenient, `eval_results.json`):
+  adapter 1.00/1.00 · base+prompt 0.40 · qwen3-30b+prompt+RAG 0.80 strict /
+  1.00 lenient on the five surface metrics (cite format + refusal wording
+  were surface-only misses) — but 0/10 on the added integrity-value
+  substance check: it maps the channel into the Integrity line instead of
+  the integrity NAME (adapter 10/10). Honest call: **RAG+prompt on the strong base still
+  carries knowledge and nearly all schema; the adapter buys deterministic
+  format compliance + the integrity-vocabulary reflex on an 8B with no
+  prompt overhead.**  The security contribution (only untainted consolidated
+  memory can bake) holds regardless.
+- **Known limitation:** GGUF/quant artifacts keep schema+cites+stop but the
+  Verdict line degrades under quantization (63-example overfit adapter);
+  fp16 merged + PEFT runtime verified perfect (`test_merged.py`).

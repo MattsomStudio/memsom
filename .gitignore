@@ -12,3 +12,6 @@ _build/
 training.jsonl
 distill_config.json
 distill.ps1
+
+# weights PoC work dir — 47GB of GGUFs, vendored llama.cpp, adapters, scratch DBs (machine-specific)
+_weights/

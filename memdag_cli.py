@@ -53,6 +53,7 @@ import memdag_corroborate
 import memdag_ingest
 import memdag_retrieve
 import memdag_compact
+import memdag_reflex
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +474,7 @@ def main(argv=None):
     memdag_ingest.register(sub)
     memdag_retrieve.register(sub)
     memdag_compact.register(sub)
+    memdag_reflex.register(sub)
 
     args = p.parse_args(argv)
     args.func(args)
