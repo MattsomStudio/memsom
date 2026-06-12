@@ -242,12 +242,11 @@ def _llm_summarize(rows, model=None, base_url=None, timeout=60) -> str:
         " Output ONLY the bullets.\n\n"
         + "\n\n".join(c for _, c in rows)
     )
-    payload = json.dumps({
+    payload = json.dumps(memdag_llm._with_keep_alive({
         "model": m,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": memdag_llm.keep_alive(),  # VRAM hygiene: unload after use
-    }).encode("utf-8")
+    })).encode("utf-8")  # keep_alive stamped only when the env knob is set
     req = urllib.request.Request(
         base, data=payload, headers={"Content-Type": "application/json"}
     )

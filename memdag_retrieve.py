@@ -122,8 +122,9 @@ def _call_ollama_embed(text: str, timeout: int = 10):
     """POST to Ollama /api/embeddings.  Returns list[float] or raises."""
     model = _embed_model()
     url = _embed_url()
-    payload = json.dumps({"model": model, "prompt": text,
-                          "keep_alive": memdag_llm.keep_alive()}).encode("utf-8")
+    payload = json.dumps(memdag_llm._with_keep_alive(
+        {"model": model, "prompt": text}
+    )).encode("utf-8")
     req = urllib.request.Request(
         url, data=payload, headers={"Content-Type": "application/json"}
     )

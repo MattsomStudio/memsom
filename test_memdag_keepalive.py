@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Tests for the Ollama keep_alive VRAM-hygiene contract.
 
-Every memdag call to the Ollama API (/api/generate via memdag_llm and
-memdag_compact, /api/embeddings via memdag_retrieve) must stamp
-``keep_alive`` into the request body so the model unloads from VRAM
-immediately after each call by default (value 0), and must honor the
-MEMDAG_OLLAMA_KEEP_ALIVE env override (e.g. "5m").
+Shipped default: memdag does NOT touch keep_alive — the request body OMITS
+the key entirely so Ollama applies its own native default (model stays warm).
+When MEMDAG_OLLAMA_KEEP_ALIVE is set, every memdag call to the Ollama API
+(/api/generate via memdag_llm and memdag_compact, /api/embeddings via
+memdag_retrieve) must stamp that value into the request body — 0 = unload
+immediately after the call, "10m" = hold warm longer.
 
 No real Ollama needed: urllib.request.urlopen is patched in all network
 tests (same FakeResponse pattern as test_memdag_llm.py).  No DB needed.
@@ -97,22 +98,40 @@ def _capture_urlopen(captured, body):
 
 class TestKeepAliveHelper(EnvIsolation):
 
-    def test_default_is_int_zero(self):
+    def test_unset_returns_none(self):
+        # Shipped default: defer to Ollama's native keep_alive.
+        self.assertIsNone(keep_alive())
+
+    def test_blank_env_returns_none(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "   "
+        self.assertIsNone(keep_alive())
+
+    def test_zero_becomes_int_zero(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "0"
         self.assertEqual(keep_alive(), 0)
         self.assertIsInstance(keep_alive(), int)
 
-    def test_empty_env_falls_back_to_zero(self):
-        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "   "
-        self.assertEqual(keep_alive(), 0)
-
     def test_duration_string_passed_through(self):
-        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "5m"
-        self.assertEqual(keep_alive(), "5m")
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "10m"
+        self.assertEqual(keep_alive(), "10m")
 
     def test_numeric_string_becomes_int(self):
         os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "300"
         self.assertEqual(keep_alive(), 300)
         self.assertIsInstance(keep_alive(), int)
+
+
+class TestWithKeepAlive(EnvIsolation):
+    """The shared body-stamping helper."""
+
+    def test_unset_leaves_body_untouched(self):
+        body = memdag_llm._with_keep_alive({"model": "m"})
+        self.assertNotIn("keep_alive", body)
+
+    def test_zero_stamps_int_zero(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "0"
+        body = memdag_llm._with_keep_alive({"model": "m"})
+        self.assertEqual(body["keep_alive"], 0)
 
 
 # ---------------------------------------------------------------------------
@@ -129,18 +148,21 @@ class TestGenerateCarriesKeepAlive(EnvIsolation):
             llm_compose(QUESTION, SOURCES)
         return json.loads(captured["req"].data.decode("utf-8"))
 
-    def test_default_unloads_immediately(self):
+    def test_default_omits_keep_alive(self):
         body = self._body_for_llm_compose()
-        self.assertIn("keep_alive", body)
+        self.assertNotIn("keep_alive", body)
+
+    def test_zero_unloads_immediately(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "0"
+        body = self._body_for_llm_compose()
         self.assertEqual(body["keep_alive"], 0)
 
-    def test_env_override_keeps_warm(self):
-        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "5m"
+    def test_duration_override_keeps_warm(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "10m"
         body = self._body_for_llm_compose()
-        self.assertEqual(body["keep_alive"], "5m")
+        self.assertEqual(body["keep_alive"], "10m")
 
     def test_ollama_down_fallback_unchanged(self):
-        # keep_alive stamping must not break the LlmUnavailable fallback path
         with patch("memdag_llm.urllib.request.urlopen",
                    side_effect=urllib.error.URLError("connection refused")):
             with self.assertRaises(LlmUnavailable):
@@ -162,15 +184,19 @@ class TestEmbeddingsCarriesKeepAlive(EnvIsolation):
         self.assertEqual(vec, [0.1, 0.2])  # reply still parsed correctly
         return json.loads(captured["req"].data.decode("utf-8"))
 
-    def test_default_unloads_immediately(self):
+    def test_default_omits_keep_alive(self):
         body = self._body_for_embed()
-        self.assertIn("keep_alive", body)
+        self.assertNotIn("keep_alive", body)
+
+    def test_zero_unloads_immediately(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "0"
+        body = self._body_for_embed()
         self.assertEqual(body["keep_alive"], 0)
 
-    def test_env_override_keeps_warm(self):
-        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "5m"
+    def test_duration_override_keeps_warm(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "10m"
         body = self._body_for_embed()
-        self.assertEqual(body["keep_alive"], "5m")
+        self.assertEqual(body["keep_alive"], "10m")
 
     def test_embed_failure_still_raises_for_silent_degrade(self):
         # vector_search/_vector_sims rely on _call_ollama_embed raising so
@@ -198,12 +224,16 @@ class TestCompactSummaryCarriesKeepAlive(EnvIsolation):
             memdag_compact._llm_summarize(self.ROWS)
         return json.loads(captured["req"].data.decode("utf-8"))
 
-    def test_default_unloads_immediately(self):
+    def test_default_omits_keep_alive(self):
         body = self._body_for_summary()
-        self.assertIn("keep_alive", body)
+        self.assertNotIn("keep_alive", body)
+
+    def test_zero_unloads_immediately(self):
+        os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "0"
+        body = self._body_for_summary()
         self.assertEqual(body["keep_alive"], 0)
 
-    def test_env_override_keeps_warm(self):
+    def test_duration_override_keeps_warm(self):
         os.environ["MEMDAG_OLLAMA_KEEP_ALIVE"] = "10m"
         body = self._body_for_summary()
         self.assertEqual(body["keep_alive"], "10m")

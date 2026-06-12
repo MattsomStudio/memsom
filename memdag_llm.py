@@ -22,12 +22,11 @@ import memdag_schema  # noqa: F401  — imported for uniformity (migrate uses it
 DEFAULT_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "qwen3-abliterated:30b-a3b"
 
-# VRAM hygiene: Ollama's default keep_alive (~5min) leaves the model resident
-# in VRAM after each call.  On a shared 12GB card that squats memory and can
-# evict the operator's daily-driver model.  memdag defaults to "0" = unload
-# immediately after every call; set MEMDAG_OLLAMA_KEEP_ALIVE (e.g. "5m") to
-# keep the model warm between calls instead.
-DEFAULT_KEEP_ALIVE = "0"
+# VRAM hygiene knob.  By DEFAULT memdag does NOT touch keep_alive — it defers
+# to Ollama's own native behaviour (model stays warm ~5min), which is what most
+# users want.  On a shared/small-VRAM card you can force the model to unload
+# after every call by setting MEMDAG_OLLAMA_KEEP_ALIVE=0 (or any Ollama duration
+# string, e.g. "10m", to hold it warm longer).  Unset = let Ollama decide.
 
 # Regex for stripping <think>...</think> blocks (qwen3 thinking residue)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -70,23 +69,34 @@ def resolve(model=None, base_url=None):
 def keep_alive():
     """Resolve the Ollama ``keep_alive`` request value (shared helper).
 
-    Every memdag call to the Ollama API (/api/generate, /api/embeddings)
-    stamps this into the request body so the model is unloaded from VRAM
-    immediately after each call by default (value 0).
+    Returns None when MEMDAG_OLLAMA_KEEP_ALIVE is unset/blank — callers then
+    OMIT keep_alive from the request body so Ollama applies its own native
+    default (model stays warm). This keeps the shipped default behaviour normal.
 
-    Resolution: MEMDAG_OLLAMA_KEEP_ALIVE env var, else DEFAULT_KEEP_ALIVE
-    ("0").  Numeric strings are returned as int (Ollama treats the JSON
-    number 0 as unload-now); anything else (e.g. "5m", "1h") is passed
-    through verbatim as an Ollama duration string.
+    When the env var is set: a numeric string is returned as int (the JSON
+    number 0 tells Ollama to unload immediately after the call); anything else
+    (e.g. "10m", "1h") is passed through verbatim as an Ollama duration string.
     """
     raw = os.environ.get("MEMDAG_OLLAMA_KEEP_ALIVE")
     if raw is None or not raw.strip():
-        raw = DEFAULT_KEEP_ALIVE
+        return None
     raw = raw.strip()
     try:
         return int(raw)
     except ValueError:
         return raw
+
+
+def _with_keep_alive(body):
+    """Stamp keep_alive into *body* only when the env knob is set.
+
+    Mutates and returns *body*. Unset knob -> body untouched -> Ollama's
+    native keep_alive default applies. One place, used by every call site.
+    """
+    ka = keep_alive()
+    if ka is not None:
+        body["keep_alive"] = ka
+    return body
 
 
 def llm_compose(question, sources, model=None, base_url=None, timeout=60):
@@ -151,8 +161,9 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
         f"Question: {question}"
     )
 
-    payload = json.dumps({"model": m, "prompt": prompt, "stream": False,
-                          "keep_alive": keep_alive()}).encode("utf-8")
+    payload = json.dumps(_with_keep_alive(
+        {"model": m, "prompt": prompt, "stream": False}
+    )).encode("utf-8")
     req = urllib.request.Request(base, data=payload,
                                  headers={"Content-Type": "application/json"})
 

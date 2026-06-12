@@ -381,18 +381,22 @@ failures** (was 404; +12 in `test_memdag_keepalive.py`).
   stdlib-only (no pip installs), full `unittest discover` sweep plus the
   frozen-core gate as a separate step. README gained the badge + an
   `## Install` section.
-- **Ollama models unload after each use** (12GB-card hygiene). Every memdag
-  call to the Ollama API — `memdag_llm.llm_compose` (/api/generate),
+- **Ollama keep_alive knob (opt-in VRAM hygiene).** Every memdag call to the
+  Ollama API — `memdag_llm.llm_compose` (/api/generate),
   `memdag_compact._llm_summarize` (/api/generate),
-  `memdag_retrieve._call_ollama_embed` (/api/embeddings) — now stamps
-  `keep_alive` into the request body via ONE shared helper,
-  `memdag_llm.keep_alive()`. Default `0` = unload immediately (memdag can no
-  longer evict the daily-driver model by squatting VRAM); env override
-  `MEMDAG_OLLAMA_KEEP_ALIVE` (e.g. `5m`) keeps it warm. `memdag.py`'s only
-  urlopen is the seed-article fetch (not Ollama) — frozen file untouched.
-  Graceful Ollama-down fallbacks unchanged (regression-tested).
-- **Local-suite side effect, by design:** with Ollama running, the unmocked
-  embed paths now load+unload `nomic-embed-text` per call, so the full local
-  sweep takes ~95s instead of ~15s. Set `MEMDAG_OLLAMA_KEEP_ALIVE=5m` for a
-  fast local run; CI is unaffected (no Ollama → instant connection-refused
-  fallback).
+  `memdag_retrieve._call_ollama_embed` (/api/embeddings) — routes its body
+  through ONE shared helper, `memdag_llm._with_keep_alive()`. **Shipped
+  default: keep_alive is OMITTED** — memdag defers to Ollama's own native
+  warm-keep, which is what downstream users want. Setting
+  `MEMDAG_OLLAMA_KEEP_ALIVE=0` makes the model unload from VRAM immediately
+  after every call (Matt's 12GB-card config, so memdag never evicts his
+  daily-driver model); any duration string (e.g. `10m`) holds it warm longer.
+  `memdag.py`'s only urlopen is the seed-article fetch (not Ollama) — frozen
+  file untouched. Graceful Ollama-down fallbacks unchanged (regression-tested).
+- **Note for Matt's machines:** set `MEMDAG_OLLAMA_KEEP_ALIVE=0` as a user env
+  var on the PC and Mac to get unload-after-use locally without baking it into
+  the shipped default. With that set + Ollama running, the unmocked embed paths
+  load+unload `nomic-embed-text` per call, so the local sweep is slower (~95s
+  vs ~15s) — that's the hygiene working, not a bug. Unset (the default), the
+  local sweep is fast again; CI is unaffected either way (no Ollama → instant
+  connection-refused fallback).

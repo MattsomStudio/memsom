@@ -41,10 +41,12 @@ The DB lands beside `memdag.py` by default; override with the `MEMDAG_DB` env
 var. Running straight from the repo without installing still works exactly as
 before (`python memdag_cli.py ...`).
 
-> **VRAM hygiene:** every memdag call to the local Ollama API sends
-> `keep_alive: 0`, so the model unloads from VRAM immediately after each call
-> (it won't squat the GPU between queries). Set `MEMDAG_OLLAMA_KEEP_ALIVE`
-> (e.g. `5m`) to keep the model warm instead.
+> **VRAM hygiene knob:** by default memdag leaves Ollama's `keep_alive`
+> alone — the model stays warm per Ollama's own setting. On a shared or
+> small-VRAM card, set `MEMDAG_OLLAMA_KEEP_ALIVE=0` to make the model unload
+> from VRAM immediately after every call (so memdag won't squat the GPU
+> between queries); any Ollama duration string (e.g. `10m`) holds it warm
+> longer.
 
 ## Quickstart (frozen core)
 
