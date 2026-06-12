@@ -361,3 +361,38 @@ weights = schema, fast DAG = episodes.
 - **Known limitation:** GGUF/quant artifacts keep schema+cites+stop but the
   Verdict line degrades under quantization (63-example overfit adapter);
   fp16 merged + PEFT runtime verified perfect (`test_merged.py`).
+
+## Packaging + Ollama VRAM hygiene (2026-06-11)
+
+`memdag.py` / `test_memdag.py` stayed frozen. Suite: **416 passing, 0
+failures** (was 404; +12 in `test_memdag_keepalive.py`).
+
+- **pip-installable, flat layout kept** (`pyproject.toml`, hatchling). The
+  wheel ships all 23 `memdag*.py` files as top-level modules (allowlist
+  `only-include` — the hatchling equivalent of setuptools `py-modules`), so
+  the frozen `import memdag` contract is untouched. `external_fallback.txt`
+  is force-included at wheel root so `memdag seed --offline` works from
+  site-packages (`memdag.FALLBACK` resolves beside `memdag.py`). Tests,
+  `_build/`, `_weights/`, `*.db`, demo scripts are excluded from sdist and
+  wheel by construction. Console entry point: `memdag = memdag_cli:main`.
+  Verified in a throwaway venv: editable install, built-wheel install,
+  `memdag --help` / `seed --offline` / `ask` against a temp `MEMDAG_DB`.
+- **CI**: `.github/workflows/tests.yml` — Python 3.12 on ubuntu + windows,
+  stdlib-only (no pip installs), full `unittest discover` sweep plus the
+  frozen-core gate as a separate step. README gained the badge + an
+  `## Install` section.
+- **Ollama models unload after each use** (12GB-card hygiene). Every memdag
+  call to the Ollama API — `memdag_llm.llm_compose` (/api/generate),
+  `memdag_compact._llm_summarize` (/api/generate),
+  `memdag_retrieve._call_ollama_embed` (/api/embeddings) — now stamps
+  `keep_alive` into the request body via ONE shared helper,
+  `memdag_llm.keep_alive()`. Default `0` = unload immediately (memdag can no
+  longer evict the daily-driver model by squatting VRAM); env override
+  `MEMDAG_OLLAMA_KEEP_ALIVE` (e.g. `5m`) keeps it warm. `memdag.py`'s only
+  urlopen is the seed-article fetch (not Ollama) — frozen file untouched.
+  Graceful Ollama-down fallbacks unchanged (regression-tested).
+- **Local-suite side effect, by design:** with Ollama running, the unmocked
+  embed paths now load+unload `nomic-embed-text` per call, so the full local
+  sweep takes ~95s instead of ~15s. Set `MEMDAG_OLLAMA_KEEP_ALIVE=5m` for a
+  fast local run; CI is unaffected (no Ollama → instant connection-refused
+  fallback).

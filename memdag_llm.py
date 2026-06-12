@@ -22,6 +22,13 @@ import memdag_schema  # noqa: F401  — imported for uniformity (migrate uses it
 DEFAULT_URL = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "qwen3-abliterated:30b-a3b"
 
+# VRAM hygiene: Ollama's default keep_alive (~5min) leaves the model resident
+# in VRAM after each call.  On a shared 12GB card that squats memory and can
+# evict the operator's daily-driver model.  memdag defaults to "0" = unload
+# immediately after every call; set MEMDAG_OLLAMA_KEEP_ALIVE (e.g. "5m") to
+# keep the model warm between calls instead.
+DEFAULT_KEEP_ALIVE = "0"
+
 # Regex for stripping <think>...</think> blocks (qwen3 thinking residue)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
@@ -58,6 +65,28 @@ def resolve(model=None, base_url=None):
     m = model or os.environ.get("MEMDAG_LLM_MODEL") or DEFAULT_MODEL
     url = base_url or os.environ.get("MEMDAG_LLM_URL") or DEFAULT_URL
     return m, url
+
+
+def keep_alive():
+    """Resolve the Ollama ``keep_alive`` request value (shared helper).
+
+    Every memdag call to the Ollama API (/api/generate, /api/embeddings)
+    stamps this into the request body so the model is unloaded from VRAM
+    immediately after each call by default (value 0).
+
+    Resolution: MEMDAG_OLLAMA_KEEP_ALIVE env var, else DEFAULT_KEEP_ALIVE
+    ("0").  Numeric strings are returned as int (Ollama treats the JSON
+    number 0 as unload-now); anything else (e.g. "5m", "1h") is passed
+    through verbatim as an Ollama duration string.
+    """
+    raw = os.environ.get("MEMDAG_OLLAMA_KEEP_ALIVE")
+    if raw is None or not raw.strip():
+        raw = DEFAULT_KEEP_ALIVE
+    raw = raw.strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 def llm_compose(question, sources, model=None, base_url=None, timeout=60):
@@ -122,7 +151,8 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
         f"Question: {question}"
     )
 
-    payload = json.dumps({"model": m, "prompt": prompt, "stream": False}).encode("utf-8")
+    payload = json.dumps({"model": m, "prompt": prompt, "stream": False,
+                          "keep_alive": keep_alive()}).encode("utf-8")
     req = urllib.request.Request(base, data=payload,
                                  headers={"Content-Type": "application/json"})
 

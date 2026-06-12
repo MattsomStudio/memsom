@@ -246,6 +246,7 @@ def _llm_summarize(rows, model=None, base_url=None, timeout=60) -> str:
         "model": m,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": memdag_llm.keep_alive(),  # VRAM hygiene: unload after use
     }).encode("utf-8")
     req = urllib.request.Request(
         base, data=payload, headers={"Content-Type": "application/json"}

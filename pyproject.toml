@@ -1,0 +1,109 @@
+# memdag packaging — flat layout, deliberately.
+#
+# The repo is a flat set of memdag_*.py modules at the root and memdag.py is
+# imported as `import memdag` by everything (frozen core + 404-test suite).
+# DO NOT restructure into a memdag/ package: that breaks the frozen
+# `import memdag` contract.  Instead the wheel ships each module as a
+# top-level module (the hatchling equivalent of setuptools py-modules).
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memdag"  # working name
+version = "0.1.0"
+description = "Derivation-DAG memory store for AI agents: provenance edges, channel-stamped Biba integrity labels, revoke-cascade, taint tracking. Stdlib-only."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Matthew Somanlall" }]
+keywords = ["memory", "provenance", "dag", "agents", "integrity", "biba"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Security",
+]
+# ZERO runtime dependencies — memdag is stdlib-only.  The optional Ollama
+# integration is reached over urllib at runtime and is NOT a pip dependency.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/MattsomStudio/memdag"
+
+[project.scripts]
+memdag = "memdag_cli:main"
+
+# ---------------------------------------------------------------------------
+# Wheel: every memdag*.py runtime module as a flat top-level module.
+# Tests (test_*.py), _build/, _weights/, *.db, audit_poc, demo scripts are
+# all excluded by construction (only-include is an allowlist).
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "memdag.py",
+    "memdag_anticipatory.py",
+    "memdag_blame.py",
+    "memdag_cli.py",
+    "memdag_compact.py",
+    "memdag_confid.py",
+    "memdag_corroborate.py",
+    "memdag_distill.py",
+    "memdag_federation.py",
+    "memdag_gate.py",
+    "memdag_heal.py",
+    "memdag_ingest.py",
+    "memdag_llm.py",
+    "memdag_mcp.py",
+    "memdag_profile.py",
+    "memdag_quarantine.py",
+    "memdag_recompute.py",
+    "memdag_redact.py",
+    "memdag_reflex.py",
+    "memdag_relate.py",
+    "memdag_retrieve.py",
+    "memdag_schema.py",
+    "memdag_trust.py",
+]
+
+# Data file: memdag.py resolves external_fallback.txt next to itself
+# (HOME / "external_fallback.txt"), so it must land in site-packages root
+# beside memdag.py for `memdag seed --offline` to work after a wheel install.
+[tool.hatch.build.targets.wheel.force-include]
+"external_fallback.txt" = "external_fallback.txt"
+
+# ---------------------------------------------------------------------------
+# sdist: same allowlist + the data file (README/LICENSE/pyproject.toml are
+# added automatically from the project metadata above).
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "memdag.py",
+    "memdag_anticipatory.py",
+    "memdag_blame.py",
+    "memdag_cli.py",
+    "memdag_compact.py",
+    "memdag_confid.py",
+    "memdag_corroborate.py",
+    "memdag_distill.py",
+    "memdag_federation.py",
+    "memdag_gate.py",
+    "memdag_heal.py",
+    "memdag_ingest.py",
+    "memdag_llm.py",
+    "memdag_mcp.py",
+    "memdag_profile.py",
+    "memdag_quarantine.py",
+    "memdag_recompute.py",
+    "memdag_redact.py",
+    "memdag_reflex.py",
+    "memdag_relate.py",
+    "memdag_retrieve.py",
+    "memdag_schema.py",
+    "memdag_trust.py",
+    "external_fallback.txt",
+]

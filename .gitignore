@@ -15,3 +15,8 @@ distill.ps1
 
 # weights PoC work dir — 47GB of GGUFs, vendored llama.cpp, adapters, scratch DBs (machine-specific)
 _weights/
+
+# packaging — throwaway install-verification venv + build artifacts
+_pkgtest_venv/
+dist/
+*.egg-info/

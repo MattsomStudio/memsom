@@ -1,5 +1,7 @@
 # memdag (working name)
 
+[![tests](https://github.com/MattsomStudio/memdag/actions/workflows/tests.yml/badge.svg)](https://github.com/MattsomStudio/memdag/actions/workflows/tests.yml)
+
 > **One-liner — Matt's words, pending.** Do not ship the pitch without it.
 
 A derivation-DAG memory store for AI agents. Every memory is a node; edges mean
@@ -18,6 +20,31 @@ STORAGE     SQLite                      <- commodity, swappable
 Two entry points:
 - `memdag.py` — **frozen core slice** (do not touch; the original explain/revoke vertical slice, kept byte-identical as a regression anchor)
 - `memdag_cli.py` — **full surface** (all 13 feature modules, 30 subcommands)
+
+## Install
+
+Python 3.12+, **zero runtime dependencies** (stdlib only — the optional Ollama
+integration is reached over urllib and is never a pip dep). The repo keeps its
+flat module layout; the wheel ships every `memdag*.py` as a top-level module.
+
+```powershell
+# dev install (editable) — from the repo root
+pip install -e .
+
+# you now have the `memdag` console command (same surface as memdag_cli.py)
+memdag --help
+memdag seed --offline
+memdag ask "How should I configure Nebula?"
+```
+
+The DB lands beside `memdag.py` by default; override with the `MEMDAG_DB` env
+var. Running straight from the repo without installing still works exactly as
+before (`python memdag_cli.py ...`).
+
+> **VRAM hygiene:** every memdag call to the local Ollama API sends
+> `keep_alive: 0`, so the model unloads from VRAM immediately after each call
+> (it won't squat the GPU between queries). Set `MEMDAG_OLLAMA_KEEP_ALIVE`
+> (e.g. `5m`) to keep the model warm instead.
 
 ## Quickstart (frozen core)
 
