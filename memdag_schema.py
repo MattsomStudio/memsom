@@ -9,6 +9,13 @@ table_exists(conn, name)          -> bool
 column_exists(conn, table, col)   -> bool
 add_column(conn, table, col, decl)-> bool   (True=added, False=already present)
 ensure_table(conn, create_sql)    -> None   (idempotent; requires IF NOT EXISTS)
+taint_filter_clauses(conn, clearance=None, include_quarantined=False)
+                                  -> (clauses, params)
+    THE shared untainted-pool WHERE fragments (tombstoned / quarantined /
+    redacted / archived / conf_label).  Every full-pool read path
+    (memdag_cli._build_pool, memdag_retrieve._build_retrieve_pool,
+    memdag_anticipatory._untainted_clauses) builds on this so a future taint
+    column is added in ONE place and all of them inherit it.
 
 Re-exports for convenience
 --------------------------
@@ -98,3 +105,42 @@ def ensure_table(conn: sqlite3.Connection, create_sql: str) -> None:
             "ensure_table requires 'IF NOT EXISTS' in create_sql to be idempotent"
         )
     conn.executescript(create_sql)
+
+
+def taint_filter_clauses(conn: sqlite3.Connection, clearance=None,
+                         include_quarantined: bool = False):
+    """Shared WHERE fragments for the untainted read pool — ONE primitive.
+
+    Returns (clauses, params) suitable for ' AND '.join(clauses).
+
+    Semantics (mirrors the spine's pool filters; security load-bearing):
+      - tombstoned = 0          ALWAYS.
+      - status != 'quarantined' when the column exists, unless the caller
+                                explicitly opts in via include_quarantined=True
+                                (only memdag_retrieve's exclude_quarantined=False
+                                flag may widen this — and ONLY this — dimension).
+      - redacted = 0            when the column exists.  Never widenable.
+      - archived = 0            when the column exists.  Never widenable.
+      - conf_label <= ?         when *clearance* (an ALREADY-PARSED int 0-3) is
+                                given and the column exists (BLP no-read-up).
+
+    A missing column means the owning feature module has never run, so no node
+    can carry that taint marker — there is nothing to exclude.
+
+    Callers add their own channel / label / ordering clauses on top; this
+    function owns only the taint dimensions, so the next taint column is added
+    here once and every pool inherits it (the historical _build_pool vs
+    _build_retrieve_pool divergence bug class cannot recur).
+    """
+    clauses = ["tombstoned = 0"]
+    params = []
+    if not include_quarantined and column_exists(conn, "nodes", "status"):
+        clauses.append("status != 'quarantined'")
+    if column_exists(conn, "nodes", "redacted"):
+        clauses.append("redacted = 0")
+    if column_exists(conn, "nodes", "archived"):
+        clauses.append("archived = 0")
+    if clearance is not None and column_exists(conn, "nodes", "conf_label"):
+        clauses.append("conf_label <= ?")
+        params.append(clearance)
+    return clauses, params

@@ -379,30 +379,21 @@ def _build_retrieve_pool(
     exclude_quarantined: bool,
     exclude_redacted: bool,
 ) -> set:
-    """Return set of nids passing all pool filters."""
-    has_status = memdag_schema.column_exists(conn, "nodes", "status")
-    has_redacted = memdag_schema.column_exists(conn, "nodes", "redacted")
-    has_conf = memdag_schema.column_exists(conn, "nodes", "conf_label")
-    has_archived = memdag_schema.column_exists(conn, "nodes", "archived")
+    """Return set of nids passing all pool filters.
 
-    clauses = [
-        "tombstoned = 0",
-        "channel != 'agent-derived'",
-    ]
-    params = []
+    Taint dimensions come from memdag_schema.taint_filter_clauses — the ONE
+    shared untainted-pool primitive (same clauses as memdag_cli._build_pool
+    and memdag_anticipatory._untainted_clauses, by construction).
 
-    if exclude_quarantined and has_status:
-        clauses.append("status != 'quarantined'")
-    # F-15 fail-safe: tombstoned (above), redacted, and archived are ALWAYS
-    # excluded regardless of the exclude_* flags. The flags may only widen a
-    # pool; they must never widen it far enough to leak a node's liveness.
-    if has_redacted:
-        clauses.append("redacted = 0")
-    if has_archived:
-        clauses.append("archived = 0")
-    if has_conf:
-        clauses.append("conf_label <= ?")
-        params.append(clearance)
+    F-15 fail-safe: tombstoned, redacted, and archived are ALWAYS excluded
+    regardless of the exclude_* flags (the primitive does not let a caller
+    widen them). The flags may only widen the quarantine dimension; they must
+    never widen a pool far enough to leak a node's liveness.
+    """
+    clauses, params = memdag_schema.taint_filter_clauses(
+        conn, clearance=clearance,
+        include_quarantined=not exclude_quarantined)
+    clauses.append("channel != 'agent-derived'")
     if min_integrity is not None:
         clauses.append("label >= ?")
         params.append(min_integrity)

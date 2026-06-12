@@ -9,6 +9,8 @@ Public API
 recompute_label(conn, nid)     -> int          (ValueError if unknown id)
 recompute_node(conn, nid)      -> (old, new)   (writes only if changed and not fixed point)
 recompute_all(conn)            -> list[(id, old, new)]   (changed rows only)
+effective_labels(conn)         -> list[(id, stored, effective)]  (read-only bulk pass,
+                                  one shared memo — O(V+E); elevated fixed points skipped)
 
 CLI
 ---
@@ -229,6 +231,31 @@ def recompute_node(conn, nid):
     return (old, new)
 
 
+def effective_labels(conn):
+    """Read-only bulk pass: effective label for EVERY live agent-derived node
+    that is not an elevation fixed point.
+
+    Returns a list of (id, stored_label, effective_label) in id order.
+    ONE elevations scan + ONE shared memo across the whole graph — O(V+E)
+    total, vs O(V*(V+E)) for calling recompute_label() per node.
+
+    This is the single source of truth for "what recompute_all would compute":
+    recompute_all() writes exactly the rows where stored != effective, and
+    memdag_heal's integrity-mismatch check flags exactly the same rows.
+    """
+    elevated = _elevated_ids(conn)
+    memo = {}
+    rows = conn.execute(
+        "SELECT id, label FROM nodes WHERE tombstoned=0 AND channel='agent-derived'"
+        " ORDER BY id"
+    ).fetchall()
+    return [
+        (nid, stored, _effective(conn, nid, memo, elevated))
+        for nid, stored in rows
+        if nid not in elevated
+    ]
+
+
 def recompute_all(conn):
     """Recompute labels for every live agent-derived node that is not a fixed point.
 
@@ -240,21 +267,11 @@ def recompute_all(conn):
       stored labels, so the result is the same regardless of processing order.
     - A second call with no external label changes is a strict no-op (returns []).
     """
-    elevated = _elevated_ids(conn)
-    memo = {}
-    changes = []
-
-    rows = conn.execute(
-        "SELECT id, label FROM nodes WHERE tombstoned=0 AND channel='agent-derived'"
-        " ORDER BY id"
-    ).fetchall()
-
-    for nid, old in rows:
-        if nid in elevated:
-            continue
-        new = _effective(conn, nid, memo, elevated)
-        if new != old:
-            changes.append((nid, old, new))
+    changes = [
+        (nid, old, new)
+        for nid, old, new in effective_labels(conn)
+        if new != old
+    ]
 
     if changes:
         with conn:

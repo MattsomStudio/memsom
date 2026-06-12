@@ -78,17 +78,16 @@ def _check_dangling_edges(conn):
 
 
 def _check_integrity_mismatch(conn):
-    """(b) Live agent-derived node where stored label != recompute_label."""
-    rows = conn.execute(
-        "SELECT id, label FROM nodes WHERE tombstoned=0 AND channel='agent-derived'"
-        " ORDER BY id"
-    ).fetchall()
+    """(b) Live agent-derived node where stored label != effective label.
+
+    Uses memdag_recompute.effective_labels — ONE shared-memo bulk pass
+    (O(V+E)) instead of a fresh full DFS per node, and the exact same
+    computation recompute_all() uses, so this check flags a row iff
+    rebuild_derived()'s recompute step would change it.  Elevation fixed
+    points are skipped by effective_labels (they can never mismatch).
+    """
     violations = []
-    for nid, stored in rows:
-        try:
-            expected = memdag_recompute.recompute_label(conn, nid)
-        except ValueError:
-            continue
+    for nid, stored, expected in memdag_recompute.effective_labels(conn):
         if expected != stored:
             violations.append({
                 "kind": "integrity-mismatch",

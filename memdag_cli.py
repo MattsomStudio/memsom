@@ -99,18 +99,19 @@ def _build_pool(conn, clearance_name):
 
     Returns list of rows shaped like memdag.live_sources:
     (id, content, channel, label, source_ref).
+
+    Taint dimensions come from memdag_schema.taint_filter_clauses — the ONE
+    shared untainted-pool primitive (same clauses as
+    memdag_retrieve._build_retrieve_pool and
+    memdag_anticipatory._untainted_clauses, by construction).
     """
     clearance = memdag_confid.parse_conf(clearance_name)
+    clauses, params = memdag_schema.taint_filter_clauses(conn, clearance=clearance)
     return conn.execute(
         "SELECT id, content, channel, label, source_ref FROM nodes"
-        " WHERE tombstoned = 0"
-        "   AND channel != 'agent-derived'"
-        "   AND status != 'quarantined'"
-        "   AND redacted = 0"
-        "   AND archived = 0"
-        "   AND conf_label <= ?"
+        " WHERE channel != 'agent-derived' AND " + " AND ".join(clauses) +
         " ORDER BY label DESC, id ASC",
-        (clearance,)
+        params
     ).fetchall()
 
 

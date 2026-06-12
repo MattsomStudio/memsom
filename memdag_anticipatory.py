@@ -97,19 +97,13 @@ def _untainted_clauses(conn, clearance):
     tombstoned is ALWAYS excluded; the other filters are applied whenever the
     corresponding column exists (a missing column means the feature module has
     never run, so no node can carry that taint marker — nothing to exclude).
+
+    Delegates to memdag_schema.taint_filter_clauses — the ONE shared
+    untainted-pool primitive (same clauses as memdag_cli._build_pool and
+    memdag_retrieve._build_retrieve_pool, by construction).
     """
-    clauses = ["tombstoned = 0"]
-    params = []
-    if memdag_schema.column_exists(conn, "nodes", "status"):
-        clauses.append("status != 'quarantined'")
-    if memdag_schema.column_exists(conn, "nodes", "redacted"):
-        clauses.append("redacted = 0")
-    if memdag_schema.column_exists(conn, "nodes", "archived"):
-        clauses.append("archived = 0")
-    if memdag_schema.column_exists(conn, "nodes", "conf_label"):
-        clauses.append("conf_label <= ?")
-        params.append(memdag_confid.parse_conf(clearance))
-    return clauses, params
+    return memdag_schema.taint_filter_clauses(
+        conn, clearance=memdag_confid.parse_conf(clearance))
 
 
 def untainted_sources(conn, clearance="topsecret"):
