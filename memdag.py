@@ -14,17 +14,22 @@ Invariants (locked — see Vault Security/Teachings/2026-06-10-derivation-dag-pr
 
 CLI: seed [--offline] [--reset] · ask "question" · explain <id> ·
      revoke <id> [--reason ...] [--yes]  (dry-run by default) · dump
-DB:  memdag.db beside this file (override: MEMDAG_DB env var). Keep it OUT of
-     any synced or backup trees so private memories are not replicated.
+DB:  ~/.memdag/memdag.db (override the file with MEMDAG_DB, or the dir with
+     MEMDAG_HOME). Deliberately a user-data dir, NOT beside this module —
+     site-packages is wiped on venv upgrade/reinstall. Keep it OUT of any synced
+     or backup trees so private memories are not replicated.
 """
 
 import argparse, os, re, sqlite3, sys, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-HOME = Path(__file__).resolve().parent
+HOME = Path(__file__).resolve().parent  # packaged-resource dir (ships with the wheel)
 EXT_URL = "https://raw.githubusercontent.com/sqlite/sqlite/master/README.md"
 FALLBACK = HOME / "external_fallback.txt"
+# User DATA dir — separate from HOME so the DB survives venv upgrade/reinstall
+# (site-packages does not). `init`, db_path() and wire-config all derive from this.
+DATA_DIR = Path(os.environ.get("MEMDAG_HOME") or Path.home() / ".memdag")
 RANK = {"endorsed": 3, "user": 2, "agent-derived": 1, "external": 0}
 NAME = {3: "ENDORSED", 2: "USER", 1: "AGENT-DERIVED", 0: "EXTERNAL"}
 STOP = {"how", "should", "i", "a", "an", "the", "do", "does", "what", "my",
@@ -64,7 +69,7 @@ CASCADE_CTE = """WITH RECURSIVE descendants(id) AS (
 
 
 def db_path():
-    return Path(os.environ.get("MEMDAG_DB") or HOME / "memdag.db")
+    return Path(os.environ.get("MEMDAG_DB") or DATA_DIR / "memdag.db")
 
 
 def now_iso():

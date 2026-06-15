@@ -365,7 +365,7 @@ def cmd_init(args):
     tool fires first. Prints the resolved DB path on stdout so the bootstrap can
     wire it into client configs via MEMDAG_DB.
     """
-    data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
+    data_dir = os.path.abspath(os.path.expanduser(args.data_dir or str(memdag.DATA_DIR)))
     os.makedirs(data_dir, exist_ok=True)
     db = os.path.join(data_dir, "memdag.db")
     existed = os.path.exists(db)
@@ -485,8 +485,8 @@ def main(argv=None):
     # ---- init ----
     s_init = sub.add_parser("init",
                             help="create the data dir + DB and run all migrations (idempotent)")
-    s_init.add_argument("--data-dir", default="~/.memdag",
-                        help="where the DB lives (default: ~/.memdag)")
+    s_init.add_argument("--data-dir", default=None,
+                        help="where the DB lives (default: ~/.memdag, or $MEMDAG_HOME)")
     s_init.set_defaults(func=cmd_init)
 
     # ---- module mounts ----
