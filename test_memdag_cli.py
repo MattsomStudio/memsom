@@ -3,8 +3,8 @@
 
 Run:
   python -W error::DeprecationWarning -m unittest discover \
-    -s C:\\Users\\you\\memdag -p test_memdag_cli.py \
-    -t C:\\Users\\you\\memdag -v
+    -s <repo> -p test_memdag_cli.py \
+    -t <repo> -v
 """
 
 import contextlib

@@ -37,6 +37,7 @@ Repository = "https://github.com/MattsomStudio/memdag"
 
 [project.scripts]
 memdag = "memdag_cli:main"
+memdag-mcp = "memdag_mcp:main"
 
 # ---------------------------------------------------------------------------
 # Wheel: every memdag*.py runtime module as a flat top-level module.
@@ -48,11 +49,14 @@ only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
     "memdag_blame.py",
+    "memdag_chats.py",
     "memdag_cli.py",
     "memdag_compact.py",
+    "memdag_config.py",
     "memdag_confid.py",
     "memdag_corroborate.py",
     "memdag_distill.py",
+    "memdag_doctor.py",
     "memdag_federation.py",
     "memdag_gate.py",
     "memdag_heal.py",
@@ -85,11 +89,14 @@ only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
     "memdag_blame.py",
+    "memdag_chats.py",
     "memdag_cli.py",
     "memdag_compact.py",
+    "memdag_config.py",
     "memdag_confid.py",
     "memdag_corroborate.py",
     "memdag_distill.py",
+    "memdag_doctor.py",
     "memdag_federation.py",
     "memdag_gate.py",
     "memdag_heal.py",

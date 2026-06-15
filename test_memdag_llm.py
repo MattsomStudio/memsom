@@ -3,8 +3,8 @@
 
 Run:
   python -W error::DeprecationWarning -m unittest discover \
-      -s C:\\Users\\you\\memdag -p test_memdag_llm.py \
-      -t C:\\Users\\you\\memdag -v
+      -s <repo> -p test_memdag_llm.py \
+      -t <repo> -v
 
 No real Ollama needed: urllib.request.urlopen is patched in all network tests.
 No DB needed: llm_compose operates purely on source-row tuples passed in.

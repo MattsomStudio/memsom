@@ -15,7 +15,7 @@ Invariants (locked — see Vault Security/Teachings/2026-06-10-derivation-dag-pr
 CLI: seed [--offline] [--reset] · ask "question" · explain <id> ·
      revoke <id> [--reason ...] [--yes]  (dry-run by default) · dump
 DB:  memdag.db beside this file (override: MEMDAG_DB env var). Keep it OUT of
-     Syncthing-synced trees — same rule as sessions.db.
+     any synced or backup trees so private memories are not replicated.
 """
 
 import argparse, os, re, sqlite3, sys, urllib.request
@@ -23,16 +23,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HOME = Path(__file__).resolve().parent
-VAULT_SRC = Path("C:/Users/you/Vault/Notes/Lab/mesh-notes.md")
-EXT_URL = "https://raw.githubusercontent.com/slackhq/nebula/master/README.md"
+EXT_URL = "https://raw.githubusercontent.com/sqlite/sqlite/master/README.md"
 FALLBACK = HOME / "external_fallback.txt"
 RANK = {"endorsed": 3, "user": 2, "agent-derived": 1, "external": 0}
 NAME = {3: "ENDORSED", 2: "USER", 1: "AGENT-DERIVED", 0: "EXTERNAL"}
 STOP = {"how", "should", "i", "a", "an", "the", "do", "does", "what", "my",
         "to", "is", "it", "of", "for", "with", "in", "on", "and", "or"}
-USER_FACT = ("Nebula cert policy: follow the documented cert policy with the 'trusted' "
-             "group - give each device its own group and an explicit host-name rule "
-             "in host.yml inbound (my rule since the Kali untrust).")
+# Neutral demo seed content — no personal or homelab data ships in the repo.
+# Three nodes at three integrity channels, sharing vocabulary so `ask` composes.
+USER_FACT = ("I default to SQLite for local-first tools: it is a single file, needs no "
+             "server process, and is in the public domain.")
+ENDORSED_FACT = ("SQLite is a self-contained, serverless, zero-configuration, transactional "
+                 "SQL database engine. In write-ahead logging (WAL) mode one writer and many "
+                 "readers can proceed at the same time without blocking each other.")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nodes (
@@ -257,14 +260,13 @@ def cmd_seed(args):
                   file=sys.stderr)
             sys.exit(1)
         try:
-            vault_text = VAULT_SRC.read_text(encoding="utf-8", errors="replace")
             ext_text, ext_ref = fetch_external(args.offline)
         except OSError as err:
             print(f"[memdag] seed source unavailable: {err}", file=sys.stderr)
             sys.exit(1)
         with conn:  # fixed insert order -> stable demo ids 1/2/3
             u = insert_node(conn, USER_FACT, "user")
-            v = insert_node(conn, vault_text, "endorsed", source_ref=str(VAULT_SRC))
+            v = insert_node(conn, ENDORSED_FACT, "endorsed", source_ref="(bundled demo note)")
             e = insert_node(conn, ext_text, "external", source_ref=ext_ref)
         for nid in (u, v, e):
             node = get_node(conn, nid)

@@ -17,9 +17,95 @@ SUBSTRATE   the derivation DAG          <- this repo
 STORAGE     SQLite                      <- commodity, swappable
 ```
 
+## For beta testers — start here
+
+You're testing a private beta. Setup is one command.
+
+1. **Accept the GitHub invite** to `MattsomStudio/memdag`, then clone:
+   ```
+   git clone https://github.com/MattsomStudio/memdag.git
+   cd memdag
+   ```
+2. **Run the bootstrap** — it installs memdag in an isolated env, installs Ollama +
+   the embedding model, creates your database, optionally seeds from your own chat
+   history, and wires your MCP client:
+   ```
+   python3 bootstrap.py          # macOS / Linux
+   py bootstrap.py               # Windows
+   ```
+3. **Restart your MCP client** and ask it to use the `memdag` tools.
+
+### What gets set up
+- **Your data lives in `~/.memdag/`** (the database + an isolated virtualenv).
+  Nothing leaves your machine, and none of the author's data is in the repo. To
+  remove everything: delete `~/.memdag/` and remove the server from your client.
+- **Ollama is required** for semantic search — the bootstrap installs it and pulls
+  `nomic-embed-text` (~275 MB, runs on CPU). If that step fails, memdag still works
+  on keyword (BM25) search until you install Ollama manually; the bootstrap prints
+  the exact command.
+- **Client configs are merged, not overwritten** — your other MCP servers are kept
+  and the file is backed up to `*.bak` first. The launch command is written as an
+  absolute path (GUI clients don't inherit your shell `PATH`). Want to wire it
+  yourself? `python3 bootstrap.py --print-only` prints the snippets and writes nothing.
+
+### Per client
+- **Claude Code (CLI):** wired via `claude mcp add --scope user` when the `claude`
+  CLI is present; otherwise `~/.claude.json` is edited.
+- **Claude Desktop:** `claude_desktop_config.json` (macOS / Windows / Linux). Desktop
+  chats live server-side, so seeding there needs a manual export —
+  `memdag ingest-chats --file <exported.json>`.
+- **Codex:** `~/.codex/config.toml` (`[mcp_servers.memdag]`).
+
+### Verify it worked
+After restarting your client, ask it something like *"use the memdag ask tool to
+answer: what is SQLite?"* — it should return an answer with provenance citations.
+Or, in a terminal:
+```
+memdag doctor          # OS, Python, Ollama status, DB path, server self-check
+memdag seed --offline  # load 3 neutral demo nodes
+memdag ask "What is SQLite?"
+```
+
+### If the bootstrap fails (manual setup)
+The bootstrap is just a convenience wrapper. You can do every step by hand:
+```
+# 1. install memdag into an isolated environment
+pipx install .                      # or: python3 -m venv ~/.memdag/venv && ~/.memdag/venv/bin/pip install .
+
+# 2. install Ollama + the embedding model (https://ollama.com/download)
+ollama pull nomic-embed-text
+
+# 3. create the database
+memdag init                         # creates ~/.memdag/memdag.db, prints its path
+
+# 4. (optional) seed from your own chat history
+memdag ingest-chats                 # asks before reading anything
+
+# 5. print the exact client-config snippet and paste it yourself
+memdag wire-config --print-only
+```
+Use the **absolute path** to the `memdag-mcp` executable in your client config —
+GUI clients (Claude Desktop) don't inherit your shell `PATH`, so a bare
+`memdag-mcp` fails with `spawn ENOENT`. `memdag wire-config` fills it in for you.
+
+### Uninstall
+```
+rm -rf ~/.memdag                    # database + virtualenv
+pipx uninstall memdag               # if installed via pipx
+```
+Then remove the `memdag` entry from your client config (a `*.bak` of the original
+sits next to it).
+
+### Found a bug?
+Run `memdag doctor` and paste its output into a new GitHub issue (the bug-report
+template prompts for it). It captures your OS, Python, Ollama status, DB path, and a
+server self-check — everything needed to reproduce.
+
+---
+
 Two entry points:
 - `memdag.py` — **frozen core slice** (do not touch; the original explain/revoke vertical slice, kept byte-identical as a regression anchor)
-- `memdag_cli.py` — **full surface** (all 13 feature modules, 30 subcommands)
+- `memdag_cli.py` — **full surface** (all feature modules + the friend-beta commands: `init`, `ingest-chats`, `doctor`, `wire-config`)
 
 ## Install
 
@@ -34,7 +120,7 @@ pip install -e .
 # you now have the `memdag` console command (same surface as memdag_cli.py)
 memdag --help
 memdag seed --offline
-memdag ask "How should I configure Nebula?"
+memdag ask "What is SQLite?"
 ```
 
 The DB lands beside `memdag.py` by default; override with the `MEMDAG_DB` env
@@ -54,11 +140,11 @@ Python 3.12+, stdlib only. No install.
 
 ```powershell
 python memdag.py seed            # stamp 3 sources: user fact, endorsed vault note, external article
-python memdag.py ask "How should I configure Nebula?"
+python memdag.py ask "What is SQLite?"
 python memdag.py explain 4      # provenance tree with channels, labels, dates
 python memdag.py revoke 3 --reason "untrusted source retracted"        # dry run: blast radius
 python memdag.py revoke 3 --reason "untrusted source retracted" --yes  # tombstone + cascade
-python memdag.py ask "How should I configure Nebula?"                  # new answer, label rises
+python memdag.py ask "What is SQLite?"                  # new answer, label rises
 python memdag.py dump            # all nodes + all edges
 ```
 
@@ -68,13 +154,13 @@ Walkthrough script: `demo.ps1`. Scope fence: `WONT-BUILD.md`.
 
 ```powershell
 python memdag_cli.py seed --reset --offline
-python memdag_cli.py add "Nebula tip: disable the firewall..." --channel external --ref "blog.example"
-python memdag_cli.py ask "How should I configure Nebula?"
+python memdag_cli.py add "SQLite tip: always enable WAL mode for read concurrency" --channel external --ref "blog.example"
+python memdag_cli.py ask "What is SQLite?"
 python memdag_cli.py blame 5
 python memdag_cli.py consolidate
 python memdag_cli.py quarantine-list
 python memdag_cli.py revoke 4 --reason "poisoned blog" --yes
-python memdag_cli.py ask "How should I configure Nebula?"
+python memdag_cli.py ask "What is SQLite?"
 python memdag_cli.py redact 4 --reason "malicious payload" --yes
 python memdag_cli.py dump
 ```
@@ -94,7 +180,7 @@ python memdag_mcp.py --selfcheck
 Project-scoped registration: `.mcp.json` in this directory registers the server
 when Claude Code runs inside this repo. No global config is touched.
 
-> Keep `memdag.db` out of Syncthing-synced trees (same rule as `sessions.db`).
+> Keep `memdag.db` out of any synced or backup trees so private memories are not replicated.
 
 ## Command catalog
 
@@ -172,10 +258,10 @@ BM25 is **pure stdlib** — works offline with zero external services. Ollama `n
 python memdag_cli.py reindex
 
 # Query — returns ranked (id, content, channel, label, source_ref) rows
-python memdag_cli.py retrieve "How does Nebula hole punching work?"
+python memdag_cli.py retrieve "How does SQLite WAL mode work?"
 
 # Opt-in retrieval inside ask: uses retrieve() to build the source pool
-python memdag_cli.py ask --retrieve --topk 5 "How does Nebula hole punching work?"
+python memdag_cli.py ask --retrieve --topk 5 "How does SQLite WAL mode work?"
 ```
 
 Without `--retrieve`, `ask` is **unchanged** — it uses all live sources exactly as before. Every existing test still passes.

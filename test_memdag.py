@@ -209,13 +209,6 @@ class TestUtf8(Base):
         nid = self.add(text, "endorsed")
         self.assertEqual(memdag.get_node(self.conn, nid)["content"], text)
 
-    @unittest.skipUnless(memdag.VAULT_SRC.exists(), "real vault note not on this machine")
-    def test_utf8_roundtrip_real_vault_note(self):
-        raw = memdag.VAULT_SRC.read_bytes().decode("utf-8")
-        nid = self.add(memdag.VAULT_SRC.read_text(encoding="utf-8", errors="replace"), "endorsed")
-        stored = memdag.get_node(self.conn, nid)["content"]
-        self.assertEqual(stored, raw)  # the 112 non-ASCII bytes survive, no mojibake
-
 
 class TestCli(Base):
     def run_main(self, *argv):
@@ -280,6 +273,8 @@ class TestCli(Base):
         out = self.run_main("explain", str(d))
         self.assertEqual(out.count("(ancestry shown above)"), 1)  # second occurrence only
 
+    @unittest.skipUnless(sys.platform == "win32",
+                         "only Windows blocks unlink of an open DB file; POSIX allows it")
     def test_seed_reset_locked_db_clean_error(self):
         holder = memdag.get_connection()  # open handle: Windows blocks the unlink
         try:
@@ -290,10 +285,12 @@ class TestCli(Base):
             holder.close()
 
 
-@unittest.skipUnless(memdag.VAULT_SRC.exists() and memdag.FALLBACK.exists(),
-                     "demo data files not on this machine")
+@unittest.skipUnless(memdag.FALLBACK.exists(), "demo fallback not present")
 class TestEndToEndDemo(unittest.TestCase):
-    """The literal demo sequence as real subprocesses. Green here = demo day works."""
+    """The literal demo sequence as real subprocesses. Green here = demo day works.
+
+    Seed content is now neutral (SQLite-themed); the question shares the word
+    'sqlite' with all three seeded nodes so every source is used (used: 3)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -311,7 +308,7 @@ class TestEndToEndDemo(unittest.TestCase):
         return r.stdout
 
     def test_demo_sequence(self):
-        q = "How should I configure Nebula?"
+        q = "What is SQLite?"
         out = self.cli("seed", "--offline")
         self.assertIn("[1] user", out)
         self.assertIn("[2] endorsed", out)

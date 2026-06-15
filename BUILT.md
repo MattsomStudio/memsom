@@ -186,16 +186,16 @@ The frozen TestEndToEndDemo suite (`test_memdag.py`, 18 tests) runs against
 green. Command:
 
 ```powershell
-python -W error::DeprecationWarning -m unittest discover -s C:\Users\you\memdag -p "test_memdag.py" -t C:\Users\you\memdag -v
+python -W error::DeprecationWarning -m unittest discover -s <repo> -p "test_memdag.py" -t <repo> -v
 ```
 
 Full sweep:
 
 ```powershell
-python -W error::DeprecationWarning -m unittest discover -s C:\Users\you\memdag -p "test_memdag*.py" -t C:\Users\you\memdag -v
+python -W error::DeprecationWarning -m unittest discover -s <repo> -p "test_memdag*.py" -t <repo> -v
 ```
 
-> Keep `memdag.db` out of Syncthing-synced trees — same rule as `sessions.db`.
+> Keep `memdag.db` out of any synced or backup trees so private memories are not replicated.
 
 ---
 

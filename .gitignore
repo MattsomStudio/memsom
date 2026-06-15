@@ -8,6 +8,9 @@ __pycache__/
 # build orchestration (internal scaffolding, machine-specific paths)
 _build/
 
+# internal planning artifacts (design/plan docs quote homelab specifics — never ship)
+docs/
+
 # distill artifacts — regenerate per-machine via `distill-plan` / `export-training`
 training.jsonl
 distill_config.json

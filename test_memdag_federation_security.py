@@ -5,8 +5,8 @@ Each test mirrors a PoC from _build/audit_poc/ and asserts the attack NOW FAILS.
 
 Run:
   python -W error::DeprecationWarning -m unittest discover \
-    -s C:\\Users\\you\\memdag -p test_memdag_federation_security.py \
-    -t C:\\Users\\you\\memdag -v
+    -s <repo> -p test_memdag_federation_security.py \
+    -t <repo> -v
 """
 
 import os

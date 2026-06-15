@@ -54,6 +54,9 @@ import memdag_ingest
 import memdag_retrieve
 import memdag_compact
 import memdag_reflex
+import memdag_chats
+import memdag_doctor
+import memdag_config
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +356,29 @@ def cmd_migrate(args):
         conn.close()
 
 
+def cmd_init(args):
+    """Create the data dir + DB and run all migrations up front. Idempotent.
+
+    A fresh `get_connection()` only creates the core schema; module tables exist
+    only after each module's migrate() runs. `init` runs migrate_all ONCE so a
+    friend's first interaction never hits a missing table regardless of which
+    tool fires first. Prints the resolved DB path on stdout so the bootstrap can
+    wire it into client configs via MEMDAG_DB.
+    """
+    data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
+    os.makedirs(data_dir, exist_ok=True)
+    db = os.path.join(data_dir, "memdag.db")
+    existed = os.path.exists(db)
+    conn = memdag.get_connection(db)
+    try:
+        migrate_all(conn)
+    finally:
+        conn.close()
+    note = "already present, schema up to date" if existed else "created"
+    print(f"[memdag] data dir {data_dir} ({note})", file=sys.stderr)
+    print(db)  # stdout: the bare DB path, for the bootstrap to capture
+
+
 # ---------------------------------------------------------------------------
 # Core command bridges (delegate to frozen memdag functions)
 # ---------------------------------------------------------------------------
@@ -456,6 +482,13 @@ def main(argv=None):
         func=cmd_migrate
     )
 
+    # ---- init ----
+    s_init = sub.add_parser("init",
+                            help="create the data dir + DB and run all migrations (idempotent)")
+    s_init.add_argument("--data-dir", default="~/.memdag",
+                        help="where the DB lives (default: ~/.memdag)")
+    s_init.set_defaults(func=cmd_init)
+
     # ---- module mounts ----
     memdag_recompute.register(sub)
     memdag_redact.register(sub)
@@ -476,6 +509,9 @@ def main(argv=None):
     memdag_retrieve.register(sub)
     memdag_compact.register(sub)
     memdag_reflex.register(sub)
+    memdag_chats.register(sub)
+    memdag_doctor.register(sub)
+    memdag_config.register(sub)
 
     args = p.parse_args(argv)
     args.func(args)

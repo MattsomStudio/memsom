@@ -12,7 +12,7 @@
 #       second ask (after cleanup) -> node 6 (agent-derived, integrity higher)
 #   - mid-take screwup => re-run `python memdag_cli.py seed --reset --offline`
 $env:PYTHONUTF8 = '1'
-Set-Location C:\Users\you\memdag
+Set-Location $PSScriptRoot
 
 # 0) Fresh store — three stamped sources
 python memdag_cli.py seed --reset --offline

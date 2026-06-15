@@ -13,8 +13,8 @@ tests (same FakeResponse pattern as test_memdag_llm.py).  No DB needed.
 
 Run:
   python -W error::DeprecationWarning -m unittest discover \
-      -s C:\\Users\\you\\memdag -p test_memdag_keepalive.py \
-      -t C:\\Users\\you\\memdag -v
+      -s <repo> -p test_memdag_keepalive.py \
+      -t <repo> -v
 """
 
 import json
