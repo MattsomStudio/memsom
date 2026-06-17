@@ -204,9 +204,9 @@ def candidate_sentences(content):
     out = []
     for line in prose_lines(content):
         line = re.sub(r"^[-*]\s+", "", strip_furniture(line))
-        for sent in line.split(". "):
-            sent = sent.strip().rstrip(".:")
-            if 30 <= len(sent) <= 200:  # camera-readable claims, not war stories
+        for sent in re.split(r"(?<=[.?!])\s+", line):  # split on . ? ! (was ". " only)
+            sent = sent.strip().rstrip(".:?!")
+            if len(sent) >= 30:  # no upper cap: it was dropping long answer sentences
                 out.append(sent + ".")
     return out
 
@@ -223,7 +223,7 @@ def compose(question, sources):
                 cands = [first[:200].rstrip(".:") + "."]
         scored = [(sum(1 for k in keys if k in s.lower()), pos, s)
                   for pos, s in enumerate(cands)]
-        top = sorted([t for t in scored if t[0] > 0], key=lambda t: (-t[0], t[1]))[:2]
+        top = sorted([t for t in scored if t[0] > 0], key=lambda t: (-t[0], t[1]))  # keep all keyword-matching sentences (was [:2])
         picked = [s for _, _, s in sorted(top, key=lambda t: t[1])]
         if not picked and cands:  # every live source contributes >=1 claim,
             picked = [cands[0]]   # so revoking any source is visible by construction
