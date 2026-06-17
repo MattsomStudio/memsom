@@ -109,13 +109,17 @@ def _effective(conn, start_id, memo, elevated):
 
             # Cycle detection
             if nid in in_progress:
-                # Back-edge: use stored label to break the cycle
-                node = memdag.get_node(conn, nid)
-                val = node["label"] if node else 0
+                # RECOMPUTE-1: a back-edge contributes 0 (the integrity FLOOR),
+                # not the node's stored label. Using the stored label made a
+                # cyclic node's effective label order-dependent (and potentially
+                # RAISED). A provenance cycle can never *increase* integrity, so
+                # flooring to 0 is both safe (Biba low-water) and order-invariant:
+                # every traversal sees the same min. (Cycles only arise via a
+                # federation import with no acyclicity check.)
                 stack.pop()
                 if stack:
                     caller = stack[-1]
-                    caller[2] = val if caller[2] is None else min(caller[2], val)
+                    caller[2] = 0 if caller[2] is None else min(caller[2], 0)
                 continue
 
             node = memdag.get_node(conn, nid)

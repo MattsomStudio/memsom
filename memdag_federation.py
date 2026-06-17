@@ -44,6 +44,19 @@ import memdag_recompute
 CONF_FLOOR_UNTRUSTED = 1  # internal — untrusted nodes may never self-classify as PUBLIC(0).
 
 
+def _coerce_conf(raw, floor=0):
+    """FED-DOS-2: a changeset's conf_label is attacker/transport-controlled. Coerce
+    it to an int clamped to [floor, 3] — a non-numeric value must NOT crash int()
+    (untrusted branch), and an out-of-range value must NOT land verbatim in the
+    INTEGER column where it later crashes CONF_NAME lookups (RELATE-A2) or
+    mis-compares in recompute_conf_all. Bad input falls back to the floor.
+    """
+    try:
+        return min(3, max(floor, int(raw)))
+    except (ValueError, TypeError):
+        return floor
+
+
 # ---------------------------------------------------------------------------
 # Migration
 # ---------------------------------------------------------------------------
@@ -339,15 +352,26 @@ def read_jsonl(path):
     edges = []
     redactions = []
     for line in lines[1:]:
-        rec = json.loads(line)
+        # FED-DOS-1: a corrupted/truncated line must skip, not crash the import.
+        # Mirror the FED-3 tolerance in import_changeset so both the transport
+        # (read_jsonl) and in-memory paths are robust to disk/transport corruption.
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(rec, dict):
+            continue
         rec_type = rec.get("type")
         if rec_type == "node":
             d = {k: v for k, v in rec.items() if k != "type"}
             nodes.append(d)
         elif rec_type == "edge":
-            edges.append([rec["child"], rec["parent"]])
+            child, parent = rec.get("child"), rec.get("parent")
+            if child is not None and parent is not None:
+                edges.append([child, parent])
         elif rec_type == "redaction":
-            redactions.append({"uuid": rec["uuid"], "redacted_at": rec.get("redacted_at")})
+            if rec.get("uuid"):
+                redactions.append({"uuid": rec["uuid"], "redacted_at": rec.get("redacted_at")})
 
     return {
         "format": header["format"],
@@ -401,13 +425,20 @@ def import_changeset(conn, changeset):
     header_origin = changeset.get("origin")
     trusted = is_trusted(conn, header_origin)
 
-    # Collect the set of UUIDs arriving in this changeset (for edge validation).
-    changeset_uuids = {
-        n.get("uuid") for n in changeset.get("nodes", []) if n.get("uuid")
-    }
+    # FED-1: track UUIDs ACTUALLY INSERTED as new nodes this import (populated in
+    # Pass 1), NOT the UUIDs merely *claimed* in the attacker-supplied nodes array.
+    # An untrusted peer can echo a pre-existing local node's uuid into the nodes
+    # array; that dict hits the existing-node branch (no insert) but must NOT count
+    # as "arrived in this changeset" for edge authorization, or it could be wired as
+    # a forged provenance edge endpoint (both_in_changeset bypass).
+    inserted_uuids = set()
 
     # Cascade tombstones to apply AFTER the main transaction commits.
     cascade_tombstones = []  # list of (local_id, reason)
+    # FED-2: redactions applied on import must cascade to descendants (mirror the
+    # local redact_node default cascade=True and the tombstone-import cascade).
+    # Collected here, applied post-transaction once Pass 2 has wired edges.
+    cascade_redactions = []  # list of (local_id, reason)
 
     stats = {
         "nodes_new": 0,
@@ -472,20 +503,22 @@ def import_changeset(conn, changeset):
                     else:
                         # Source channel: derive label from channel, never from node.label
                         label = memdag.RANK[channel]
-                    # Trusted: keep conf_label as-is; recompute_conf_all re-floors derived.
-                    conf_label = node.get("conf_label", 0)
+                    # Trusted: keep conf_label as-is (coerced/clamped 0-3);
+                    # recompute_conf_all re-floors derived.
+                    conf_label = _coerce_conf(node.get("conf_label", 0), floor=0)
                 else:
                     # Untrusted origin: clamp channel and label to external floor.
                     channel = "external"
                     label = memdag.RANK["external"]  # 0
                     # Untrusted: never self-classify as PUBLIC(0) — floor to INTERNAL(1).
-                    conf_label = max(int(node.get("conf_label", 0) or 0), CONF_FLOOR_UNTRUSTED)
+                    conf_label = _coerce_conf(node.get("conf_label", 0),
+                                              floor=CONF_FLOOR_UNTRUSTED)
 
                 # F-04 / F-07: arriving-redacted node carries NO payload.
                 # Also scrub if we already hold the redaction record for this uuid.
                 content = "" if forced_redacted else node.get("content", "")
 
-                conn.execute(
+                cur = conn.execute(
                     "INSERT INTO nodes("
                     "  content, channel, label, conf_label, status, source_ref, created_at,"
                     "  tombstoned, tombstoned_at, revoke_reason,"
@@ -514,6 +547,13 @@ def import_changeset(conn, changeset):
                     )
                 )
                 stats["nodes_new"] += 1
+                inserted_uuids.add(uuid)  # FED-1: only freshly-inserted uuids authorize edges
+                if forced_redacted:
+                    # FED-2: cascade to descendants once edges are wired (post-txn).
+                    cascade_redactions.append(
+                        (cur.lastrowid,
+                         node.get("redact_reason") or "redacted (federated import)")
+                    )
 
             else:
                 # --- Existing node: monotonic merge ---
@@ -569,6 +609,12 @@ def import_changeset(conn, changeset):
                             )
                         )
                         updated = True
+                        # FED-2: scrub descendants too (post-txn), matching the
+                        # local redact_node(cascade=True) contract.
+                        cascade_redactions.append(
+                            (local_id,
+                             node.get("redact_reason") or "redacted (federated record)")
+                        )
                     # else: incoming redacted but not owned and no record -> ignore (F-03 preserved)
                 elif not inc_redacted and local_redacted:
                     # Incoming unredacted over local redacted -> BLOCK (F-07 / F-04 old-changeset restore).
@@ -607,24 +653,39 @@ def import_changeset(conn, changeset):
             )
         }
 
-        for child_uuid, parent_uuid in changeset.get("edges", []):
+        for edge in changeset.get("edges", []):
+            # FED-3: a malformed edge (not a [child, parent] pair) must skip, not
+            # crash the whole import. The changeset is honor-system single-operator
+            # transport, so the realistic source is disk/transport corruption.
+            if not (isinstance(edge, (list, tuple)) and len(edge) == 2):
+                stats["edges_skipped"] += 1
+                continue
+            child_uuid, parent_uuid = edge
             child_id = uuid_to_id.get(child_uuid)
             parent_id = uuid_to_id.get(parent_uuid)
             if child_id is None or parent_id is None:
                 stats["edges_skipped"] += 1
                 continue
 
-            # Authorization: allow the edge if BOTH endpoints arrived in this
-            # changeset (full round-trip) OR the child's stored origin matches
-            # the changeset header origin (child_owned).
-            # Reject: child is a pre-existing local-origin node and the
-            # changeset origin differs — blocks forged provenance (F-02 Attack A).
-            both_in_changeset = (
-                child_uuid in changeset_uuids and parent_uuid in changeset_uuids
+            # Authorization (FED-1 / F-02): accept the edge only if
+            #   (a) BOTH endpoints were freshly INSERTED this import — a trusted peer
+            #       shipping a self-contained subgraph (untrusted peers' inserts are
+            #       all external-clamped, so external<-external edges are harmless), OR
+            #   (b) the child is a node owned by the TRUSTED changeset origin
+            #       (re-sync: a peer declaring provenance for its own nodes).
+            # Rejected: a pre-existing local node becoming an edge endpoint just
+            # because its uuid was echoed in the nodes array (the both_in_changeset
+            # bypass), and the None==None match against NULL-origin local nodes.
+            both_inserted = (
+                child_uuid in inserted_uuids and parent_uuid in inserted_uuids
             )
-            child_owned = origin_by_uuid.get(child_uuid) == header_origin
+            child_owned = (
+                trusted
+                and header_origin is not None
+                and origin_by_uuid.get(child_uuid) == header_origin
+            )
 
-            if not (both_in_changeset or child_owned):
+            if not (both_inserted or child_owned):
                 stats["edges_skipped"] += 1
                 continue
 
@@ -639,10 +700,17 @@ def import_changeset(conn, changeset):
             else:
                 stats["edges_skipped"] += 1
 
-    # ----- Post-transaction: cascade tombstones + recompute -----
+    # ----- Post-transaction: cascade tombstones + redactions + recompute -----
     # These run AFTER the main txn commits so nested-context double-commit is avoided.
     for local_id, reason in cascade_tombstones:
         memdag.revoke_cascade(conn, local_id, reason)  # F-11: propagate to all descendants
+
+    # FED-2: cascade each import-applied redaction to its live descendants. Edges
+    # are now wired (Pass 2 committed), so cascade_set sees the full subtree.
+    # redact_node is idempotent (already-redacted nodes are skipped) and also
+    # de-indexes + records redaction events.
+    for local_id, reason in cascade_redactions:
+        memdag_redact.redact_node(conn, local_id, reason, cascade=True)
 
     # F-09 / F-02-B: re-floor every accepted agent-derived label to min(parents).
     memdag_recompute.recompute_all(conn)

@@ -36,12 +36,18 @@ class TestIngestChats(unittest.TestCase):
         os.environ.pop("MEMDAG_DB", None)
         self.tmp.cleanup()
 
-    def test_ingest_stamps_user_channel(self):
+    def test_ingest_stamps_channel_from_role(self):
+        # CHATS-1: channel is stamped from the message ROLE — user turns are 'user'
+        # (label 2), assistant turns are 'agent-derived' (label 1). Assistant text
+        # must never be laundered into the high-trust 'user' tier.
         summary = memdag_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
         self.assertEqual(summary["messages"], 2)
         self.assertEqual(summary["new_nodes"], 2)
-        channels = [r[0] for r in self.conn.execute("SELECT channel FROM nodes").fetchall()]
-        self.assertTrue(channels and all(c == "user" for c in channels))
+        rows = dict(self.conn.execute("SELECT content, channel FROM nodes").fetchall())
+        self.assertEqual(rows["first message"], "user",
+                         "a user turn must be channel=user")
+        self.assertEqual(rows["second message"], "agent-derived",
+                         "an assistant turn must be channel=agent-derived, not user")
 
     def test_ingest_dedups_on_rerun(self):
         memdag_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])

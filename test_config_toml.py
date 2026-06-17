@@ -87,5 +87,28 @@ class TestWireToml(unittest.TestCase):
                 self.assertEqual(parsed["mcp_servers"]["memdag"]["env"]["MEMDAG_DB"], db)
 
 
+class TestWireTomlInlineTable(unittest.TestCase):
+    """CONFIG-MERGE-INLINE-1: appending a [mcp_servers.memdag] header to a file
+    that defines mcp_servers as an INLINE table produces invalid TOML — wire_toml
+    must refuse and leave the file intact, not corrupt it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.toml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_inline_table_not_corrupted(self):
+        original = 'mcp_servers = { other = { command = "x" } }\n'
+        self.path.write_text(original, encoding="utf-8")
+        res = memdag_config.wire_toml(self.path, EXE, DB)
+        self.assertEqual(res["action"], "exists_differs",
+                         "must refuse rather than corrupt an inline-table config")
+        self.assertEqual(self.path.read_text(encoding="utf-8"), original,
+                         "file must be left untouched")
+        tomllib.loads(self.path.read_text(encoding="utf-8"))  # still parses
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -424,6 +424,11 @@ def retrieve(
     Ollama down -> BM25-only, no crash.
     """
     migrate(conn)
+    # RETRIEVE-1: a negative k makes len(pool)+k shrink the candidate window and
+    # fused[:k] drop the top hits / return []. Clamp at the API boundary.
+    k = max(0, int(k))
+    if k == 0:
+        return []
     clearance_int = memdag_confid.parse_conf(clearance)
 
     # Build the pool

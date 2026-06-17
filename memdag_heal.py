@@ -100,28 +100,28 @@ def _check_integrity_mismatch(conn):
 
 
 def _check_conf_mismatch(conn):
-    """(c) Live derived node where stored conf != max(parent conf) — only if memdag_confid present."""
+    """(c) Live derived node where stored conf != EFFECTIVE conf — only if memdag_confid present.
+
+    HEAL-1: the old check compared against the immediate parents' STORED conf
+    (single level), so a multi-hop laundered chain a->d1->d2 (both d1 and d2
+    raw-downgraded) was missed — d2's parent d1 now stores 0, so single-level
+    expected==stored==0 and check() reported clean while d2 was served below
+    clearance. memdag_confid.effective_confs computes the transitive high-water
+    max (the same value recompute_conf_all would write), mirroring the integrity
+    check's use of effective_labels, so check() now flags every row rebuild fixes.
+    """
     if memdag_confid is None:
         return []
     if not memdag_schema.column_exists(conn, "nodes", "conf_label"):
         return []
-    # Read-only expectation: max of live immediate parents' conf; keep stored when zero live parents.
+    eff = memdag_confid.effective_confs(conn)
     rows = conn.execute(
         "SELECT id, conf_label FROM nodes WHERE tombstoned=0 AND channel='agent-derived'"
         " ORDER BY id"
     ).fetchall()
     violations = []
     for nid, stored_conf in rows:
-        # compute expected conf: max of live immediate parents' conf_label
-        parent_rows = conn.execute(
-            "SELECT n.conf_label FROM edges e JOIN nodes n ON n.id = e.parent"
-            " WHERE e.child = ? AND n.tombstoned = 0",
-            (nid,)
-        ).fetchall()
-        if not parent_rows:
-            # zero live parents: keep stored — not a violation
-            continue
-        expected = max(r[0] for r in parent_rows)
+        expected = eff.get(nid, stored_conf)
         if expected != stored_conf:
             violations.append({
                 "kind": "conf-mismatch",

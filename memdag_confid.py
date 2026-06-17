@@ -146,42 +146,106 @@ def recompute_conf(conn: sqlite3.Connection, nid: int):
 
 
 def recompute_conf_all(conn: sqlite3.Connection):
-    """Recompute conf_label for every live agent-derived node in id order.
+    """Recompute conf_label (high-water MAX) for every live agent-derived node,
+    ORDER-INDEPENDENTLY.
 
-    Returns list of (id, old, new) for nodes whose label changed.
+    Returns list of (id, old, new) for nodes whose label net-changed.
 
-    id order = monotone derivation order: a parent's row is always finalized
-    before any child that derives from it is visited, so one ordered pass
-    propagates the high-water mark correctly through multi-hop chains.
+    CONFID-1: the old single `ORDER BY id` pass assumed id order == topological
+    order (parent.id < child.id).  That holds for in-process derive_node but is
+    FALSE after a federation import, which assigns local ids in changeset arrival
+    order — a child can land with a lower id than its parent, get computed against
+    a stale parent conf, and never be re-raised.  The integrity counterpart
+    (memdag_recompute.effective_labels) was hardened to an order-independent walk;
+    this is the confidentiality mirror.  We iterate the ordered pass to a fixpoint
+    (Gauss-Seidel over the finite {0..3} lattice with source nodes as constants),
+    so a child is re-visited after its parent settles regardless of id order.
 
-    Idempotent: a second call on an already-correct DB returns [].
+    Idempotent (CONFID-2): on an already-correct DB the first pass changes
+    nothing, the loop exits, and [] is returned.
+
+    Residual: a provenance CYCLE among agent-derived nodes (only reachable via a
+    federation import with no acyclicity check — see RECOMPUTE-1) can sustain a
+    stable spurious high value; the pass count is bounded so this can never hang.
     """
     rows = conn.execute(
         "SELECT id FROM nodes WHERE tombstoned = 0 AND channel = 'agent-derived' ORDER BY id"
     ).fetchall()
+    ids = [r[0] for r in rows]
 
-    changed = []
+    # Track each changed node's ORIGINAL conf and its FINAL conf so the returned
+    # (id, old, new) reflects the net change across all passes.
+    original = {}
+    final = {}
     with conn:
-        for (nid,) in rows:
-            row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
-            old = row[0]
+        # A DAG converges in <= depth passes (<= len(ids)); +1 guards the exit.
+        for _ in range(len(ids) + 1):
+            progressed = False
+            for nid in ids:
+                old = conn.execute(
+                    "SELECT conf_label FROM nodes WHERE id = ?", (nid,)
+                ).fetchone()[0]
+                parent_rows = conn.execute(
+                    "SELECT n.conf_label FROM edges e "
+                    "JOIN nodes n ON n.id = e.parent "
+                    "WHERE e.child = ? AND n.tombstoned = 0",
+                    (nid,)
+                ).fetchall()
+                if not parent_rows:
+                    continue
+                new = max(r[0] for r in parent_rows)
+                if new != old:
+                    conn.execute("UPDATE nodes SET conf_label = ? WHERE id = ?", (new, nid))
+                    if nid not in original:
+                        original[nid] = old
+                    final[nid] = new
+                    progressed = True
+            if not progressed:
+                break
 
-            parent_rows = conn.execute(
-                "SELECT n.conf_label FROM edges e "
-                "JOIN nodes n ON n.id = e.parent "
-                "WHERE e.child = ? AND n.tombstoned = 0",
-                (nid,)
-            ).fetchall()
+    return [
+        (nid, original[nid], final[nid])
+        for nid in ids
+        if nid in final and final[nid] != original[nid]
+    ]
 
-            if not parent_rows:
-                continue
 
-            new = max(r[0] for r in parent_rows)
-            if new != old:
-                conn.execute("UPDATE nodes SET conf_label = ? WHERE id = ?", (new, nid))
-                changed.append((nid, old, new))
+def effective_confs(conn: sqlite3.Connection) -> dict:
+    """Read-only: {id: effective_conf} for every live node — the value
+    recompute_conf_all WOULD write, computed without mutating.
 
-    return changed
+    Source nodes are fixed points (stored conf); a derived node = max over its
+    live parents' effective conf (high-water, transitive), order-independent via
+    the same bounded fixpoint recompute_conf_all uses. This is the confidentiality
+    mirror of memdag_recompute.effective_labels, so an auditor (memdag_heal) can
+    flag exactly the rows recompute_conf_all would fix — including multi-hop
+    laundered chains a single-level check misses (HEAL-1).
+    """
+    nodes = conn.execute(
+        "SELECT id, channel, conf_label FROM nodes WHERE tombstoned = 0"
+    ).fetchall()
+    conf = {nid: c for nid, _ch, c in nodes}
+    derived = [nid for nid, ch, _c in nodes if ch == "agent-derived"]
+    parents = {}
+    for child, parent in conn.execute(
+        "SELECT e.child, e.parent FROM edges e"
+        " JOIN nodes n ON n.id = e.parent WHERE n.tombstoned = 0"
+    ):
+        parents.setdefault(child, []).append(parent)
+    # Bounded Gauss-Seidel to a fixpoint (sources constant); +1 guards a cycle.
+    for _ in range(len(derived) + 1):
+        progressed = False
+        for nid in derived:
+            ps = parents.get(nid)
+            if not ps:
+                continue  # zero live parents: keep stored (matches recompute_conf_all)
+            new = max(conf[p] for p in ps)
+            if new != conf[nid]:
+                conf[nid] = new
+                progressed = True
+        if not progressed:
+            break
+    return conf
 
 
 def sources_for_clearance(conn: sqlite3.Connection, clearance) -> list:

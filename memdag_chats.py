@@ -131,20 +131,35 @@ def parse_file(client, path):
 # ---------------------------------------------------------------------------
 
 def ingest_chats(conn, client, files=None, dry_run=False):
-    """Parse + ingest every transcript for *client*. channel is always 'user'."""
+    """Parse + ingest every transcript for *client*.
+
+    CHATS-1: integrity channel is stamped from each message's ROLE — a user turn
+    is 'user' (label 2), an assistant turn is 'agent-derived' (label 1). Stamping
+    everything 'user' laundered assistant text (which can echo web/tool output or
+    reflected injection) into the high-trust tier.
+    CHATS-2: an unreadable transcript skips (counted), it never aborts the batch.
+    """
     if files is None:
         files = DISCOVERY[client]()
     files = list(files)
     msgs = 0
+    files_skipped = 0
     before = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     for path in files:
-        for rec in _iter_jsonl_records(path, EXTRACTORS[client]):
+        try:
+            records = list(_iter_jsonl_records(path, EXTRACTORS[client]))
+        except OSError:
+            files_skipped += 1
+            continue
+        for rec in records:
             msgs += 1
             if not dry_run:
-                memdag_ingest.ingest_text(conn, rec["text"], "user",
+                channel = "user" if rec.get("role") == "user" else "agent-derived"
+                memdag_ingest.ingest_text(conn, rec["text"], channel,
                                           source_ref=rec["source_ref"])
     after = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     return {"client": client, "files": len(files), "messages": msgs,
+            "files_skipped": files_skipped,
             "new_nodes": after - before, "dry_run": dry_run}
 
 

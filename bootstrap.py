@@ -138,6 +138,9 @@ def install_ollama(plan, runner=None, which=None):
 
 def _run(cmd, **kw):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
+    # BOOTSTRAP-1: a failed install step must raise, not be silently ignored and
+    # leave a half-configured install that still prints "=== done ===".
+    kw.setdefault("check", True)
     return subprocess.run(cmd, **kw)
 
 
@@ -160,6 +163,12 @@ def install_memdag(repo_dir, data_dir, os_name=None):
 def run_init(cli_exe, data_dir):
     r = subprocess.run([str(cli_exe), "init", "--data-dir", data_dir],
                        capture_output=True, text=True)
+    # BOOTSTRAP-1: on failure, abort with the captured stderr instead of guessing
+    # a DB path and proceeding as if setup succeeded.
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"`memdag init` failed (exit {r.returncode}): {(r.stderr or '').strip()}"
+        )
     db = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else \
         str(Path(data_dir).expanduser() / "memdag.db")
     return db
@@ -194,7 +203,12 @@ def main(argv=None):
 
     # 2. Install memdag
     print("\n[1/5] Installing memdag (isolated)...")
-    method, mcp_exe, cli_exe = install_memdag(repo_dir, data_dir, os_name=os_name)
+    try:
+        method, mcp_exe, cli_exe = install_memdag(repo_dir, data_dir, os_name=os_name)
+    except subprocess.CalledProcessError as exc:
+        print(f"ERROR: memdag install failed (exit {exc.returncode}). "
+              f"Aborting — nothing was wired.", file=sys.stderr)
+        return 1
     print(f"  installed via {method}; server exe -> {mcp_exe}")
 
     # 3. Ollama (graceful-fail, continue)
@@ -209,7 +223,11 @@ def main(argv=None):
 
     # 4. init
     print("\n[3/5] Creating the database...")
-    db_path = run_init(cli_exe, data_dir)
+    try:
+        db_path = run_init(cli_exe, data_dir)
+    except RuntimeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     print(f"  DB at {db_path}")
 
     # 5. Opt-in chat ingest
@@ -228,11 +246,18 @@ def main(argv=None):
     wire = [str(cli_exe), "wire-config", "--exe", str(mcp_exe), "--db", db_path]
     if args.print_only:
         wire.append("--print-only")
+    # BOOTSTRAP-1: a real (non print-only) wiring run must abort on failure like
+    # install/init now do — otherwise a failed wire still printed "=== done ===".
+    rcs = []
     if args.clients:
         for c in args.clients.split(","):
-            subprocess.run(wire + ["--client", c.strip()])
+            rcs.append(subprocess.run(wire + ["--client", c.strip()]).returncode)
     else:
-        subprocess.run(wire)
+        rcs.append(subprocess.run(wire).returncode)
+    if not args.print_only and any(rc != 0 for rc in rcs):
+        print("ERROR: MCP client wiring failed; setup is incomplete. "
+              "Run `memdag doctor` and re-run bootstrap.", file=sys.stderr)
+        return 1
 
     print("\n=== done ===")
     print(f"DB: {db_path}")

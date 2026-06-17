@@ -17,6 +17,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memdag
+import memdag_confid
 import memdag_heal
 import memdag_recompute
 import memdag_schema
@@ -39,6 +40,31 @@ class Base(unittest.TestCase):
     def add(self, content, channel):
         with self.conn:
             return memdag.insert_node(self.conn, content, channel, memdag.RANK[channel])
+
+
+# ---------------------------------------------------------------------------
+# HEAL-1: the conf-mismatch check must be MULTI-HOP, not single-level.
+# ---------------------------------------------------------------------------
+
+class TestConfMismatchMultiHop(Base):
+    def test_multihop_conf_mismatch_flagged(self):
+        memdag_confid.migrate(self.conn)
+        a = self.add("secret source", "endorsed")
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=3 WHERE id=?", (a,))  # SECRET
+        d1, _ = memdag.derive_node(self.conn, "hop one", [a])
+        d2, _ = memdag.derive_node(self.conn, "hop two", [d1])
+        memdag_confid.recompute_conf_all(self.conn)  # both -> conf 3
+        # Raw-downgrade BOTH (simulates an out-of-band laundering write).
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=0 WHERE id IN (?,?)", (d1, d2))
+
+        flagged = {v["node"] for v in memdag_heal.check(self.conn)
+                   if v["kind"] == "conf-mismatch"}
+        # The single-level check caught only d1 (its stored parent d1=0). The
+        # transitive check must catch d2 as well — it is the one served below clearance.
+        self.assertIn(d1, flagged)
+        self.assertIn(d2, flagged, "multi-hop conf laundering must not be missed")
 
 
 # ---------------------------------------------------------------------------

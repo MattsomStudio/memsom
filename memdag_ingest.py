@@ -165,6 +165,10 @@ def _split_chunks(text: str, chunk_chars: int) -> list:
     Guarantees: every yielded chunk is non-empty; no content is dropped
     (all characters from the input appear in some chunk, in order).
     """
+    # INGEST-4: chunk_chars <= 0 makes the slice window never shrink `remaining`,
+    # spinning forever while holding the connection. Reject it at the boundary.
+    if chunk_chars < 1:
+        raise ValueError("chunk_chars must be >= 1")
     if len(text) <= chunk_chars:
         stripped = text.strip()
         return [stripped] if stripped else []
@@ -210,11 +214,28 @@ def _split_chunks(text: str, chunk_chars: int) -> list:
     return chunks
 
 
-def _find_live_by_hash(conn: sqlite3.Connection, h: str):
-    """Return the id of a LIVE node with content_hash == h, or None."""
+def _find_live_by_hash(conn: sqlite3.Connection, h: str, channel: str):
+    """Return the id of an UNTAINTED, SAME-CHANNEL node with content_hash == h.
+
+    INGEST-1/2: dedup must not reuse a redacted, quarantined, or archived node.
+    A redacted node keeps its content_hash (content was zeroed, not the hash), and
+    a quarantined node is excluded from the untainted pool — deduping onto either
+    silently dropped the freshly-supplied content and/or handed back an excluded
+    node. Source the WHERE fragment from the shared taint filter so this dedup
+    path inherits every taint dimension the read pools already enforce.
+
+    INGEST-DEDUP-CHANNEL / CHATS-1-DEDUP-LAUNDER: dedup must also match on CHANNEL.
+    Otherwise identical bytes ingested under a DIFFERENT channel silently reuse the
+    existing node — an endorsed ingest returning a lower-integrity external node,
+    or an assistant turn (agent-derived) laundered onto an identical user node,
+    defeating the channel->label invariant. A cross-channel match mints a fresh
+    node with the caller's declared channel.
+    """
+    clauses, params = memdag_schema.taint_filter_clauses(conn)
     row = conn.execute(
-        "SELECT id FROM nodes WHERE content_hash = ? AND tombstoned = 0 LIMIT 1",
-        (h,),
+        "SELECT id FROM nodes WHERE content_hash = ? AND channel = ? AND "
+        + " AND ".join(clauses) + " LIMIT 1",
+        [h, channel] + params,
     ).fetchone()
     return row[0] if row else None
 
@@ -282,8 +303,8 @@ def ingest_text(
     for i, chunk_text in enumerate(chunks):
         h = _content_hash(chunk_text)
 
-        # Dedup: reuse LIVE node with same hash
-        existing = _find_live_by_hash(conn, h)
+        # Dedup: reuse LIVE node with same hash AND same channel
+        existing = _find_live_by_hash(conn, h, channel)
         if existing is not None:
             ids.append(existing)
             continue

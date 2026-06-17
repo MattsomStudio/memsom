@@ -84,6 +84,10 @@ def migrate_all(conn):
     memdag_ingest.migrate(conn)
     memdag_retrieve.migrate(conn)
     memdag_compact.migrate(conn)
+    # Versioned, once-only steps run AFTER all additive per-module migrate()s.
+    # Owns operations that must run exactly once in order (e.g. the destructive
+    # status-CHECK table rebuild) and is gated by PRAGMA user_version.
+    memdag_schema.run_versioned_migrations(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -121,22 +125,27 @@ def _build_pool(conn, clearance_name):
 def _count_excluded(conn, pool_ids, clearance_name):
     """Return a dict of exclusion counts for the summary line.
 
-    Fields: tombstoned, quarantined, redacted, above_clearance.
+    Fields: tombstoned, quarantined, redacted, archived, above_clearance.
     These are informational only and derived relative to the total raw
     source count (channel != agent-derived).
     """
     clearance = memdag_confid.parse_conf(clearance_name)
-    # All source rows (ignoring tombstoned / quarantined / redacted / conf filters)
+    # CLI-2: the pool filter excludes archived sources too, so the summary must
+    # account for them — otherwise, once compact has run, archived sources vanish
+    # from excl_total and the audit line under-reports how many were dropped.
+    has_archived = memdag_schema.column_exists(conn, "nodes", "archived")
+    arch_col = ", archived" if has_archived else ", 0 AS archived"
     all_sources = conn.execute(
-        "SELECT id, tombstoned, status, redacted, conf_label FROM nodes"
-        " WHERE channel != 'agent-derived'"
+        "SELECT id, tombstoned, status, redacted, conf_label" + arch_col +
+        " FROM nodes WHERE channel != 'agent-derived'"
     ).fetchall()
     pool_set = set(pool_ids)
     tombstoned = 0
     quarantined = 0
     redacted = 0
+    archived = 0
     above_clearance = 0
-    for sid, ts, status, red, conf in all_sources:
+    for sid, ts, status, red, conf, arch in all_sources:
         if sid in pool_set:
             continue
         if ts:
@@ -145,12 +154,15 @@ def _count_excluded(conn, pool_ids, clearance_name):
             quarantined += 1
         elif red:
             redacted += 1
+        elif arch:
+            archived += 1
         elif conf > clearance:
             above_clearance += 1
     return {
         "tombstoned": tombstoned,
         "quarantined": quarantined,
         "redacted": redacted,
+        "archived": archived,
         "above_clearance": above_clearance,
     }
 
@@ -162,6 +174,11 @@ def cmd_ask(args):
         migrate_all(conn)
 
         clearance = args.clearance  # default 'topsecret' = no filter
+        try:
+            memdag_confid.parse_conf(clearance)  # CLI-1: validate before any work
+        except ValueError as exc:
+            print(f"[memdag] invalid --clearance: {exc}", file=sys.stderr)
+            sys.exit(1)
         pool = _build_pool(conn, clearance)
 
         if args.retrieve:
@@ -181,7 +198,8 @@ def cmd_ask(args):
 
         pool_ids = [row[0] for row in pool]
         excl = _count_excluded(conn, pool_ids, clearance)
-        excl_total = excl["tombstoned"] + excl["quarantined"] + excl["redacted"] + excl["above_clearance"]
+        excl_total = (excl["tombstoned"] + excl["quarantined"] + excl["redacted"]
+                      + excl["archived"] + excl["above_clearance"])
 
         text = None
         used = []
@@ -241,7 +259,8 @@ def cmd_ask(args):
                 used_ids = sorted({int(m) for m in re.findall(r'\[mem:(\d+)\|', text)})
                 excl_detail = (
                     f"tombstoned: {excl['tombstoned']}, quarantined: {excl['quarantined']}, "
-                    f"redacted: {excl['redacted']}, above-clearance: {excl['above_clearance']}"
+                    f"redacted: {excl['redacted']}, archived: {excl['archived']}, "
+                    f"above-clearance: {excl['above_clearance']}"
                 )
                 print(
                     f"\nstored as node [{nid}] | integrity: {memdag.NAME[label]}"
@@ -298,7 +317,8 @@ def cmd_ask(args):
 
         excl_detail = (
             f"tombstoned: {excl['tombstoned']}, quarantined: {excl['quarantined']}, "
-            f"redacted: {excl['redacted']}, above-clearance: {excl['above_clearance']}"
+            f"redacted: {excl['redacted']}, archived: {excl['archived']}, "
+            f"above-clearance: {excl['above_clearance']}"
         )
         print(text)
         print(
@@ -514,7 +534,14 @@ def main(argv=None):
     memdag_config.register(sub)
 
     args = p.parse_args(argv)
-    args.func(args)
+    # Propagate a handler's NONZERO return as the process exit code so soft failures
+    # (e.g. wire-config exists_differs/malformed) are detectable by callers like
+    # bootstrap. A None/0 return falls through to a normal exit 0 — preserving the
+    # contract that main() returns normally on success (handlers that sys.exit()
+    # themselves still win).
+    rc = args.func(args)
+    if rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

@@ -277,10 +277,39 @@ def assert_clean(records, forbidden):
 # CLI
 # ---------------------------------------------------------------------------
 
+def _tainted_node_ids(conn):
+    """Ids of nodes that must never be the source of a training record."""
+    return {
+        r[0] for r in conn.execute(
+            "SELECT id FROM nodes"
+            " WHERE channel = 'external' OR status = 'quarantined'"
+            "    OR tombstoned = 1 OR redacted = 1"
+        )
+    }
+
+
+def _assert_no_tainted_source(records, tainted_ids):
+    """REFLEX-1 backstop: fail if any record's SOURCE node is itself tainted.
+
+    REFLEX-NEW-1: the first attempt matched tainted *content substrings* against
+    every record — false-positive-prone (clean extractive summaries legitimately
+    share words with tainted nodes), turning a coincidental overlap into a total
+    export DoS. Cross-checking the record's node_id against the tainted-id set is
+    precise (zero false positives) and catches the real regression: a tainted node
+    slipping through export_reflex's selection gate.
+    """
+    bad = sorted({r["node_id"] for r in records
+                  if r.get("node_id") in tainted_ids})
+    if bad:
+        raise ValueError(
+            f"TAINT GATE FAILURE: training record(s) sourced from tainted node(s) {bad}")
+
+
 def cmd_export_reflex(args):
     conn = memdag.get_connection()
     try:
         records = export_reflex(conn, args.min_integrity)
+        _assert_no_tainted_source(records, _tainted_node_ids(conn))  # REFLEX-1
         memdag_distill.write_jsonl(args.out, records)
         n_ans = sum(1 for r in records if r["kind"] == "answer")
         n_ref = len(records) - n_ans

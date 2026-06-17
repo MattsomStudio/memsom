@@ -28,6 +28,7 @@ register(subparsers) mounts this into a unified CLI.
 
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -157,12 +158,19 @@ def export_training(conn, min_integrity=1):
 
     # Fetch candidate rows.  The redacted column may not exist in a fresh DB
     # before migrate() is called — migrate() guarantees it exists first.
+    # DISTILL-AUDIT-1: also exclude archived (consolidated-away) nodes when the
+    # column exists — a superseded node must not bake into the distilled weights,
+    # matching the taint dimensions every other read path enforces.
+    archived_clause = ""
+    if memdag_schema.column_exists(conn, "nodes", "archived"):
+        archived_clause = " AND archived=0"
     rows = conn.execute(
         "SELECT id, content FROM nodes"
         " WHERE channel='agent-derived'"
         "   AND tombstoned=0"
         "   AND redacted=0"
         "   AND status != 'quarantined'"
+        + archived_clause +
         "   AND label >= ?"
         " ORDER BY id",
         (floor,)
@@ -221,6 +229,15 @@ def distill_plan(model=None, out_dir=None):
     itself is the one manual GPU step that memdag deliberately does not automate.
     """
     model = model or os.environ.get("MEMDAG_LLM_MODEL") or "qwen3-abliterated:30b-a3b"
+    # DISTILL-1: `model` is interpolated raw into the generated distill.ps1 (FROM
+    # line + Modelfile here-string). Constrain it to the Ollama model-name charset
+    # so a crafted --model / env value can't inject PowerShell into the emitted
+    # artifact (codegen hygiene — memdag never executes the stub, but the operator
+    # might).
+    if not re.fullmatch(r"[A-Za-z0-9._:/-]+", model):
+        raise ValueError(
+            f"invalid model name {model!r}: allowed chars are letters, digits, . _ : / -"
+        )
     if out_dir is not None:
         out_dir = Path(out_dir)
     else:

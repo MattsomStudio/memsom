@@ -433,6 +433,35 @@ class TestPrefetchCacheServeWarm(Phase2Base):
             "SELECT COUNT(*) FROM prefetch_cache").fetchone()[0]
         self.assertEqual(n_rows, 0, "stale cache row must be dropped")
 
+    def test_anticipatory1_prefetch_stamps_conf_no_read_up(self):
+        """ANTICIPATORY-1: an answer derived from a SECRET source must be minted
+        with the high-water conf_label, so prefetch can't cache it as PUBLIC and
+        serve_warm can't hand it to a PUBLIC-clearance reader."""
+        sid = self.add(SRC_NEBULA, "endorsed")
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=3 WHERE id=?", (sid,))  # SECRET
+        for _ in range(3):
+            memdag_anticipatory.observe(self.conn, self.Q)
+
+        results = memdag_anticipatory.prefetch(self.conn, k=1, clearance="topsecret")
+        self.assertEqual(len(results), 1)
+        nid = results[0][1]
+
+        # The minted answer carries the SECRET high-water conf (was DEFAULT 0).
+        conf = self.conn.execute(
+            "SELECT conf_label FROM nodes WHERE id=?", (nid,)).fetchone()[0]
+        self.assertEqual(conf, 3, "derived answer must inherit the SECRET conf_label")
+
+        # A topsecret-cleared reader is served warm...
+        self.assertIsNotNone(
+            memdag_anticipatory.serve_warm(self.conn, self.Q, clearance="topsecret"),
+            "a topsecret-cleared reader is still served warm")
+        # ...but a PUBLIC reader gets nothing (no-read-up). NB serve_warm at a
+        # clearance miss also evicts the row (cache hygiene), so this is asserted last.
+        self.assertIsNone(
+            memdag_anticipatory.serve_warm(self.conn, self.Q, clearance="public"),
+            "SECRET-derived answer must NOT be served below clearance")
+
 
 class TestNovelRecombination(Phase2Base):
     """Phase 2 deliverable 3: exact-parent-set precedent detection."""

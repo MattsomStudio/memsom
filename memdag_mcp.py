@@ -62,6 +62,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Node id to blame"},
+                "clearance": {"type": "string",
+                              "description": "confidentiality ceiling (public|internal|secret|topsecret); "
+                                             "suppresses content of roots above it"},
             },
             "required": ["id"],
         },
@@ -227,7 +230,10 @@ def _tool_argv(name, arguments):
         return ["explain", str(arguments["id"])]
 
     if name == "blame":
-        return ["blame", str(arguments["id"])]
+        argv = ["blame", str(arguments["id"])]
+        if arguments.get("clearance"):
+            argv += ["--clearance", str(arguments["clearance"])]
+        return argv
 
     if name == "revoke":
         argv = ["revoke", str(arguments["id"])]
@@ -307,6 +313,10 @@ def _call_tool(name, arguments):
         argv = _tool_argv(name, arguments)
     except ValueError as exc:
         return (str(exc), True)
+    except KeyError as exc:
+        # MCP-2: a missing required argument is a client error, not an internal
+        # crash — report the missing field, don't leak a traceback.
+        return (f"missing required argument: {exc}", True)
 
     out_buf = io.StringIO()
     err_buf = io.StringIO()
@@ -320,8 +330,14 @@ def _call_tool(name, arguments):
         if code not in (0, None):
             is_error = True
     except Exception:
+        # MCP-2 (inner path): _call_tool CATCHES the exception and returns its
+        # text, so writing the traceback into out_buf leaked absolute paths + the
+        # internal call graph to the client (the outer handle() guard never sees
+        # it). Log the traceback to stderr for the operator; return only a generic
+        # message — matching the MCP-2 contract on every route.
         is_error = True
-        out_buf.write(traceback.format_exc())
+        print(traceback.format_exc(), file=sys.stderr)
+        out_buf.write(f"internal error in tool {name!r}")
 
     stdout_text = out_buf.getvalue()
     stderr_text = err_buf.getvalue()
@@ -343,6 +359,15 @@ def handle(msg):
 
     None is returned for id-less notifications (no response expected).
     """
+    # MCP-1: a valid JSON line that decodes to a non-object (number/string/array/
+    # null) must not crash the server. Reject it with a JSON-RPC -32600 instead of
+    # raising AttributeError on .get().
+    if not isinstance(msg, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request: expected a JSON object"},
+        }
     msg_id = msg.get("id")  # may be None for notifications
     method = msg.get("method", "")
 
@@ -393,13 +418,15 @@ def handle(msg):
         try:
             text, is_error = _call_tool(tool_name, arguments)
         except Exception:
+            # MCP-2: log the full traceback to stderr (operator), but NEVER return
+            # it to the client — it leaks absolute paths + the internal call graph.
             tb = traceback.format_exc()
             print(f"[memdag-mcp] unhandled error in _call_tool: {tb}", file=sys.stderr)
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "result": {
-                    "content": [{"type": "text", "text": tb}],
+                    "content": [{"type": "text", "text": f"internal error in tool {tool_name!r}"}],
                     "isError": True,
                 },
             }
@@ -466,7 +493,7 @@ def serve_stdio():
             print(f"[memdag-mcp] handle() crash: {tb}", file=sys.stderr)
             response = {
                 "jsonrpc": "2.0",
-                "id": msg.get("id"),
+                "id": msg.get("id") if isinstance(msg, dict) else None,
                 "error": {"code": -32603, "message": "internal error"},
             }
 

@@ -69,12 +69,15 @@ def _fetch_full(conn, nid):
     """
     has_redacted = memdag_schema.column_exists(conn, "nodes", "redacted")
     has_status = memdag_schema.column_exists(conn, "nodes", "status")
+    has_conf = memdag_schema.column_exists(conn, "nodes", "conf_label")
 
     extra = ""
     if has_redacted:
         extra += ", redacted"
     if has_status:
         extra += ", status"
+    if has_conf:
+        extra += ", conf_label"
 
     row = conn.execute(
         f"SELECT id, content, channel, label, source_ref, tombstoned{extra}"
@@ -98,16 +101,32 @@ def _fetch_full(conn, nid):
     if has_redacted:
         idx += 1
     d["status"] = row[idx] if has_status else "live"
+    if has_status:
+        idx += 1
+    d["conf_label"] = row[idx] if has_conf else 0
     return d
 
 
-def _build_entry(node):
-    """Turn a _fetch_full dict into a blame result dict."""
+def _build_entry(node, clearance=None):
+    """Turn a _fetch_full dict into a blame result dict.
+
+    BLAME-CONF-1: blame is a read path and must honour the confidentiality axis
+    like ask/retrieve. When *clearance* is given (a parsed int 0-3) and the node's
+    conf_label exceeds it, the content snippet is suppressed to '[ABOVE CLEARANCE]'
+    (BLP no-read-up) — metadata (id/channel/label/state/ref) stays visible so the
+    provenance shape is still auditable. clearance=None preserves full admin/history
+    use (the default).
+    """
     tombstoned = bool(node["tombstoned"])
     redacted = bool(node["redacted"])
     status = node["status"] or "live"
     state = _state_str(tombstoned, redacted, status)
-    line = "[REDACTED]" if redacted else memdag.snippet(node["content"])
+    if redacted:
+        line = "[REDACTED]"
+    elif clearance is not None and node.get("conf_label", 0) > clearance:
+        line = "[ABOVE CLEARANCE]"
+    else:
+        line = memdag.snippet(node["content"])
     return {
         "id": node["id"],
         "channel": node["channel"],
@@ -123,7 +142,7 @@ def _build_entry(node):
 # Public API
 # ---------------------------------------------------------------------------
 
-def blame(conn, nid):
+def blame(conn, nid, clearance=None):
     """Trace node *nid* back to its non-derived root ancestors.
 
     Returns a list of dicts, one per unique root source node, ordered by
@@ -135,6 +154,10 @@ def blame(conn, nid):
     Tombstoned and redacted ancestors are INCLUDED with their state; they are
     never silently skipped (blame is a history tool).
 
+    BLAME-CONF-1: *clearance* (parsed int 0-3, or None for no filter) suppresses
+    the content snippet of any root above clearance — blame must not become a
+    provenance oracle that leaks high-confidentiality source content.
+
     Raises ValueError for an unknown *nid*.
     """
     node = _fetch_full(conn, nid)
@@ -143,19 +166,22 @@ def blame(conn, nid):
 
     # Source nodes are their own roots
     if node["channel"] != "agent-derived":
-        return [_build_entry(node)]
+        return [_build_entry(node, clearance)]
 
     # Recursive CTE: walk ALL ancestors, dedup via UNION
     # Keep only non-derived (channel != 'agent-derived') nodes as roots.
     # ORDER BY label DESC, id ASC mirrors live_sources trust order.
     has_redacted = memdag_schema.column_exists(conn, "nodes", "redacted")
     has_status = memdag_schema.column_exists(conn, "nodes", "status")
+    has_conf = memdag_schema.column_exists(conn, "nodes", "conf_label")
 
     extra_cols = ""
     if has_redacted:
         extra_cols += ", n.redacted"
     if has_status:
         extra_cols += ", n.status"
+    if has_conf:
+        extra_cols += ", n.conf_label"
 
     sql = (
         "WITH RECURSIVE anc(id) AS ("
@@ -188,23 +214,27 @@ def blame(conn, nid):
         if has_redacted:
             idx += 1
         d["status"] = row[idx] if has_status else "live"
-        results.append(_build_entry(d))
+        if has_status:
+            idx += 1
+        d["conf_label"] = row[idx] if has_conf else 0
+        results.append(_build_entry(d, clearance))
 
     return results
 
 
-def format_blame(conn, nid):
+def format_blame(conn, nid, clearance=None):
     """Return a list of human-readable strings describing the blame result for *nid*.
 
     Raises ValueError for an unknown *nid*.
     Separated from printing so the MCP server can reuse it.
+    *clearance* (parsed int 0-3 or None) is threaded to blame() for BLP gating.
 
     Output shape:
       node [<nid>] came from:
         [<id>] <channel>  integrity=<NAME>  <state>  <ref-or-(stated directly)>
               "<line>..."
     """
-    entries = blame(conn, nid)
+    entries = blame(conn, nid, clearance)
     lines = [f"node [{nid}] came from:"]
     for e in entries:
         ref = e["source_ref"] or "(stated directly)"
@@ -224,10 +254,19 @@ def format_blame(conn, nid):
 
 def cmd_blame(args):
     conn = memdag.get_connection()
-    migrate(conn)
     try:
+        # BLAME-1: migrate() inside the try so a failure here still closes conn.
+        migrate(conn)
+        clearance = None
+        if getattr(args, "clearance", None) is not None:
+            try:
+                import memdag_confid
+                clearance = memdag_confid.parse_conf(args.clearance)
+            except ValueError as exc:
+                print(f"[memdag] invalid --clearance: {exc}", file=sys.stderr)
+                sys.exit(1)
         try:
-            lines = format_blame(conn, args.id)
+            lines = format_blame(conn, args.id, clearance)
         except ValueError as exc:
             print(f"[memdag] {exc}", file=sys.stderr)
             sys.exit(1)
@@ -241,6 +280,9 @@ def register(subparsers):
     p = subparsers.add_parser("blame",
                                help="trace a node back to its root source(s)")
     p.add_argument("id", type=int, help="node id to blame")
+    p.add_argument("--clearance", default=None,
+                   help="confidentiality ceiling (public|internal|secret|topsecret or 0-3); "
+                        "suppresses content of roots above it (default: no filter)")
     p.set_defaults(func=cmd_blame)
 
 

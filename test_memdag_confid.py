@@ -387,5 +387,47 @@ class TestArchivedConfLaunderingBlocked(Base):
         self.assertEqual(results, [])
 
 
+# ---------------------------------------------------------------------------
+# CONFID-1 / CONFID-2: recompute_conf_all must be ORDER-INDEPENDENT.
+# Federation assigns local ids in arrival order, so a derived child can land
+# with a LOWER id than its derived parent. The old single ORDER BY id pass
+# computed the child against its parent's stale conf and never re-raised it.
+# ---------------------------------------------------------------------------
+
+class TestRecomputeConfOrderIndependent(Base):
+
+    def _out_of_order_dag(self):
+        """Build child(id<parent) <- parent(derived) <- secret source.
+
+        Returns (child_id, parent_id, source_id) with child_id < parent_id.
+        """
+        with self.conn:
+            dc = memdag.insert_node(self.conn, "child", "agent-derived", 0)   # id 1
+        with self.conn:
+            s = memdag.insert_node(self.conn, "secret source", "endorsed", 3)  # id 2
+        with self.conn:
+            dp = memdag.insert_node(self.conn, "mid", "agent-derived", 0)      # id 3
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=3 WHERE id=?", (s,))  # SECRET source
+            self.conn.execute("INSERT INTO edges(child,parent) VALUES (?,?)", (dp, s))
+            self.conn.execute("INSERT INTO edges(child,parent) VALUES (?,?)", (dc, dp))
+        self.assertLess(dc, dp, "child must have a lower id than its derived parent")
+        return dc, dp, s
+
+    def test_high_water_propagates_despite_low_child_id(self):
+        dc, dp, s = self._out_of_order_dag()
+        # Parent's stored conf is stale (0) when the low-id child is first visited.
+        memdag_confid.recompute_conf_all(self.conn)
+        self.assertEqual(self.get_conf(dp), 3, "derived parent must rise to SECRET")
+        self.assertEqual(self.get_conf(dc), 3,
+                         "low-id child must ALSO rise — not be stranded at PUBLIC")
+
+    def test_idempotent_on_correct_db(self):
+        self._out_of_order_dag()
+        memdag_confid.recompute_conf_all(self.conn)         # converge
+        again = memdag_confid.recompute_conf_all(self.conn)  # CONFID-2
+        self.assertEqual(again, [], "second call on a correct DB must return []")
+
+
 if __name__ == "__main__":
     unittest.main()

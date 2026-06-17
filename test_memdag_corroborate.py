@@ -419,5 +419,70 @@ class TestRegisterRootIdempotentAndValidates(Base):
             memdag_corroborate.register_root(self.conn, "   ", by="test")
 
 
+# ---------------------------------------------------------------------------
+# CORROBORATE-1/2: the decision reads (idempotency, root count, asserting set)
+# must run INSIDE the BEGIN IMMEDIATE transaction, not before it. Otherwise a
+# concurrent revoke in the window strands a stale count / wires a tombstoned
+# parent, and two writers can double-mint. We prove the relocation directly:
+# live_root_count is now evaluated while conn.in_transaction is True.
+# ---------------------------------------------------------------------------
+
+class TestCorrConfStamp(Base):
+    def test_lift_inherits_secret_conf(self):
+        import memdag_confid
+        memdag_confid.migrate(self.conn)
+        memdag_corroborate.register_root(self.conn, "root-A", by="test")
+        memdag_corroborate.register_root(self.conn, "root-B", by="test")
+        x1 = self.mk_ext("port 4242 open")
+        x2 = self.mk_ext("service on 4242")
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=3 WHERE id IN (?,?)", (x1, x2))
+        triple = ("port", "is", "4242")
+        cid = memdag_corroborate.assert_claim(self.conn, x1, triple, "root-A")
+        memdag_corroborate.assert_claim(self.conn, x2, triple, "root-B")
+        lift = memdag_corroborate.corroborate(self.conn, cid, k=2)
+        conf = self.conn.execute(
+            "SELECT conf_label FROM nodes WHERE id=?", (lift,)).fetchone()[0]
+        self.assertEqual(conf, 3,
+                         "lift over SECRET asserting nodes must be stamped SECRET, not PUBLIC")
+
+
+class TestDecisionReadsInsideTransaction(Base):
+    def test_root_count_evaluated_under_lock(self):
+        memdag_corroborate.register_root(self.conn, "root-A", by="test")
+        memdag_corroborate.register_root(self.conn, "root-B", by="test")
+        x1 = self.mk_ext("port 4242 open")
+        x2 = self.mk_ext("service on 4242")
+        triple = ("port", "is", "4242")
+        cid = memdag_corroborate.assert_claim(self.conn, x1, triple, "root-A")
+        memdag_corroborate.assert_claim(self.conn, x2, triple, "root-B")
+
+        seen = {}
+        orig = memdag_corroborate.live_root_count
+
+        def spy(conn, claim_id):
+            # Capture whether we are inside the IMMEDIATE write transaction.
+            seen["in_txn"] = conn.in_transaction
+            return orig(conn, claim_id)
+
+        memdag_corroborate.live_root_count = spy
+        try:
+            lift = memdag_corroborate.corroborate(self.conn, cid, k=2)
+        finally:
+            memdag_corroborate.live_root_count = orig
+
+        self.assertIsNotNone(lift, "happy path still mints")
+        self.assertTrue(
+            seen.get("in_txn"),
+            "live_root_count must be evaluated INSIDE BEGIN IMMEDIATE (TOCTOU guard)",
+        )
+        # And the minted lift cites only LIVE parents, count consistent.
+        parents = [r[0] for r in self.conn.execute(
+            "SELECT parent FROM edges WHERE child=?", (lift,)).fetchall()]
+        for p in parents:
+            self.assertEqual(memdag.get_node(self.conn, p)["tombstoned"], 0,
+                             "lift must never wire a tombstoned parent")
+
+
 if __name__ == "__main__":
     unittest.main()

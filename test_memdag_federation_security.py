@@ -595,5 +595,97 @@ class TestTrustedOriginRoundTrip(SecurityBase):
                          "trusted origin's conf_label must be preserved (recompute only floors derived)")
 
 
+# ---------------------------------------------------------------------------
+# test_fed1_forged_provenance_edge_blocked
+# FED-1: an untrusted peer echoes a pre-existing local node's uuid into the
+# nodes array to flip both_in_changeset True, then ships an edge wiring its own
+# external node as a PARENT of the victim — re-flooring the victim's label.
+# After the fix, only freshly-INSERTED uuids authorize edges, so the forged edge
+# is rejected and the victim's label is untouched.
+# ---------------------------------------------------------------------------
+
+class TestFed1ForgedProvenanceEdge(SecurityBase):
+
+    def test_forged_provenance_edge_blocked(self):
+        # Victim: a local endorsed (label 3) node with a guessable uuid.
+        victim_id, victim_uuid = self._local_endorsed(
+            content="Endorsed fact the attacker wants to downgrade.", origin="local"
+        )
+
+        attacker_uuid = "attacker-machine:999"
+        cs = self._changeset(
+            origin="attacker-machine",  # UNREGISTERED / untrusted
+            nodes=[
+                # (1) the attacker's own new external node
+                self._node_dict(
+                    uuid=attacker_uuid, origin="attacker-machine",
+                    content="attacker poison", channel="external", label=0,
+                ),
+                # (2) the ECHOED victim uuid — hits the existing-node branch, no insert,
+                #     but in the old code still padded changeset_uuids.
+                self._node_dict(
+                    uuid=victim_uuid, origin="local",
+                    content="(echo)", channel="endorsed", label=3,
+                ),
+            ],
+            # Forge: attacker node becomes a PARENT of the victim (child=victim).
+            edges=[[victim_uuid, attacker_uuid]],
+        )
+        stats = memdag_federation.import_changeset(self.conn, cs)
+
+        # The forged edge must be rejected.
+        self.assertEqual(stats["edges_new"], 0, "forged edge must not be inserted")
+        attacker_id = self.conn.execute(
+            "SELECT id FROM nodes WHERE uuid=?", (attacker_uuid,)
+        ).fetchone()[0]
+        edge = self.conn.execute(
+            "SELECT 1 FROM edges WHERE child=? AND parent=?", (victim_id, attacker_id)
+        ).fetchone()
+        self.assertIsNone(edge, "no forged provenance edge may exist")
+
+        # The victim's label must be untouched (NOT re-floored to external).
+        label = self.conn.execute(
+            "SELECT label FROM nodes WHERE id=?", (victim_id,)
+        ).fetchone()[0]
+        self.assertEqual(label, 3, "victim endorsed label must survive the forgery attempt")
+
+
+# ---------------------------------------------------------------------------
+# test_fed2_redaction_cascades_to_descendant_on_import
+# FED-2: an import-applied redaction must cascade to local descendants, matching
+# the local redact_node(cascade=True) contract and the tombstone-import cascade.
+# ---------------------------------------------------------------------------
+
+class TestFed2RedactionCascadeOnImport(SecurityBase):
+
+    def test_redaction_cascades_to_descendant(self):
+        origin = "peer"
+        memdag_federation.register_origin(self.conn, origin, by="test")
+
+        with self.conn:
+            x = memdag.insert_node(self.conn, "secret root fact", "endorsed")
+        d, _ = memdag.derive_node(self.conn, "child quoting the secret root fact", [x])
+        # Stamp origin+uuid on both so the trusted peer 'owns' x.
+        memdag_federation.backfill_uuids(self.conn, origin)
+        x_uuid = self.conn.execute("SELECT uuid FROM nodes WHERE id=?", (x,)).fetchone()[0]
+
+        cs = self._changeset(
+            origin=origin,
+            nodes=[self._node_dict(
+                uuid=x_uuid, origin=origin, content="", channel="endorsed", label=3,
+                redacted=1, redacted_at="2026-01-01T00:00:00+00:00",
+                redact_reason="peer redaction")],
+        )
+        memdag_federation.import_changeset(self.conn, cs)
+
+        self.assertEqual(
+            self.conn.execute("SELECT redacted FROM nodes WHERE id=?", (x,)).fetchone()[0],
+            1, "the imported node must be redacted")
+        d_red, d_content = self.conn.execute(
+            "SELECT redacted, content FROM nodes WHERE id=?", (d,)).fetchone()
+        self.assertEqual(d_red, 1, "the local descendant must be redacted by cascade")
+        self.assertEqual(d_content, "", "the descendant's secret-quoting content must be scrubbed")
+
+
 if __name__ == "__main__":
     unittest.main()

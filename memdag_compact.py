@@ -355,17 +355,32 @@ def compact(
         # LOAD-BEARING: edges to EVERY episode, label = min(parents) — no laundering
         nid, _label = memdag.derive_node(conn, summary, group_ids)
 
-        # Archive episodes (NEVER delete; tombstoned untouched)
+        # COMPACT-1: stamp the high-water conf_label AND archive the episodes in ONE
+        # transaction, so a crash can't leave the summary archived-but-conf-0 (a
+        # SECRET-derived node readable at PUBLIC). Bell-LaPadula high-water: a node
+        # summarizing SECRET episodes is SECRET; derive_node leaves conf at the
+        # DEFAULT 0, so recompute it to max(live-parent conf) here (inlined rather
+        # than memdag_confid.recompute_conf, whose own `with conn:` would commit
+        # separately and re-open the window between conf and archive).
+        # NB: derive_node (frozen core) commits the node first, so a micro-window at
+        # conf=0 remains before this block — the documented LOW residual, corrected
+        # by memdag_heal/recompute_conf_all on the next run.
+        parent_conf = conn.execute(
+            "SELECT COALESCE(MAX(n.conf_label), 0) FROM edges e"
+            " JOIN nodes n ON n.id = e.parent"
+            " WHERE e.child = ? AND n.tombstoned = 0",
+            (nid,),
+        ).fetchone()[0]
         with conn:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE nodes SET conf_label = ? WHERE id = ?", (parent_conf, nid)
+            )
             conn.executemany(
                 "UPDATE nodes SET archived = 1, archived_at = ? WHERE id = ?",
                 [(now, i) for i in group_ids],
             )
-
-        # Bell-LaPadula high-water: a node summarizing SECRET episodes is SECRET.
-        # derive_node() leaves conf_label at the DEFAULT (0/PUBLIC); recompute it to
-        # max(live-parent conf) so compact cannot launder confidentiality (PoC 03).
-        memdag_confid.recompute_conf(conn, nid)
 
         consumed.update(group_ids)
         minted.append(nid)

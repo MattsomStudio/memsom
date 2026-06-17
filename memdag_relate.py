@@ -120,6 +120,16 @@ def _is_redacted(conn, nid):
         return False
 
 
+def _is_archived(conn, nid):
+    """RELATE-A1: True if node is archived (consolidated-away). Such nodes must
+    not re-enter the neighborhood result pool — the other read paths exclude them
+    via taint_filter_clauses; this is the relate mirror."""
+    if not memdag_schema.column_exists(conn, "nodes", "archived"):
+        return False
+    row = conn.execute("SELECT archived FROM nodes WHERE id=?", (nid,)).fetchone()
+    return bool(row[0]) if row else False
+
+
 def _rel_neighbors(conn, nid):
     """Return all undirected rel_edges neighbors of *nid* (any kind)."""
     rows = conn.execute(
@@ -237,8 +247,17 @@ def neighborhood(conn, nid, hops=2, min_integrity=0, clearance=3):
             continue
         if path_min < min_integrity:
             continue
-        c_label = _node_conf(conn, m)
+        # RELATE-A2: coerce conf to a valid int 0-3 at the single chokepoint, so
+        # the comparison, the clearance filter, AND the CONF_NAME lookup are all
+        # safe from a malformed conf_label — not dependent on FED-DOS-2 being the
+        # sole gatekeeper.
+        try:
+            c_label = min(3, max(0, int(_node_conf(conn, m) or 0)))
+        except (ValueError, TypeError):
+            c_label = 0
         if c_label > clearance:
+            continue
+        if _is_archived(conn, m):   # RELATE-A1: consolidated-away nodes stay out
             continue
 
         row = conn.execute(
@@ -257,11 +276,14 @@ def neighborhood(conn, nid, hops=2, min_integrity=0, clearance=3):
             "id": node_id,
             "channel": channel,
             "label": label,
-            "label_name": memdag.NAME[label],
+            # RELATE-A2: defensive .get — an out-of-range label/conf (e.g. from a
+            # malformed federation import) must not crash the formatter. The
+            # federation conf clamp fixes the root; this is defense-in-depth.
+            "label_name": memdag.NAME.get(label, "?"),
             "conf_label": c_label,
-            "conf_name": memdag_confid.CONF_NAME[c_label],
+            "conf_name": memdag_confid.CONF_NAME.get(c_label, "?"),
             "path_min": path_min,
-            "path_min_name": memdag.NAME[path_min],
+            "path_min_name": memdag.NAME.get(path_min, "?"),
             "hops": hop_dist.get(m, 1),
             "line": line,
         })

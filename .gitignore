@@ -8,6 +8,9 @@ __pycache__/
 # build orchestration (internal scaffolding, machine-specific paths)
 _build/
 
+# adversarial security review reports (internal audit artifacts — don't ship)
+_review/
+
 # internal planning artifacts (design/plan docs quote homelab specifics — never ship)
 docs/
 

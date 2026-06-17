@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/MattsomStudio/memdag/actions/workflows/tests.yml/badge.svg)](https://github.com/MattsomStudio/memdag/actions/workflows/tests.yml)
 
-> **One-liner — Matt's words, pending.** Do not ship the pitch without it.
+> **memdag is auditable, revocable memory with poison-proof answers.**
 
 A derivation-DAG memory store for AI agents. Every memory is a node; edges mean
 **came-from** (provenance), not relates-to. Trust is stamped by **channel** at

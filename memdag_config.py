@@ -113,8 +113,15 @@ def wire_toml(path, abs_exe, db_path, print_only=False):
     block = _toml_block(abs_exe, db_path)
     want = {"command": abs_exe, "args": [], "env": {"MEMDAG_DB": db_path}}
 
-    # A single quote in a path would break the literal string -> refuse, print.
-    if "'" in abs_exe or "'" in db_path:
+    # CONFIG-1: validate the generated block ROUND-TRIPS to exactly the intended
+    # table before writing. The old guard only rejected a single quote; a newline
+    # (or any other literal-string-breaking char) in a path slipped through and
+    # produced an unparseable config.toml. tomllib here is read-only (stdlib).
+    try:
+        roundtrip = tomllib.loads(block).get("mcp_servers", {}).get("memdag")
+    except tomllib.TOMLDecodeError:
+        roundtrip = None
+    if roundtrip != want:
         return {"action": "print", "path": str(path), "snippet": block}
     if print_only:
         return {"action": "print", "path": str(path), "snippet": block}
@@ -139,9 +146,22 @@ def wire_toml(path, abs_exe, db_path, print_only=False):
         # ask the user to update the block by hand.
         return {"action": "exists_differs", "path": str(path), "snippet": block}
 
-    _backup(path)
     new = text if text.endswith("\n") else text + "\n"
-    path.write_text(new + block, encoding="utf-8")
+    merged = new + block
+    # CONFIG-MERGE-INLINE-1: if the file already defines mcp_servers as an INLINE
+    # table, parsed[...].get('memdag') is None (so existing is None above), but
+    # appending a [mcp_servers.memdag] header produces invalid TOML. Validate the
+    # merged result re-parses to our table BEFORE writing; otherwise refuse and ask
+    # the user to merge by hand rather than corrupt their config.
+    try:
+        check = tomllib.loads(merged).get("mcp_servers", {}).get("memdag")
+    except tomllib.TOMLDecodeError:
+        check = None
+    if check != want:
+        return {"action": "exists_differs", "path": str(path), "snippet": block}
+
+    _backup(path)
+    path.write_text(merged, encoding="utf-8")
     return {"action": "merged", "path": str(path)}
 
 
@@ -202,6 +222,7 @@ def cmd_wire_config(args):
     db_path = args.db or str(memdag.db_path())
     clients = (["claude-code", "claude-desktop", "codex"]
                if args.client == "all" else [args.client])
+    failed = False
     for c in clients:
         res = wire(c, abs_exe, db_path, print_only=args.print_only)
         action = res.get("action")
@@ -211,6 +232,14 @@ def cmd_wire_config(args):
                 print(res["snippet"])
         else:
             print(f"[{c}] {action} -> {res.get('path', '')}")
+        # BOOTSTRAP-1 / CFG-PRINT-SOFTFAIL-1: on a real (non print-only) run, treat
+        # anything that is NOT a confirmed wire as a soft failure — a SUCCESS
+        # whitelist, not a failure denylist. The denylist missed 'print' (wire_toml/
+        # wire_json refusing to write, e.g. an apostrophe in the path), which left
+        # the client unconfigured while wire-config still exited 0.
+        if not args.print_only and action not in ("created", "merged", "unchanged", "claude-cli"):
+            failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

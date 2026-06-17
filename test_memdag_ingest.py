@@ -48,6 +48,59 @@ class Base(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# INGEST-1 / INGEST-2: dedup must not reuse tainted nodes
+# ---------------------------------------------------------------------------
+
+
+class TestDedupSkipsTaintedNodes(Base):
+    def test_dedup_does_not_reuse_redacted_node(self):
+        import memdag_redact
+        text = "A distinctive paragraph that will be ingested, redacted, then re-ingested."
+        first = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)
+        self.assertEqual(len(first), 1)
+        nid = first[0]
+
+        memdag_redact.redact_node(self.conn, nid, "scrub", cascade=True)
+        self.assertEqual(
+            self.conn.execute("SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0],
+            "", "redacted node content must be empty")
+
+        again = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)
+        self.assertEqual(len(again), 1)
+        self.assertNotEqual(again[0], nid,
+                            "re-ingest must mint a NEW node, not dedup onto the redacted one")
+        # The freshly supplied content is actually stored (not silently dropped).
+        self.assertEqual(
+            self.conn.execute("SELECT content FROM nodes WHERE id=?", (again[0],)).fetchone()[0],
+            text)
+
+    def test_dedup_is_channel_aware(self):
+        # INGEST-DEDUP-CHANNEL / CHATS-1-DEDUP-LAUNDER: identical bytes under a
+        # different channel must NOT dedup — else assistant text (agent-derived)
+        # launders onto a user node, or an endorsed ingest returns an external one.
+        text = "Identical content ingested under two different channels."
+        u = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)[0]
+        a = memdag_ingest.ingest_text(self.conn, text, "agent-derived", chunk=False)[0]
+        self.assertNotEqual(u, a, "cross-channel ingest must mint a distinct node")
+        chans = dict(self.conn.execute(
+            "SELECT id, channel FROM nodes WHERE id IN (?,?)", (u, a)).fetchall())
+        self.assertEqual(chans[u], "user")
+        self.assertEqual(chans[a], "agent-derived")
+        # Same channel still dedups.
+        u2 = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)[0]
+        self.assertEqual(u2, u, "same-channel identical content must still dedup")
+
+    def test_dedup_does_not_reuse_quarantined_node(self):
+        import memdag_quarantine
+        text = "Another distinctive paragraph headed for quarantine before a re-ingest."
+        nid = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)[0]
+        memdag_quarantine.quarantine_node(self.conn, nid, "hold")
+        again = memdag_ingest.ingest_text(self.conn, text, "user", chunk=False)[0]
+        self.assertNotEqual(again, nid,
+                            "re-ingest must not dedup onto a quarantined node")
+
+
+# ---------------------------------------------------------------------------
 # Migration
 # ---------------------------------------------------------------------------
 

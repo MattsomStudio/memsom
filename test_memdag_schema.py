@@ -130,5 +130,55 @@ class TestReexports(Base):
         self.assertIs(memdag_schema.NAME, memdag.NAME)
 
 
+class TestVersionedMigrations(Base):
+    def test_current_version_constant(self):
+        """CURRENT_VERSION is a positive int constant."""
+        self.assertIsInstance(memdag_schema.CURRENT_VERSION, int)
+        self.assertGreaterEqual(memdag_schema.CURRENT_VERSION, 1)
+
+    def test_run_on_fresh_db_with_no_status_is_noop(self):
+        """A fresh DB has no status column yet; the v1 step is a no-op there.
+
+        The base get_connection() only creates nodes/edges (no status column),
+        so the rebuild must not fire and user_version stays at 0 because the
+        baseline reconciler only stamps when the CHECK is actually present.
+        """
+        self.assertFalse(memdag_schema.column_exists(self.conn, "nodes", "status"))
+        memdag_schema.run_versioned_migrations(self.conn)
+        # No status column => CHECK not present => baseline stays 0, step no-ops.
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version").fetchone()[0], 0
+        )
+
+    def test_status_check_added_then_gated(self):
+        """After the status column is added (no CHECK), the step adds the CHECK
+        and bumps user_version; a second run is gated off (no-op)."""
+        memdag_schema.add_column(
+            self.conn, "nodes", "status", "TEXT NOT NULL DEFAULT 'live'"
+        )
+        self.assertFalse(memdag_schema._status_check_present(self.conn))
+
+        memdag_schema.run_versioned_migrations(self.conn)
+        self.assertTrue(memdag_schema._status_check_present(self.conn))
+        self.assertEqual(
+            self.conn.execute("PRAGMA user_version").fetchone()[0],
+            memdag_schema.CURRENT_VERSION,
+        )
+
+        # invalid status now rejected
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO nodes(content,channel,label,source_ref,"
+                    "created_at,status) VALUES('x','user',1,NULL,"
+                    "'2026-01-01T00:00:00+00:00','bogus')"
+                )
+
+        # second run: gated, DDL unchanged
+        ddl = memdag_schema._nodes_ddl(self.conn)
+        memdag_schema.run_versioned_migrations(self.conn)
+        self.assertEqual(memdag_schema._nodes_ddl(self.conn), ddl)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,11 +31,10 @@ DEFAULT_MODEL = "qwen3-abliterated:30b-a3b"
 # Regex for stripping <think>...</think> blocks (qwen3 thinking residue)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-# Regex to match claimed citation tags in the LLM response
-_CITE_RE = re.compile(r"\[mem:(\d+)\|")
-
-# A "claim line" is any bullet-list line (starts with - or * after optional whitespace)
-_CLAIM_LINE_RE = re.compile(r"^\s*[-*]\s+")
+# Regex to match claimed citation tags in the LLM response. Captures BOTH the
+# source id AND the channel half so the channel can be validated against the real
+# source (LLM-2) — the old r"\[mem:(\d+)\|" discarded the channel entirely.
+_CITE_RE = re.compile(r"\[mem:(\d+)\|([^\]]+)\]")
 
 
 class LlmUnavailable(Exception):
@@ -180,37 +179,71 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
     # Step 4: strip <think>...</think> residue
     answer = _THINK_RE.sub("", answer_raw).strip()
 
-    # Step 5: citation firewall
-    cited_strs = _CITE_RE.findall(answer)
-    if not cited_strs:
+    # Step 5: citation firewall.
+    # Authoritative {source_id: real_channel} map, restricted to the deterministic
+    # source set. The LLM may cite ONLY these ids, and ONLY with the correct channel.
+    real_channel = {
+        sid: channel
+        for sid, _content, channel, _label, _ref in sources
+        if sid in det_used
+    }
+
+    # LLM-2: capture id AND channel; validate both against the real source.
+    cited = _CITE_RE.findall(answer)   # list of (id_str, channel_str)
+    if not cited:
         raise LlmUnavailable(
             "LLM output failed citation check: no [mem:id|channel] citations found in answer"
         )
-
-    cited_ids = {int(s) for s in cited_strs}
-    valid_ids = set(det_used)
-
-    # Invented citation check: cited an ID not in the deterministic source set
-    invented = cited_ids - valid_ids
-    if invented:
-        raise LlmUnavailable(
-            f"LLM output failed citation check: invented citation(s) {sorted(invented)}"
-        )
-
-    # Uncited claim line check: any bullet line that has no [mem: tag
-    for line in answer.splitlines():
-        if _CLAIM_LINE_RE.match(line) and "[mem:" not in line:
+    cited_ids = set()
+    for id_str, chan in cited:
+        sid = int(id_str)
+        if sid not in real_channel:
             raise LlmUnavailable(
-                f"LLM output failed citation check: uncited claim line: {line!r}"
+                f"LLM output failed citation check: invented citation {sid}"
             )
+        if chan != real_channel[sid]:
+            # Forged integrity provenance: e.g. tagging a real external source as
+            # [mem:5|endorsed]. The channel half is content the LLM controls.
+            raise LlmUnavailable(
+                f"LLM output failed citation check: forged channel for [mem:{sid}] "
+                f"(claimed {chan!r}, real {real_channel[sid]!r})"
+            )
+        cited_ids.add(sid)
+
+    # LLM-1: EVERY non-empty line must END with a VALIDATED citation tag and carry
+    # NO text after it. A substring-anywhere test ("[mem:" in line, or even
+    # any(tag in line)) let uncited content ride on a validly-cited line — trailing
+    # sentences after a real tag, or a fake/garbage "[mem:" token on a line whose
+    # only real citation lived elsewhere. Anchoring the tag to end-of-line closes
+    # both: the deterministic source bullets are one-claim-per-line ending in their
+    # citation, so a well-formed answer line always ends with an allowed tag.
+    # SCOPE (honest, documented limit): this guarantees every line carries a valid
+    # provenance citation and the node's PARENTS are anchored to det_used (LLM-3),
+    # so the DAG label/provenance is correct regardless of the prose. It does NOT
+    # verify the rephrased claim text faithfully summarises the cited source — a
+    # structural citation firewall cannot, and the moat is provenance, not LLM
+    # truthfulness. Semantic faithfulness is out of scope for this gate.
+    allowed_tags = {f"[mem:{sid}|{real_channel[sid]}]" for sid in cited_ids}
+    for line in answer.splitlines():
+        stripped = line.rstrip()
+        if stripped.strip() and not any(stripped.endswith(tag) for tag in allowed_tags):
+            raise LlmUnavailable(
+                f"LLM output failed citation check: line not anchored to a citation: {line!r}"
+            )
+
+    # LLM-3: anchor the derived node's provenance to the DETERMINISTIC source set,
+    # NOT the LLM-chosen citation subset. Otherwise the model could paraphrase a
+    # low-integrity source and cite only a high-integrity one, dropping the low
+    # parent so derive_node's label=min(parents) launders the label upward.
+    used = sorted(det_used)
 
     # Step 6: return
     text = (
         f"Q: {question}\n"
-        f"A (LLM-composed, opt-in, from {len(cited_ids)} live sources):\n"
+        f"A (LLM-composed, opt-in, from {len(used)} live sources):\n"
         f"{answer}"
     )
-    return text, sorted(cited_ids)
+    return text, used
 
 
 def ping(base_url=None, timeout=5):

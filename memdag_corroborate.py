@@ -287,39 +287,47 @@ def corroborate(conn, claim_id, k=2):
 
     subject, predicate, value = claim_row
 
-    # 1. Idempotency: return existing live lift if one exists
-    row = conn.execute(
-        "SELECT c.node_id FROM corroborations c"
-        " JOIN nodes n ON n.id = c.node_id"
-        " WHERE c.claim_id = ? AND n.tombstoned = 0",
-        (claim_id,)
-    ).fetchone()
-    if row:
-        return row[0]
-
-    # 2. Check live root count
-    n_roots = live_root_count(conn, claim_id)
-    if n_roots < k:
-        return None
-
-    # 3. Collect live asserting nodes (ordered for determinism)
-    asserting = [
-        r[0] for r in conn.execute(
-            "SELECT DISTINCT ca.node_id"
-            " FROM claim_assertions ca"
-            " JOIN nodes n ON n.id = ca.node_id"
-            " JOIN independence_roots ir ON ir.root = ca.independence_root"
-            " WHERE ca.claim_id = ? AND n.tombstoned = 0"
-            " ORDER BY ca.node_id",
-            (claim_id,)
-        ).fetchall()
-    ]
-
-    # 4. Mint in ONE transaction — TOCTOU guard (same discipline as derive_node)
+    # CORROBORATE-1/2: every decision read AND the mint must happen inside ONE
+    # write transaction. The previous code read idempotency / root-count /
+    # asserting-set BEFORE acquiring the lock and used them verbatim inside it —
+    # so a concurrent revoke landing in the window could strand a stale count
+    # (lift minted "confirmed by N" with < k live roots, wired to an already
+    # tombstoned parent, recorded as a fixed point recompute can never claw back),
+    # and two concurrent writers could both pre-read "no live lift" and double-mint.
+    # Re-reading under BEGIN IMMEDIATE is the actual TOCTOU guard derive_node uses.
     with conn:
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
 
+        # 1. Idempotency (re-checked under the lock): return existing live lift.
+        row = conn.execute(
+            "SELECT c.node_id FROM corroborations c"
+            " JOIN nodes n ON n.id = c.node_id"
+            " WHERE c.claim_id = ? AND n.tombstoned = 0",
+            (claim_id,)
+        ).fetchone()
+        if row:
+            return row[0]
+
+        # 2. Live root count (re-checked under the lock).
+        n_roots = live_root_count(conn, claim_id)
+        if n_roots < k:
+            return None
+
+        # 3. Collect live asserting nodes (re-checked under the lock, ordered).
+        asserting = [
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT ca.node_id"
+                " FROM claim_assertions ca"
+                " JOIN nodes n ON n.id = ca.node_id"
+                " JOIN independence_roots ir ON ir.root = ca.independence_root"
+                " WHERE ca.claim_id = ? AND n.tombstoned = 0"
+                " ORDER BY ca.node_id",
+                (claim_id,)
+            ).fetchall()
+        ]
+
+        # 4. Mint.
         content = (
             f"CORROBORATED claim [{claim_id}] {subject} {predicate} {value}"
             f" - confirmed by {n_roots} independent registered roots (k={k})."
@@ -337,6 +345,23 @@ def corroborate(conn, claim_id, k=2):
             "INSERT INTO edges(child, parent) VALUES (?,?)",
             [(lift, a) for a in asserting]
         )
+
+        # CORR-CONF-1: stamp the lift's confidentiality high-water at the mint
+        # (same transaction). corroborate only calls recompute_all (integrity);
+        # the conf axis is never recomputed for the lift, so insert_node's DEFAULT
+        # conf_label=0 would make a lift over SECRET asserting nodes readable at
+        # PUBLIC. Inline (not memdag_confid.recompute_conf, whose own `with conn:`
+        # would commit this transaction early). Guarded: conf_label may be absent.
+        if memdag_schema.column_exists(conn, "nodes", "conf_label"):
+            lift_conf = conn.execute(
+                "SELECT COALESCE(MAX(n.conf_label), 0) FROM edges e"
+                " JOIN nodes n ON n.id = e.parent"
+                " WHERE e.child = ? AND n.tombstoned = 0",
+                (lift,),
+            ).fetchone()[0]
+            conn.execute(
+                "UPDATE nodes SET conf_label = ? WHERE id = ?", (lift_conf, lift)
+            )
 
         # Elevation row: marks this node as a fixed point for recompute_all
         conn.execute(

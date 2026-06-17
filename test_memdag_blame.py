@@ -204,5 +204,25 @@ class TestCliOutput(Base):
         self.assertIn("USER", out)
 
 
+class TestBlameClearanceGate(Base):
+    def test_above_clearance_content_suppressed(self):
+        import memdag_confid
+        memdag_confid.migrate(self.conn)
+        secret = self.add("TOPSECRET nuclear codes 0000", "endorsed")
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=3 WHERE id=?", (secret,))
+        d = self.derive("derived answer", [secret])
+
+        # No clearance (admin/history) -> content visible.
+        entries = memdag_blame.blame(self.conn, d)
+        self.assertIn("nuclear codes", entries[0]["line"])
+
+        # PUBLIC clearance -> content of the SECRET root suppressed, metadata kept.
+        gated = memdag_blame.blame(self.conn, d, clearance=0)
+        self.assertEqual(gated[0]["line"], "[ABOVE CLEARANCE]")
+        self.assertEqual(gated[0]["id"], secret, "metadata still visible for audit")
+        self.assertEqual(gated[0]["channel"], "endorsed")
+
+
 if __name__ == "__main__":
     unittest.main()

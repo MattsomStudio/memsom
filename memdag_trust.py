@@ -151,40 +151,62 @@ def elevate(conn, nid, to_label, reason, by, force=False):
     # Ensure the elevations table exists
     migrate(conn)
 
-    # Fetch node
-    node = memdag.get_node(conn, nid)
-    if node is None:
-        raise ValueError(f"unknown node id: {nid}")
-    if node["tombstoned"]:
-        raise ValueError(f"node {nid} is tombstoned; cannot elevate a revoked node")
-
-    from_int = node["label"]
-
-    if to_int == from_int:
-        raise ValueError("already at that label — elevation must change something")
-    if to_int < from_int:
-        raise ValueError("elevate only raises; lowering is what recompute/revoke are for")
-
-    # Policy: an external-origin node reaching ENDORSED(3) requires --force.
-    # KEY ON THE IMMUTABLE CHANNEL, not the current (mutable) label.  Keying on
-    # from_int let a stepwise 0->1->2->3 walk slip past the gate entirely (F-08):
-    # once the node moved to label 1 the single-hop check never fired again.
-    # channel never changes post-insert, so the cumulative distance from the
-    # node's channel-natural rank is what matters — whether reached in one hop or
-    # several, an external node landing on ENDORSED needs force + a forced=1 row.
-    chan_rank = memdag.RANK.get(node["channel"], from_int)
-    needs_force = (chan_rank == 0 and to_int == 3)
-    if needs_force and not force:
-        raise ValueError(
-            "external -> endorsed blocked: this node's channel is external; "
-            "reaching ENDORSED requires --force (logged as forced=1)"
-        )
-
-    forced_int = 1 if needs_force else 0
-    ts = memdag.now_iso()
-
-    # Apply in one transaction: UPDATE nodes + INSERT elevation audit row
+    # TRUST-2: fetch + tombstone/liveness validation and the mutation must run
+    # UNDER one write lock. The old code validated tombstoned outside any
+    # transaction, so a revoke landing in the window let elevate write a higher
+    # label onto a now-dead node (resurrection at a raised label). Mirror
+    # derive_node: BEGIN IMMEDIATE before the SELECT.
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+
+        # Fetch node (under the lock)
+        node = memdag.get_node(conn, nid)
+        if node is None:
+            raise ValueError(f"unknown node id: {nid}")
+        if node["tombstoned"]:
+            raise ValueError(f"node {nid} is tombstoned; cannot elevate a revoked node")
+
+        from_int = node["label"]
+
+        if to_int == from_int:
+            raise ValueError("already at that label — elevation must change something")
+        if to_int < from_int:
+            raise ValueError("elevate only raises; lowering is what recompute/revoke are for")
+
+        # Policy: a node whose PROVENANCE FLOOR is external(0) reaching ENDORSED(3)
+        # requires --force.  Gate on the floor, not on a proxy:
+        #   - Keying on from_int (mutable label) let a stepwise 0->1->2->3 walk slip
+        #     past entirely (F-08): once the node moved to 1 the single-hop check
+        #     never fired again.
+        #   - Keying on chan_rank (immutable channel) fixed F-08 for SOURCE nodes but
+        #     left TRUST-1: a DERIVED node is always channel 'agent-derived'
+        #     (chan_rank 1), so a node derived from pure-external parents (true floor
+        #     0) laundered straight to ENDORSED with no force and a falsified forced=0
+        #     audit row.
+        # The floor that actually matters is min over the node's LIVE parents'
+        # effective labels (a source node has none -> use its channel rank).  This is
+        # immune to BOTH proxies: it sees through the agent-derived channel string AND
+        # it does not move when the node itself is elevated, so stepwise can't escape.
+        chan_rank = memdag.RANK.get(node["channel"], from_int)
+        live_parent_ids = [r[0] for r in memdag.parents_of(conn, nid) if r[6] == 0]
+        if live_parent_ids:
+            prov_floor = min(
+                memdag_recompute.recompute_label(conn, pid) for pid in live_parent_ids
+            )
+        else:
+            prov_floor = chan_rank
+        needs_force = (prov_floor == 0 and to_int == 3)
+        if needs_force and not force:
+            raise ValueError(
+                "external -> endorsed blocked: this node's provenance floor is "
+                "external(0); reaching ENDORSED requires --force (logged as forced=1)"
+            )
+
+        forced_int = 1 if needs_force else 0
+        ts = memdag.now_iso()
+
+        # UPDATE nodes + INSERT elevation audit row — same write-locked unit.
         conn.execute("UPDATE nodes SET label=? WHERE id=?", (to_int, nid))
         conn.execute(
             "INSERT INTO elevations(node, from_label, to_label, reason, elevated_by, forced, ts)"

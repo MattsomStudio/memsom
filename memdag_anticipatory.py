@@ -351,7 +351,37 @@ def surprise_gated_write(conn, question, threshold=0.35, sources=None,
         observe(conn, question, best_id)
         return (best_id, False, score)
 
+    # ANTICIPATORY-2: take the write lock and re-validate the cited parents
+    # against the FULL taint filter before minting. derive_node's frozen recheck
+    # only covers `tombstoned`; a redact/quarantine landing between the
+    # (out-of-lock) source read above and the mint would otherwise leave a node
+    # citing a now-tainted parent that still passes _is_untainted_derived.
+    began = not conn.in_transaction
+    if began:
+        conn.execute("BEGIN IMMEDIATE")
+    placeholders = ",".join("?" * len(used))
+    clauses, params = memdag_schema.taint_filter_clauses(conn)
+    live = {
+        r[0] for r in conn.execute(
+            f"SELECT id FROM nodes WHERE id IN ({placeholders}) AND "
+            + " AND ".join(clauses),
+            list(used) + params,
+        )
+    }
+    if set(used) != live:
+        if began:
+            conn.rollback()
+        raise ValueError("a cited source became tainted before mint")
+
+    # derive_node honors the open transaction (commits on its own context exit),
+    # so the re-validation above and the insert are one write-locked unit.
     nid, _ = memdag.derive_node(conn, text, used)
+    # ANTICIPATORY-1: derive_node mints at conf_label DEFAULT 0 (PUBLIC). Stamp the
+    # high-water confidentiality label at the MINT path — not in each caller — so a
+    # node summarising SECRET sources can never be cached/served below clearance.
+    # (The interactive `ask` path did this itself; prefetch did not. Fixing it here
+    # removes the asymmetry for every caller.)
+    memdag_confid.recompute_conf(conn, nid)
     observe(conn, question, nid)
     return (nid, True, score)
 
@@ -538,10 +568,21 @@ def cmd_observe(args):
         conn.close()
 
 
+def _validate_clearance(args):
+    """ANTICIPATORY-CLI-CLEARANCE: mirror CLI-1 — reject a bad --clearance with a
+    clean message + exit 1 instead of an uncaught ValueError traceback."""
+    try:
+        memdag_confid.parse_conf(args.clearance)
+    except ValueError as exc:
+        print(f"[memdag] invalid --clearance: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_prefetch(args):
     conn = memdag.get_connection()
     migrate(conn)
     try:
+        _validate_clearance(args)  # inside try/finally so a bad value can't leak conn
         results = prefetch(conn, k=args.k, threshold=args.threshold,
                            clearance=args.clearance)
         warm_ids = {r[0] for r in conn.execute(
@@ -561,6 +602,7 @@ def cmd_anticipate_status(args):
     conn = memdag.get_connection()
     migrate(conn)
     try:
+        _validate_clearance(args)  # inside try/finally so a bad value can't leak conn
         s = status(conn, clearance=args.clearance)
         print(f"query log: {s['query_log_total']} row(s),"
               f" {s['distinct_queries']} distinct quer"

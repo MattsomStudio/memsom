@@ -155,33 +155,40 @@ def promote(conn: sqlite3.Connection, nid: int, by: str) -> None:
     an audit breadcrumb.
     """
     migrate(conn)
-    row = conn.execute(
-        "SELECT tombstoned, status FROM nodes WHERE id = ?", (nid,)
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"unknown node id: {nid}")
-    tombstoned, status = row
-    if tombstoned or status != "quarantined":
-        raise ValueError(f"node {nid} is not quarantined (status={status!r})")
-
-    has_endorsed = _has_live_ancestor_channel(conn, nid, "endorsed")
-    has_external = _has_live_ancestor_channel(conn, nid, "external")
-
-    if not has_endorsed and has_external:
-        raise ValueError(
-            "manual endorsement required: no endorsed ancestor AND live external ancestor present"
-        )
-    if not has_endorsed:
-        raise ValueError(
-            "manual endorsement required: no endorsed ancestor"
-        )
-    if has_external:
-        raise ValueError(
-            "manual endorsement required: live external ancestor present"
-        )
-
-    now = memdag.now_iso()
+    # QUAR-PROMOTE-TOCTOU: the gate reads (status + ancestor channels) and the
+    # status flip must be ONE write-locked unit. Otherwise a concurrent
+    # revoke/derive between the gate check and the UPDATE could change the ancestor
+    # set, letting a node that should fail the gate be promoted back to live.
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+
+        row = conn.execute(
+            "SELECT tombstoned, status FROM nodes WHERE id = ?", (nid,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown node id: {nid}")
+        tombstoned, status = row
+        if tombstoned or status != "quarantined":
+            raise ValueError(f"node {nid} is not quarantined (status={status!r})")
+
+        has_endorsed = _has_live_ancestor_channel(conn, nid, "endorsed")
+        has_external = _has_live_ancestor_channel(conn, nid, "external")
+
+        if not has_endorsed and has_external:
+            raise ValueError(
+                "manual endorsement required: no endorsed ancestor AND live external ancestor present"
+            )
+        if not has_endorsed:
+            raise ValueError(
+                "manual endorsement required: no endorsed ancestor"
+            )
+        if has_external:
+            raise ValueError(
+                "manual endorsement required: live external ancestor present"
+            )
+
+        now = memdag.now_iso()
         conn.execute(
             "UPDATE nodes SET status='live', quarantine_reason=?"
             " WHERE id=?",

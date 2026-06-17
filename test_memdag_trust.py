@@ -195,6 +195,48 @@ class TestStepwiseElevationBlocked(Base):
 
 
 # ---------------------------------------------------------------------------
+# 4c. TRUST-1: a DERIVED node whose provenance floor is external(0) must not
+# launder to ENDORSED without --force, even though its channel is 'agent-derived'
+# (chan_rank 1).  The old channel-keyed gate let this through with forced=0.
+# ---------------------------------------------------------------------------
+
+class TestDerivedFromExternalForceGate(Base):
+    def test_derived_from_external_to_endorsed_blocked(self):
+        x = self.add("external data", "external")          # label 0
+        d1, lbl = memdag.derive_node(self.conn, "derived", [x])  # agent-derived, label 0
+        self.assertEqual(lbl, 0, "node derived from external must floor to 0")
+
+        # Direct 0->3 on the derived node must be BLOCKED without force...
+        with self.assertRaises(ValueError) as ctx:
+            memdag_trust.elevate(self.conn, d1, "endorsed", "launder", "attacker")
+        self.assertIn("blocked", str(ctx.exception))
+        self.assertEqual(memdag.get_node(self.conn, d1)["label"], 0)
+        self.assertEqual(len(memdag_trust.elevations_for(self.conn, d1)), 0,
+                         "no audit row on the blocked attempt")
+
+        # ...and the stepwise walk 0->1 then 1->3 must ALSO be blocked at the
+        # ENDORSED hop (parents' floor stays 0 regardless of the node's own label).
+        memdag_trust.elevate(self.conn, d1, 1, "step 1", "attacker")
+        with self.assertRaises(ValueError):
+            memdag_trust.elevate(self.conn, d1, 3, "step 3", "attacker")
+        self.assertEqual(memdag.get_node(self.conn, d1)["label"], 1)
+        rows = memdag_trust.elevations_for(self.conn, d1)
+        self.assertTrue(all(r["forced"] == 0 for r in rows))
+        self.assertLess(max(r["to_label"] for r in rows), 3,
+                        "derived-from-external node never reached ENDORSED unforced")
+
+    def test_derived_from_user_to_endorsed_allowed(self):
+        # Control: a node derived from a USER source (floor 2) is a 2->3 jump,
+        # NOT external->endorsed, so it needs no force.
+        u = self.add("user fact", "user")                  # label 2
+        d, lbl = memdag.derive_node(self.conn, "derived", [u])   # label 2
+        self.assertEqual(lbl, 2)
+        result = memdag_trust.elevate(self.conn, d, "endorsed", "ok", "matt")
+        self.assertEqual(result["to"], 3)
+        self.assertFalse(result["forced"])
+
+
+# ---------------------------------------------------------------------------
 # 5. test_lattice_laws
 # ---------------------------------------------------------------------------
 
