@@ -6,7 +6,11 @@ The IO flow (real installers) isn't unit-tested; the decision logic is.
 Run:  python -m unittest -v test_bootstrap
 """
 
+import io
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 
 import bootstrap
 
@@ -75,6 +79,41 @@ class TestOllamaGraceful(unittest.TestCase):
             which=lambda _n: None)
         self.assertFalse(status["ok"])
         self.assertIn("brew", status["reason"])
+
+
+class TestWireFailureAborts(unittest.TestCase):
+    """BOOTSTRAP-1 / CFG-PRINT-SOFTFAIL-1 user-visible symptom: a wire-config that
+    exits nonzero on a real run must abort main() (return 1) and must NOT print
+    '=== done ===' — i.e. an unconfigured client is never reported as success."""
+
+    def test_nonzero_wire_aborts_and_no_done(self):
+        with mock.patch.object(bootstrap, "install_memdag",
+                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+             mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
+             mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
+             mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=mock.Mock(returncode=1)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = bootstrap.main(["--no-ingest"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertNotIn("=== done ===", out)
+
+    def test_zero_wire_completes(self):
+        # Control: a clean (rc 0) wire reaches '=== done ===' and returns 0.
+        with mock.patch.object(bootstrap, "install_memdag",
+                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+             mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
+             mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
+             mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = bootstrap.main(["--no-ingest"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("=== done ===", out)
 
 
 if __name__ == "__main__":

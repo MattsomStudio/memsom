@@ -5,7 +5,10 @@ Run:  python -m unittest -v test_config
 """
 
 import json
+import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -63,6 +66,123 @@ class TestClaudeCodeRouting(unittest.TestCase):
         cfg = self.home / ".claude.json"
         data = json.loads(cfg.read_text())
         self.assertEqual(data["mcpServers"]["memdag"]["command"], "/abs/memdag-mcp")
+
+
+def _args(**kw):
+    """Build a namespace matching what argparse hands cmd_wire_config."""
+    base = {"client": "codex", "exe": None, "db": None, "print_only": False}
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+# A path whose apostrophe closes the single-quoted TOML literal early, so the
+# generated block fails to round-trip and wire_toml returns action="print".
+APOS_EXE = "/home/o'brien/memdag-mcp"
+
+
+class TestWireTomlRefusesApostrophe(unittest.TestCase):
+    """The mechanism CFG-PRINT-SOFTFAIL-1 rides on: a real write that refuses."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.toml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_apostrophe_in_exe_refuses_to_write(self):
+        res = memdag_config.wire_toml(self.path, APOS_EXE, "/tmp/x.db", print_only=False)
+        self.assertEqual(res["action"], "print")
+        self.assertFalse(self.path.exists())  # genuinely wrote nothing
+
+    def test_apostrophe_in_db_refuses_to_write(self):
+        res = memdag_config.wire_toml(self.path, "/abs/memdag-mcp", "/tmp/o'brien.db",
+                                      print_only=False)
+        self.assertEqual(res["action"], "print")
+        self.assertFalse(self.path.exists())
+
+
+class TestCmdWireConfigExitCode(unittest.TestCase):
+    """cmd_wire_config exit-code contract — the CFG-PRINT-SOFTFAIL-1 regression.
+
+    Previously only {malformed, exists_differs} were counted as failures, so a
+    real-run action='print' (write-refusal) returned 0 and the client was left
+    unconfigured while bootstrap reported success.
+    """
+
+    def test_real_run_print_refusal_returns_1(self):
+        # Real run (print_only=False) where wiring soft-fails with action='print'.
+        with mock.patch.object(memdag_config, "wire",
+                               return_value={"action": "print", "path": "/p", "snippet": "x"}):
+            rc = memdag_config.cmd_wire_config(_args(exe=APOS_EXE, db="/tmp/x.db"))
+        self.assertEqual(rc, 1)
+
+    def test_print_only_run_returns_0(self):
+        # print-only mode: action='print' is the EXPECTED success, not a failure.
+        with mock.patch.object(memdag_config, "wire",
+                               return_value={"action": "print", "path": "/p", "snippet": "x"}):
+            rc = memdag_config.cmd_wire_config(_args(print_only=True, exe=APOS_EXE, db="/tmp/x.db"))
+        self.assertEqual(rc, 0)
+
+    def test_real_run_print_via_real_wire_toml_returns_1(self):
+        # End-to-end through the real wire/wire_toml path (no action mock): an
+        # apostrophe path makes wire_toml refuse -> cmd_wire_config must return 1.
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            rc = memdag_config.cmd_wire_config(
+                _args(client="codex", exe=APOS_EXE, db=str(home / "x.db")))
+        self.assertEqual(rc, 1)
+
+    def test_per_action_exit_matrix_real_run(self):
+        # Lock the SUCCESS-WHITELIST: a real run maps confirmed writes -> 0 and
+        # every refusal/unknown action -> 1. Guards against a future denylist
+        # regression and against a new action value silently mapping to success.
+        success = ("created", "merged", "unchanged", "claude-cli")
+        failure = ("print", "malformed", "exists_differs", "some-future-action")
+        for action in success:
+            with mock.patch.object(memdag_config, "wire",
+                                   return_value={"action": action, "path": "/p"}):
+                rc = memdag_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
+            self.assertEqual(rc, 0, f"{action!r} should be a success (rc 0)")
+        for action in failure:
+            with mock.patch.object(memdag_config, "wire",
+                                   return_value={"action": action, "path": "/p", "snippet": "x"}):
+                rc = memdag_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
+            self.assertEqual(rc, 1, f"{action!r} should be a failure (rc 1)")
+
+
+class TestEntryPointExitCodes(unittest.TestCase):
+    """CFG-MAIN-EXITDROP-1 + dispatcher propagation: the exit code must survive
+    BOTH the standalone __main__ and the memdag_cli dispatcher entry points."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / "x.db")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, argv):
+        # client=codex so wiring routes to wire_toml (an apostrophe exe refuses);
+        # avoids the claude-code CLI path / real $HOME config writes.
+        return subprocess.run(argv, capture_output=True, text=True,
+                              cwd=str(Path(__file__).resolve().parent))
+
+    def test_standalone_main_real_run_exits_1(self):
+        # CFG-MAIN-EXITDROP-1: direct `python memdag_config.py` must not drop the code.
+        r = self._run([sys.executable, "memdag_config.py", "--client", "codex",
+                       "--exe", APOS_EXE, "--db", self.db])
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_dispatcher_real_run_exits_1(self):
+        r = self._run([sys.executable, "-m", "memdag_cli", "wire-config", "--client", "codex",
+                       "--exe", APOS_EXE, "--db", self.db])
+        self.assertEqual(r.returncode, 1, r.stderr)
+
+    def test_dispatcher_print_only_exits_0(self):
+        r = self._run([sys.executable, "-m", "memdag_cli", "wire-config", "--client", "codex",
+                       "--exe", APOS_EXE, "--db", self.db, "--print-only"])
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

@@ -250,4 +250,4 @@ if __name__ == "__main__":
     ap.add_argument("--exe", default=None)
     ap.add_argument("--db", default=None)
     ap.add_argument("--print-only", action="store_true")
-    cmd_wire_config(ap.parse_args())
+    sys.exit(cmd_wire_config(ap.parse_args()))
