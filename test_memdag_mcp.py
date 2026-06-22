@@ -64,10 +64,10 @@ class TestHandleInProcess(Base):
         self.assertIn("name", si)
         self.assertIn("version", si)
 
-    def test_tools_list_returns_14_tools(self):
+    def test_tools_list_returns_16_tools(self):
         resp = memdag_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
-        self.assertEqual(len(tools), 14)
+        self.assertEqual(len(tools), 16)
         names = {t["name"] for t in tools}
         self.assertEqual(names, memdag_mcp.TOOL_NAMES)
 

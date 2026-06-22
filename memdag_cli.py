@@ -57,6 +57,7 @@ import memdag_reflex
 import memdag_chats
 import memdag_doctor
 import memdag_config
+import memdag_obsidian
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ def migrate_all(conn):
     memdag_ingest.migrate(conn)
     memdag_retrieve.migrate(conn)
     memdag_compact.migrate(conn)
+    memdag_obsidian.migrate(conn)
     # Versioned, once-only steps run AFTER all additive per-module migrate()s.
     # Owns operations that must run exactly once in order (e.g. the destructive
     # status-CHECK table rebuild) and is gated by PRAGMA user_version.
@@ -532,6 +534,7 @@ def main(argv=None):
     memdag_chats.register(sub)
     memdag_doctor.register(sub)
     memdag_config.register(sub)
+    memdag_obsidian.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

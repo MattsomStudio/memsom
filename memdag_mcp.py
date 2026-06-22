@@ -201,6 +201,34 @@ TOOLS = [
             "required": ["text", "channel"],
         },
     },
+    {
+        "name": "obsidian_sync",
+        "description": "Sync an Obsidian vault into the DAG: ingest notes and map [[wikilinks]] to relate-edges. A note's frontmatter memdag-channel can only LOWER its integrity, never raise it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "Vault path (default: $MEMDAG_OBSIDIAN_VAULT)"},
+                "channel": {"type": "string", "description": "Default channel for un-stamped notes (default: user)"},
+                "no_prune": {"type": "boolean", "description": "Do not tombstone notes deleted from the vault"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "obsidian_export",
+        "description": "Write an answer back to the vault as an agent-derived, memdag-stamped note. Refuses to overwrite a note memdag did not author.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": {"type": "integer", "description": "Node id to export (omit to use query)"},
+                "query": {"type": "string", "description": "Compose an answer to export"},
+                "vault": {"type": "string", "description": "Vault path (default: $MEMDAG_OBSIDIAN_VAULT)"},
+                "folder": {"type": "string", "description": "Subfolder within the vault (default: memdag)"},
+                "title": {"type": "string", "description": "Note title (default: derived)"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -299,6 +327,30 @@ def _tool_argv(name, arguments):
         argv = ["ingest-text", arguments["text"], "--channel", str(arguments["channel"])]
         if arguments.get("source_ref"):
             argv += ["--ref", str(arguments["source_ref"])]
+        return argv
+
+    if name == "obsidian_sync":
+        argv = ["obsidian-sync"]
+        if arguments.get("vault"):
+            argv.append(str(arguments["vault"]))
+        if arguments.get("channel"):
+            argv += ["--channel", str(arguments["channel"])]
+        if arguments.get("no_prune"):
+            argv.append("--no-prune")
+        return argv
+
+    if name == "obsidian_export":
+        argv = ["obsidian-export"]
+        if arguments.get("node") is not None:
+            argv.append(str(arguments["node"]))
+        if arguments.get("query"):
+            argv += ["--query", str(arguments["query"])]
+        if arguments.get("vault"):
+            argv += ["--vault", str(arguments["vault"])]
+        if arguments.get("folder"):
+            argv += ["--folder", str(arguments["folder"])]
+        if arguments.get("title"):
+            argv += ["--title", str(arguments["title"])]
         return argv
 
     raise ValueError(f"unknown tool: {name!r}")
