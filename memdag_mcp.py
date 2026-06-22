@@ -40,6 +40,8 @@ TOOLS = [
                 "clearance": {"type": "string", "description": "Confidentiality clearance level (default: topsecret = no filter)"},
                 "anticipate": {"type": "boolean", "description": "Use surprise-gating (cite existing if low-novelty)"},
                 "llm": {"type": "boolean", "description": "Use local Ollama LLM (opt-in; falls back to deterministic)"},
+                "graph": {"type": "boolean", "description": "Re-rank retrieval using the rel_edges (wikilink) graph (implies retrieval)"},
+                "hops": {"type": "integer", "description": "Graph expansion hops for graph mode (default 1)"},
             },
             "required": ["question"],
         },
@@ -252,6 +254,10 @@ def _tool_argv(name, arguments):
             argv.append("--anticipate")
         if arguments.get("llm"):
             argv.append("--llm")
+        if arguments.get("graph"):
+            argv.append("--graph")
+        if arguments.get("hops") is not None:
+            argv += ["--hops", str(arguments["hops"])]
         return argv
 
     if name == "explain":

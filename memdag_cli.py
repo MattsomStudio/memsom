@@ -183,7 +183,14 @@ def cmd_ask(args):
             sys.exit(1)
         pool = _build_pool(conn, clearance)
 
-        if args.retrieve:
+        if getattr(args, "graph", False):
+            # GraphRAG-lite: retrieval re-ranked by the rel_edges (wikilink) graph.
+            # Implies a retrieved pool (graph re-ranking over all-live is a no-op).
+            pool = memdag_retrieve.retrieve_graph(
+                conn, args.question, k=args.topk, clearance=clearance,
+                hops=getattr(args, "hops", 1),
+            )
+        elif args.retrieve:
             pool = memdag_retrieve.retrieve(conn, args.question, k=args.topk, clearance=clearance)
 
         # Count total sources for summary
@@ -472,8 +479,12 @@ def main(argv=None):
                        help="Ollama model name (overrides MEMDAG_LLM_MODEL)")
     s_ask.add_argument("--retrieve", action="store_true",
                        help="build the source pool via hybrid BM25+vector retrieval instead of all-live")
+    s_ask.add_argument("--graph", action="store_true",
+                       help="re-rank retrieval using the rel_edges (wikilink) graph (implies retrieval)")
+    s_ask.add_argument("--hops", type=int, default=1,
+                       help="graph expansion hops for --graph (default 1)")
     s_ask.add_argument("--topk", type=int, default=8,
-                       help="max results when using --retrieve (default 8)")
+                       help="max results when using --retrieve/--graph (default 8)")
     s_ask.set_defaults(func=cmd_ask)
 
     # ---- Core explain ----

@@ -54,6 +54,11 @@ DEFAULT_EMBED_URL = "http://localhost:11434/api/embeddings"
 K1 = 1.2
 B = 0.75
 
+# GraphRAG re-ranking: a relevant node linked to a strong seed receives a boost
+# of seed_score * GRAPH_DECAY**hops. Decays with distance so a 2-hop neighbor
+# gets a quarter of the lift a 1-hop neighbor does.
+GRAPH_DECAY = 0.5
+
 # ---------------------------------------------------------------------------
 # Migration
 # ---------------------------------------------------------------------------
@@ -470,6 +475,104 @@ def retrieve(
 
     result = [nid_to_row[nid] for nid in top_nids if nid in nid_to_row]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Graph-expanded retrieve (GraphRAG-lite over rel_edges / wikilinks)
+# ---------------------------------------------------------------------------
+
+def retrieve_graph(
+    conn: sqlite3.Connection,
+    query: str,
+    k: int = 8,
+    clearance="topsecret",
+    min_integrity=None,
+    exclude_quarantined: bool = True,
+    exclude_redacted: bool = True,
+    hops: int = 1,
+) -> list:
+    """retrieve() re-ranked by the rel_edges (wikilink) graph.
+
+    A node that is ALREADY relevant to the query but ranks just below the top-k
+    cutoff gets promoted if it is linked (within *hops*) to a strong seed hit.
+    The graph only RE-ORDERS relevant nodes — it never injects a zero-relevance
+    neighbor, because compose() force-includes every pool member (one bullet
+    minimum) and an off-topic node would spray noise into the answer.
+
+    Trust is enforced twice, by reuse not reinvention: a candidate must be in the
+    `_build_retrieve_pool` set (taint / clearance / min_integrity / non-derived)
+    AND survive `memdag_relate.neighborhood` (dead / quarantined / redacted /
+    archived / above-clearance all filtered, widest-path integrity floor). So a
+    crafted edge to a tainted or above-clearance node cannot leak it into the
+    answer pool.
+
+    Empty rel_edges (or Ollama down) degrades to exactly retrieve()'s ranking.
+    Returns up to k rows as (id, content, channel, label, source_ref), ranked.
+    """
+    import memdag_relate  # local: avoid import cost when graph is unused
+    migrate(conn)
+    memdag_relate.migrate(conn)  # idempotent; ensure rel_edges exists
+    k = max(0, int(k))
+    if k == 0:
+        return []
+    clearance_int = memdag_confid.parse_conf(clearance)
+
+    pool = _build_retrieve_pool(
+        conn, clearance_int, min_integrity, exclude_quarantined, exclude_redacted
+    )
+    if not pool:
+        return []
+
+    # Base relevance over the WHOLE pool (not just top-k) so a sub-cutoff but
+    # scored node remains a promotion candidate. Scan the FULL index, not just
+    # len(pool): excluded nodes (above-clearance / tainted) can outrank pool
+    # members in raw BM25/vector and consume the top-k slots, so a too-small
+    # scan would silently drop a relevant pool member from `base` before it ever
+    # gets a chance to be graph-promoted. docstats holds the live source count.
+    n_idx = conn.execute("SELECT COUNT(*) FROM docstats").fetchone()[0]
+    scan_k = max(n_idx, k)
+    bm25_all = bm25(conn, query, k=scan_k)
+    vec_all = vector_search(conn, query, k=scan_k)
+    bm25_f = [(nid, s) for nid, s in bm25_all if nid in pool]
+    vec_f = [(nid, s) for nid, s in vec_all if nid in pool]
+    base = dict(_rrf_fuse(bm25_f, vec_f))  # {nid: rrf_score}, scored pool members
+    if not base:
+        return []
+
+    # Seeds = what plain retrieve would surface (top-k by base score).
+    seeds = [nid for nid, _ in sorted(base.items(), key=lambda x: -x[1])[:k]]
+
+    # Graph boost: a relevant node linked to a strong seed is lifted toward the
+    # cutoff. The relevance gate (base.get(n) > 0) is what stops an off-topic
+    # neighbor from being added; the pool/neighborhood intersection is the trust
+    # gate that stops a tainted/above-clearance neighbor.
+    boost = {}
+    for s in seeds:
+        s_score = base.get(s, 0.0)
+        if s_score <= 0.0:
+            continue
+        for nb in memdag_relate.neighborhood(
+            conn, s, hops=hops, min_integrity=0, clearance=clearance_int
+        ):
+            n = nb["id"]
+            if n in pool and base.get(n, 0.0) > 0.0:
+                boost[n] = boost.get(n, 0.0) + s_score * (GRAPH_DECAY ** nb["hops"])
+
+    # Re-rank over the SAME candidate set (base's keys); graph only re-orders.
+    final = sorted(
+        base.keys(), key=lambda nid: -(base[nid] + boost.get(nid, 0.0))
+    )
+    top_nids = final[:k]
+    if not top_nids:
+        return []
+
+    placeholders = ",".join("?" * len(top_nids))
+    rows = conn.execute(
+        f"SELECT id, content, channel, label, source_ref FROM nodes WHERE id IN ({placeholders})",
+        top_nids,
+    ).fetchall()
+    nid_to_row = {row[0]: row for row in rows}
+    return [nid_to_row[nid] for nid in top_nids if nid in nid_to_row]
 
 
 # ---------------------------------------------------------------------------
