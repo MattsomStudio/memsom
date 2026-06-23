@@ -27,3 +27,7 @@ jobs:
       # The frozen core regression gate must pass on its own as well.
       - name: Frozen core regression gate
         run: python -W error::DeprecationWarning -m unittest discover -s . -p "test_memdag.py" -v
+
+      # Gate #3 broker entry point boots and enforces allow -> taint -> deny.
+      - name: Gate 3 broker selfcheck
+        run: python memdag_broker.py --selfcheck

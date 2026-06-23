@@ -59,6 +59,10 @@ import memdag_doctor
 import memdag_config
 import memdag_obsidian
 import memdag_rederive
+import memdag_session
+import memdag_capgate
+import memdag_broker
+import memdag_hook
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +563,10 @@ def main(argv=None):
     memdag_doctor.register(sub)
     memdag_config.register(sub)
     memdag_obsidian.register(sub)
+    memdag_session.register(sub)
+    memdag_capgate.register(sub)
+    memdag_broker.register(sub)
+    memdag_hook.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

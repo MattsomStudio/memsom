@@ -38,6 +38,7 @@ Repository = "https://github.com/MattsomStudio/memdag"
 [project.scripts]
 memdag = "memdag_cli:main"
 memdag-mcp = "memdag_mcp:main"
+memdag-broker = "memdag_broker:main"
 
 # ---------------------------------------------------------------------------
 # Wheel: every memdag*.py runtime module as a flat top-level module.
@@ -49,6 +50,8 @@ only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
     "memdag_blame.py",
+    "memdag_broker.py",
+    "memdag_capgate.py",
     "memdag_chats.py",
     "memdag_cli.py",
     "memdag_compact.py",
@@ -60,10 +63,12 @@ only-include = [
     "memdag_federation.py",
     "memdag_gate.py",
     "memdag_heal.py",
+    "memdag_hook.py",
     "memdag_ingest.py",
     "memdag_llm.py",
     "memdag_mcp.py",
     "memdag_obsidian.py",
+    "memdag_policy.py",
     "memdag_profile.py",
     "memdag_quarantine.py",
     "memdag_recompute.py",
@@ -73,6 +78,7 @@ only-include = [
     "memdag_relate.py",
     "memdag_retrieve.py",
     "memdag_schema.py",
+    "memdag_session.py",
     "memdag_trust.py",
 ]
 
@@ -91,6 +97,8 @@ only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
     "memdag_blame.py",
+    "memdag_broker.py",
+    "memdag_capgate.py",
     "memdag_chats.py",
     "memdag_cli.py",
     "memdag_compact.py",
@@ -102,10 +110,12 @@ only-include = [
     "memdag_federation.py",
     "memdag_gate.py",
     "memdag_heal.py",
+    "memdag_hook.py",
     "memdag_ingest.py",
     "memdag_llm.py",
     "memdag_mcp.py",
     "memdag_obsidian.py",
+    "memdag_policy.py",
     "memdag_profile.py",
     "memdag_quarantine.py",
     "memdag_recompute.py",
@@ -115,6 +125,7 @@ only-include = [
     "memdag_relate.py",
     "memdag_retrieve.py",
     "memdag_schema.py",
+    "memdag_session.py",
     "memdag_trust.py",
     "external_fallback.txt",
 ]
