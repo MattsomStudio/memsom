@@ -15,9 +15,9 @@ import scrub_gate  # noqa: E402
 
 class TestDocs(unittest.TestCase):
     def test_readme_has_no_leak_tokens(self):
-        text = (HERE / "README.md").read_text(encoding="utf-8").lower()
-        for tok in scrub_gate.LEAK_TOKENS:
-            self.assertNotIn(tok, text, f"README leaks token {tok!r}")
+        text = (HERE / "README.md").read_text(encoding="utf-8")
+        hits = scrub_gate.scan_text(text)
+        self.assertEqual(hits, [], f"README leaks tokens: {hits}")
 
     def test_issue_template_exists_and_prompts_doctor(self):
         tpl = HERE / ".github" / "ISSUE_TEMPLATE" / "bug_report.md"

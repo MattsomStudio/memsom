@@ -57,9 +57,9 @@ class TestSeedNoPersonalData(unittest.TestCase):
         finally:
             conn.close()
         self.assertEqual(len(rows), 3, "seed should create exactly 3 demo nodes")
-        blob = "\n".join(f"{c}\n{r}" for c, r in rows).lower()
-        for tok in scrub_gate.LEAK_TOKENS:
-            self.assertNotIn(tok, blob, f"seed content leaks token {tok!r}")
+        blob = "\n".join(f"{c}\n{r}" for c, r in rows)
+        hits = scrub_gate.scan_text(blob)
+        self.assertEqual(hits, [], f"seed content leaks tokens: {hits}")
 
 
 if __name__ == "__main__":
