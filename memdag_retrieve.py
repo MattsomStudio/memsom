@@ -188,6 +188,19 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
         if r and r[0]:
             deindex_node(conn, nid)
             return
+    # COMPACT/F-15: an ARCHIVED (compacted-away) episode is pool-excluded at read
+    # time (taint_filter_clauses forces archived = 0), yet if left in postings/
+    # docstats it still pollutes the BM25 CORPUS STATS — N, avgdl, df/idf are
+    # computed over docstats, so a stale archived chunk skews every score and
+    # leaves "duplicate" term mass behind the summary. Treat archived exactly like
+    # redacted: purge it from all retrieval structures and never re-index it. This
+    # also makes a full `reindex` idempotent w.r.t. compaction (it can't resurrect
+    # an archived episode the way index_all's old query would have).
+    if memdag_schema.column_exists(conn, "nodes", "archived"):
+        r = conn.execute("SELECT archived FROM nodes WHERE id = ?", (nid,)).fetchone()
+        if r and r[0]:
+            deindex_node(conn, nid)
+            return
 
     tokens = tokenize(content)
     length = len(tokens)
@@ -260,9 +273,15 @@ def index_all(conn: sqlite3.Connection) -> int:
     Returns the count of nodes indexed.
     """
     migrate(conn)
+    # Exclude archived at the query level too (index_node already guards, but the
+    # bulk pass should not even visit compacted-away episodes — keeps the count
+    # honest and the corpus = exactly the live, retrievable source pool).
+    archived_clause = ""
+    if memdag_schema.column_exists(conn, "nodes", "archived"):
+        archived_clause = " AND archived = 0"
     rows = conn.execute(
         "SELECT id FROM nodes WHERE tombstoned = 0 AND channel != 'agent-derived'"
-        " ORDER BY id"
+        + archived_clause + " ORDER BY id"
     ).fetchall()
     for (nid,) in rows:
         index_node(conn, nid)

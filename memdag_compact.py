@@ -381,6 +381,24 @@ def compact(
                 "UPDATE nodes SET archived = 1, archived_at = ? WHERE id = ?",
                 [(now, i) for i in group_ids],
             )
+            # COMPACT-2 (index drift): keep the BM25/vector index in lock-step with
+            # archival. A just-archived episode is pool-excluded from every read
+            # path, but if its postings/docstats survive they still skew the BM25
+            # CORPUS STATS (N, avgdl, df/idf) and leave duplicate term mass behind
+            # the summary. Purge it from all retrieval structures IN THIS SAME
+            # TRANSACTION so the archive + de-index are atomic — a crash can't leave
+            # a node archived-but-indexed. Inlined (not memdag_retrieve.deindex_node)
+            # because that helper's own `with conn:` would COMMIT here and re-open
+            # the very window this atomicity closes. Guarded on table existence:
+            # the retrieval schema is optional and may never have been migrated.
+            if memdag_schema.table_exists(conn, "postings"):
+                conn.executemany("DELETE FROM postings WHERE node_id = ?",
+                                 [(i,) for i in group_ids])
+                conn.executemany("DELETE FROM docstats WHERE node_id = ?",
+                                 [(i,) for i in group_ids])
+                if memdag_schema.table_exists(conn, "embeddings"):
+                    conn.executemany("DELETE FROM embeddings WHERE node_id = ?",
+                                     [(i,) for i in group_ids])
 
         consumed.update(group_ids)
         minted.append(nid)

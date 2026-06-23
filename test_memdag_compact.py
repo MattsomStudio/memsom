@@ -657,5 +657,105 @@ class TestCompactConfHighWater(Base):
             self.assertNotIn('key material', content or '')
 
 
+class TestCompactPurgesRetrievalIndex(Base):
+    """COMPACT-2: compaction must keep the BM25/vector index in lock-step.
+
+    Archived episodes are pool-excluded from results already, but leaving their
+    postings/docstats/embeddings behind pollutes the BM25 corpus stats. After
+    compact, archived ids must be GONE from every retrieval structure, and a
+    full reindex must NOT resurrect them.
+    """
+
+    def _index_ids(self, table):
+        col = "node_id"
+        return {r[0] for r in self.conn.execute(
+            f"SELECT {col} FROM {table}").fetchall()}
+
+    def test_archived_episodes_purged_from_index_and_not_resurrected(self):
+        import memdag_retrieve
+
+        n1 = self.add(EP1, "user")
+        n2 = self.add(EP2, "user")
+        n3 = self.add(EP3, "user")
+        memdag_retrieve.index_all(self.conn)
+
+        # All three episodes are indexed before compaction.
+        self.assertEqual(self._index_ids("docstats"), {n1, n2, n3})
+        self.assertTrue(self._index_ids("postings") >= {n1, n2, n3})
+
+        minted = memdag_compact.compact(self.conn)
+        self.assertTrue(minted, "fixture should compact into >=1 semantic node")
+
+        # Every archived episode is GONE from postings + docstats after compact.
+        for ep in (n1, n2, n3):
+            self.assertNotIn(ep, self._index_ids("docstats"),
+                             f"archived [{ep}] still in docstats after compact")
+            self.assertNotIn(ep, self._index_ids("postings"),
+                             f"archived [{ep}] still in postings after compact")
+
+        # A full reindex must not bring them back (index_all + index_node guard).
+        memdag_retrieve.index_all(self.conn)
+        for ep in (n1, n2, n3):
+            self.assertNotIn(ep, self._index_ids("docstats"),
+                             f"reindex resurrected archived [{ep}] into docstats")
+
+    def test_corpus_stats_reflect_only_live_pool_after_compact(self):
+        import memdag_retrieve
+
+        # Two near-duplicates that compact together + one unrelated live node.
+        n1 = self.add(EP1, "user")
+        n2 = self.add(EP2, "user")
+        live = self.add(UNREL, "user")
+        memdag_retrieve.index_all(self.conn)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) FROM docstats").fetchone()[0], 3)
+
+        memdag_compact.compact(self.conn)
+
+        # docstats now holds ONLY the still-live, non-archived source (the unrelated
+        # node); the compacted pair is gone, so N/avgdl are no longer skewed by it.
+        remaining = self._index_ids("docstats")
+        self.assertIn(live, remaining)
+        self.assertNotIn(n1, remaining)
+        self.assertNotIn(n2, remaining)
+
+    def test_archive_and_purge_are_one_transaction(self):
+        """If the index purge fails, the archive must roll back with it.
+
+        Guards the COMPACT-2 atomicity promise: if a future refactor pulls the
+        purge out of the archive transaction (e.g. into deindex_node, whose own
+        `with conn:` commits early), this test fails — a crash would then be able
+        to leave a node archived-but-indexed.
+        """
+        import memdag_retrieve
+
+        n1 = self.add(EP1, "user")
+        n2 = self.add(EP2, "user")
+        memdag_retrieve.index_all(self.conn)
+
+        real_table_exists = memdag_schema.table_exists
+
+        def boom(conn, name):
+            # Fail ONLY on the purge's postings probe — which runs INSIDE the
+            # archive transaction, after the archived=1 UPDATE. Everything else
+            # (top-of-compact migrations) behaves normally.
+            if name == "postings":
+                raise RuntimeError("simulated failure mid-purge")
+            return real_table_exists(conn, name)
+
+        with patch.object(memdag_schema, "table_exists", side_effect=boom):
+            with self.assertRaises(RuntimeError):
+                memdag_compact.compact(self.conn)
+
+        # Archive UPDATE must have rolled back: episodes are NOT archived...
+        for ep in (n1, n2):
+            archived = self.conn.execute(
+                "SELECT archived FROM nodes WHERE id = ?", (ep,)).fetchone()[0]
+            self.assertEqual(archived, 0,
+                             f"[{ep}] archived despite purge failure — not atomic")
+        # ...and they remain in the index (purge never committed either).
+        self.assertEqual(self._index_ids("docstats"), {n1, n2})
+
+
 if __name__ == "__main__":
     unittest.main()
