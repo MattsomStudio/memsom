@@ -19,7 +19,11 @@ STORAGE     SQLite                      <- commodity, swappable
 
 ## For beta testers — start here
 
-You're testing a private beta. Setup is one command.
+**👉 Full walkthrough: [TESTERS.md](TESTERS.md)** — a guided onboarding (install →
+scripted mission → use it on your own data → try to break it), with expected
+outcomes at every step and how to report bugs.
+
+Setup is one command:
 
 1. **Accept the GitHub invite** to `MattsomStudio/memdag`, then clone:
    ```
@@ -34,6 +38,9 @@ You're testing a private beta. Setup is one command.
    py bootstrap.py               # Windows
    ```
 3. **Restart your MCP client** and ask it to use the `memdag` tools.
+
+Then follow **[TESTERS.md](TESTERS.md)** to verify it worked and run the guided
+mission. The notes below are reference detail for that guide.
 
 ### What gets set up
 - **Your data lives in `~/.memdag/`** (the database + an isolated virtualenv).
@@ -55,16 +62,6 @@ You're testing a private beta. Setup is one command.
   chats live server-side, so seeding there needs a manual export —
   `memdag ingest-chats --file <exported.json>`.
 - **Codex:** `~/.codex/config.toml` (`[mcp_servers.memdag]`).
-
-### Verify it worked
-After restarting your client, ask it something like *"use the memdag ask tool to
-answer: what is SQLite?"* — it should return an answer with provenance citations.
-Or, in a terminal:
-```
-memdag doctor          # OS, Python, Ollama status, DB path, server self-check
-memdag seed --offline  # load 3 neutral demo nodes
-memdag ask "What is SQLite?"
-```
 
 ### If the bootstrap fails (manual setup)
 The bootstrap is just a convenience wrapper. You can do every step by hand:
@@ -99,7 +96,8 @@ sits next to it).
 ### Found a bug?
 Run `memdag doctor` and paste its output into a new GitHub issue (the bug-report
 template prompts for it). It captures your OS, Python, Ollama status, DB path, and a
-server self-check — everything needed to reproduce.
+server self-check — everything needed to reproduce. See **[TESTERS.md](TESTERS.md)**
+for the full reporting flow.
 
 ---
 
