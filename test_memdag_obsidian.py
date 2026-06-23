@@ -308,7 +308,12 @@ class TestLaunderingLoop(Base):
         # 2. Sync the vault with the DEFAULT channel = user. The exported note is
         #    a file in the vault — a naive reader would stamp it user. The guard
         #    must clamp it to agent-derived (min of user and the declared channel).
-        rel = str(out.relative_to(self.vault).as_posix())
+        # export_note resolves the vault (Path.resolve), so `out` is long-form;
+        # self.vault is the raw tempdir, which is the 8.3 SHORT form on CI Windows
+        # (user 'runneradmin' -> 'RUNNER~1'). Resolve both sides or relative_to
+        # raises on the runneradmin/RUNNER~1 mismatch (invisible on a <=8-char
+        # local username). No-op on Linux and on short local usernames.
+        rel = str(out.relative_to(self.vault.resolve()).as_posix())
         memdag_obsidian.sync_vault(self.conn, self.vault, default_channel="user")
         nodes = self.live_for(rel)
         self.assertTrue(nodes)
