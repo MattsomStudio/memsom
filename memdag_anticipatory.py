@@ -48,6 +48,7 @@ import sys
 
 import memdag
 import memdag_schema
+import memdag_rederive
 import memdag_quarantine
 import memdag_redact
 import memdag_confid
@@ -74,6 +75,7 @@ def migrate(conn):
     memdag_redact.migrate(conn)
     memdag_confid.migrate(conn)
     memdag_retrieve.migrate(conn)
+    memdag_rederive.migrate(conn)  # record_recipe writes to derivation_recipe at mint
     memdag_schema.ensure_table(
         conn,
         "CREATE TABLE IF NOT EXISTS query_log ("
@@ -376,6 +378,9 @@ def surprise_gated_write(conn, question, threshold=0.35, sources=None,
     # derive_node honors the open transaction (commits on its own context exit),
     # so the re-validation above and the insert are one write-locked unit.
     nid, _ = memdag.derive_node(conn, text, used)
+    # Prefetch composes deterministically (memdag.compose), so the question is the
+    # whole recipe — regeneration replays byte-identically from live parents.
+    memdag_rederive.record_recipe(conn, nid, "compose", question=question)
     # ANTICIPATORY-1: derive_node mints at conf_label DEFAULT 0 (PUBLIC). Stamp the
     # high-water confidentiality label at the MINT path — not in each caller — so a
     # node summarising SECRET sources can never be cached/served below clearance.

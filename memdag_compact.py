@@ -35,6 +35,7 @@ import urllib.request
 
 import memdag
 import memdag_schema
+import memdag_rederive
 import memdag_quarantine
 import memdag_llm
 import memdag_confid
@@ -49,6 +50,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     memdag_schema.add_column(conn, "nodes", "archived",
                              "INTEGER NOT NULL DEFAULT 0")
     memdag_schema.add_column(conn, "nodes", "archived_at", "TEXT")
+    memdag_rederive.migrate(conn)  # record_recipe writes to derivation_recipe at mint
 
 
 # ---------------------------------------------------------------------------
@@ -347,10 +349,13 @@ def compact(
         if llm:
             try:
                 summary = _llm_summarize(rows)
+                engine = "llm"
             except memdag_llm.LlmUnavailable:
                 summary = extractive_summary(rows, k)
+                engine = "extractive"  # fell back: regenerate deterministically, NOT as llm
         else:
             summary = extractive_summary(rows, k)
+            engine = "extractive"
 
         # LOAD-BEARING: edges to EVERY episode, label = min(parents) — no laundering
         nid, _label = memdag.derive_node(conn, summary, group_ids)
@@ -377,6 +382,12 @@ def compact(
             conn.execute(
                 "UPDATE nodes SET conf_label = ? WHERE id = ?", (parent_conf, nid)
             )
+            # Record how this summary was made, atomically with conf+archive.
+            # extractive -> store k so replay matches length; llm -> parked (NULL).
+            if engine == "extractive":
+                memdag_rederive.record_recipe(conn, nid, engine, k=k)
+            else:
+                memdag_rederive.record_recipe(conn, nid, engine)
             conn.executemany(
                 "UPDATE nodes SET archived = 1, archived_at = ? WHERE id = ?",
                 [(now, i) for i in group_ids],

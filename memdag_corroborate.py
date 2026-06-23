@@ -42,6 +42,7 @@ import sys
 
 import memdag
 import memdag_schema
+import memdag_rederive
 import memdag_trust
 import memdag_recompute
 
@@ -60,6 +61,8 @@ def migrate(conn):
     """Create all corroboration tables idempotently."""
     # The elevations table must exist before any mint (recompute_all needs it)
     memdag_trust.migrate(conn)
+    # The recipe table must exist before any mint (record_recipe writes to it)
+    memdag_rederive.migrate(conn)
 
     memdag_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS independence_roots (
   root TEXT PRIMARY KEY,
@@ -345,6 +348,9 @@ def corroborate(conn, claim_id, k=2):
             "INSERT INTO edges(child, parent) VALUES (?,?)",
             [(lift, a) for a in asserting]
         )
+        # Recipe: corroborate count template. Parked (not deterministically replayed)
+        # in v1 — a corroborate lift is a descendant, so revoke tombstones it anyway.
+        memdag_rederive.record_recipe(conn, lift, "corroborate")
 
         # CORR-CONF-1: stamp the lift's confidentiality high-water at the mint
         # (same transaction). corroborate only calls recompute_all (integrity);

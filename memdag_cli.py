@@ -58,6 +58,7 @@ import memdag_chats
 import memdag_doctor
 import memdag_config
 import memdag_obsidian
+import memdag_rederive
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ def migrate_all(conn):
     memdag_retrieve.migrate(conn)
     memdag_compact.migrate(conn)
     memdag_obsidian.migrate(conn)
+    memdag_rederive.migrate(conn)
     # Versioned, once-only steps run AFTER all additive per-module migrate()s.
     # Owns operations that must run exactly once in order (e.g. the destructive
     # status-CHECK table rebuild) and is gated by PRAGMA user_version.
@@ -298,12 +300,16 @@ def cmd_ask(args):
         if args.llm:
             try:
                 text, used = memdag_llm.llm_compose(args.question, pool, model=args.model)
+                recipe_engine = "llm"
+                recipe_kw = {"question": args.question, "model": args.model}
             except memdag_llm.LlmUnavailable as e:
                 print(
                     f"[memdag] {e}; falling back to deterministic compose",
                     file=sys.stderr,
                 )
                 text, used = memdag.compose(args.question, pool)
+                recipe_engine = "compose"  # fell back: deterministic, NOT llm
+                recipe_kw = {"question": args.question}
             except ValueError:
                 print(
                     "[memdag] no live source yielded any claim; nothing stored",
@@ -312,6 +318,8 @@ def cmd_ask(args):
                 sys.exit(1)
         else:
             text, used = memdag.compose(args.question, pool)
+            recipe_engine = "compose"
+            recipe_kw = {"question": args.question}
 
         if not text:
             print(
@@ -321,6 +329,11 @@ def cmd_ask(args):
             sys.exit(1)
 
         nid, label = memdag.derive_node(conn, text, used)
+        # Record the recipe so this summary can be regenerated from live parents
+        # after a source is revoked/redacted. derive_node commits its own txn, so
+        # this is a small separate write — same micro-window compact documents.
+        with conn:
+            memdag_rederive.record_recipe(conn, nid, recipe_engine, **recipe_kw)
         # Stamp confidentiality high-water mark
         memdag_confid.recompute_conf(conn, nid)
 
