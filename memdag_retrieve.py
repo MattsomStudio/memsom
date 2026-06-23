@@ -48,7 +48,12 @@ import memdag_llm  # shared Ollama keep_alive() helper (VRAM hygiene)
 # ---------------------------------------------------------------------------
 
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
-DEFAULT_EMBED_URL = "http://localhost:11434/api/embeddings"
+# 127.0.0.1, not localhost: on Windows `localhost` resolves to BOTH ::1 and
+# 127.0.0.1, and a dead Ollama makes the ::1 attempt stall before falling back
+# to IPv4 (instant-refuse on Linux, seconds per call on Windows). Ollama binds
+# 127.0.0.1 by default, so this is also the more reliable target. Override with
+# MEMDAG_EMBED_URL if your Ollama listens elsewhere.
+DEFAULT_EMBED_URL = "http://127.0.0.1:11434/api/embeddings"
 
 # BM25 tuning
 K1 = 1.2

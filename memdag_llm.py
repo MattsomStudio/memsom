@@ -19,7 +19,10 @@ import urllib.request
 import memdag
 import memdag_schema  # noqa: F401  — imported for uniformity (migrate uses it)
 
-DEFAULT_URL = "http://localhost:11434/api/generate"
+# 127.0.0.1, not localhost — see memdag_retrieve.DEFAULT_EMBED_URL: avoids the
+# Windows ::1-then-127.0.0.1 dual-stack stall when Ollama is down. Override with
+# MEMDAG_LLM_URL.
+DEFAULT_URL = "http://127.0.0.1:11434/api/generate"
 DEFAULT_MODEL = "qwen3-abliterated:30b-a3b"
 
 # VRAM hygiene knob.  By DEFAULT memdag does NOT touch keep_alive — it defers

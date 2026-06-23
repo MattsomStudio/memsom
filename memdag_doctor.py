@@ -47,7 +47,7 @@ def _node_count():
 
 
 def _ollama_status():
-    embed_url = os.environ.get("MEMDAG_EMBED_URL") or "http://localhost:11434/api/embeddings"
+    embed_url = os.environ.get("MEMDAG_EMBED_URL") or "http://127.0.0.1:11434/api/embeddings"
     parts = urlsplit(embed_url)
     root = f"{parts.scheme}://{parts.netloc}"
     model = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"
