@@ -54,6 +54,19 @@ class TestLabels(Base):
             memdag.derive_node(self.conn, "a", [999])
 
 
+class TestConnectionPragmas(Base):
+    def test_busy_timeout_set(self):
+        # A concurrent writer holding BEGIN IMMEDIATE (revoke_cascade) must make a
+        # parallel writer WAIT, not fail-fast with SQLITE_BUSY. The pragma is the
+        # belt to the cascade's covering-index suspenders.
+        bt = self.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(bt, 5000)
+
+    def test_foreign_keys_on(self):
+        fk = self.conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        self.assertEqual(fk, 1)
+
+
 class TestCascade(Base):
     def test_cascade_diamond_each_node_once(self):
         a = self.add("a", "user")

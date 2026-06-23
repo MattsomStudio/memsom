@@ -82,6 +82,15 @@ def get_connection(path=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")  # per-connection, OFF by default
+    # busy_timeout: a BEGIN IMMEDIATE (derive_node / revoke_cascade) that meets a
+    # concurrent writer should WAIT for the lock, not fail-fast with SQLITE_BUSY.
+    # A long revoke_cascade holds the write lock for the duration of its recursive
+    # CTE; without this, a parallel ask/derive would raise immediately. 5s is plenty
+    # for a single-user/single-agent store and still bounds a true deadlock.
+    # (The cascade CTE already uses a COVERING INDEX — idx_edges_parent on the
+    # WITHOUT-ROWID edges table appends the PK, so child is covered — so the lock
+    # window is short; the timeout is the belt to that suspenders.)
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
     return conn
 
