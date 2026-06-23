@@ -98,6 +98,32 @@ def _with_keep_alive(body):
     return body
 
 
+DEFAULT_CITE_OVERLAP = 0.2
+
+
+def _cite_overlap_floor():
+    """Minimum lexical overlap (shared content stems / line stems) that a cited
+    answer line must share with the source node it cites — the LLM-4 gate.
+
+    Tunable via MEMDAG_LLM_CITE_OVERLAP (set 0.0 to disable / fail-open; values
+    are clamped to [0.0, 1.0]; unparsable falls back to the default).
+
+    Default 0.2 is deliberately low: a faithful rephrase passes easily because the
+    deterministic source bullet the LLM is told to copy IS a sentence drawn from
+    that very node (real-world overlap is typically >0.6), while prose laundered
+    from a DIFFERENT source — which shares few or no content stems with the cited
+    node — falls below the floor and is rejected fail-closed.
+    """
+    raw = os.environ.get("MEMDAG_LLM_CITE_OVERLAP")
+    if raw is None or not raw.strip():
+        return DEFAULT_CITE_OVERLAP
+    try:
+        v = float(raw)
+    except ValueError:
+        return DEFAULT_CITE_OVERLAP
+    return max(0.0, min(1.0, v))
+
+
 def llm_compose(question, sources, model=None, base_url=None, timeout=60):
     """Compose an answer using the local Ollama LLM, with a citation firewall.
 
@@ -153,6 +179,8 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
         "Answer the question using ONLY the source bullets below. "
         "Every bullet in your answer MUST end with its [mem:id|channel] citation "
         "copied VERBATIM from the source bullet it came from. "
+        "Keep each bullet's wording CLOSE to its source: you may tighten grammar, "
+        "but PRESERVE the source's key terms — do not swap them for synonyms. "
         "Do not add any claim that lacks a citation. "
         "Do not invent citations. "
         f"Valid citations: {valid_str}.\n\n"
@@ -217,19 +245,52 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
     # only real citation lived elsewhere. Anchoring the tag to end-of-line closes
     # both: the deterministic source bullets are one-claim-per-line ending in their
     # citation, so a well-formed answer line always ends with an allowed tag.
-    # SCOPE (honest, documented limit): this guarantees every line carries a valid
-    # provenance citation and the node's PARENTS are anchored to det_used (LLM-3),
-    # so the DAG label/provenance is correct regardless of the prose. It does NOT
-    # verify the rephrased claim text faithfully summarises the cited source — a
-    # structural citation firewall cannot, and the moat is provenance, not LLM
-    # truthfulness. Semantic faithfulness is out of scope for this gate.
+    #
+    # LLM-4 (semantic-laundering floor): once a line is anchored to a tag, require
+    # real LEXICAL overlap between the line's prose and the cited node's content.
+    # The provenance gates above prove the tag is well-formed and the id/channel
+    # are real; they do NOT prove the prose actually came from THAT node. An
+    # adversarial (or just sloppy) model can attach source B's verbatim tag to a
+    # sentence laundered from source A — the DAG parents stay correct (LLM-3 anchors
+    # them to det_used) but the human-readable attribution lies. A shared-stem floor
+    # catches it deterministically and cheaply: a faithful rephrase of a node's own
+    # bullet overlaps heavily; cross-source prose shares almost nothing. Fail-closed
+    # -> LlmUnavailable -> deterministic compose, so a false positive only costs
+    # fluency, never correctness. SCOPE (still honest): this is LEXICAL, not true
+    # semantic, faithfulness — it cannot catch a same-vocabulary paraphrase that
+    # inverts meaning. The moat remains provenance; LLM-4 just removes the cheapest
+    # attribution-laundering trick. Tunable / disable via MEMDAG_LLM_CITE_OVERLAP.
+    content_by_id = {sid: content
+                     for sid, content, _channel, _label, _ref in sources}
+    overlap_floor = _cite_overlap_floor()
     allowed_tags = {f"[mem:{sid}|{real_channel[sid]}]" for sid in cited_ids}
+    tag_to_sid = {f"[mem:{sid}|{real_channel[sid]}]": sid for sid in cited_ids}
     for line in answer.splitlines():
         stripped = line.rstrip()
-        if stripped.strip() and not any(stripped.endswith(tag) for tag in allowed_tags):
+        if not stripped.strip():
+            continue
+        matched = next((t for t in allowed_tags if stripped.endswith(t)), None)
+        if matched is None:
             raise LlmUnavailable(
                 f"LLM output failed citation check: line not anchored to a citation: {line!r}"
             )
+        if overlap_floor > 0.0:
+            sid = tag_to_sid[matched]
+            prose = stripped[: -len(matched)]
+            line_stems = memdag.stems(prose)
+            src_stems = memdag.stems(content_by_id.get(sid, ""))
+            # Only judge when both sides carry content stems; an all-stopword line
+            # or an (impossible) empty source is unjudgeable, so let it ride — the
+            # provenance gates already passed it.
+            if line_stems and src_stems:
+                shared = len(line_stems & src_stems)
+                if shared / len(line_stems) < overlap_floor:
+                    raise LlmUnavailable(
+                        "LLM output failed citation check: line cites "
+                        f"[mem:{sid}] but shares only {shared}/{len(line_stems)} "
+                        f"content terms with that source (< {overlap_floor:.0%}) "
+                        f"— possible semantic laundering: {line!r}"
+                    )
 
     # LLM-3: anchor the derived node's provenance to the DETERMINISTIC source set,
     # NOT the LLM-chosen citation subset. Otherwise the model could paraphrase a

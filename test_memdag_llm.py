@@ -228,6 +228,68 @@ class TestLlmCompose(unittest.TestCase):
             with self.assertRaises(LlmUnavailable):
                 llm_compose(QUESTION, SOURCES)
 
+    # ------------------------------------------------------------------
+    # LLM-4: a line whose prose was laundered from a DIFFERENT source but carries
+    # a real source's verbatim tag must be rejected (lexical-overlap floor). The
+    # tag is well-formed and the id/channel are real, so every provenance gate
+    # passes — only the content-overlap check catches the lie.
+    # ------------------------------------------------------------------
+    def test_semantic_laundering_rejected(self):
+        # node 1 is about nebula/lighthouse/public-ip; this prose is about budgets.
+        bad_answer = "- Quarterly budget spreadsheet totals here. [mem:1|endorsed]"
+        with patch("memdag_llm.urllib.request.urlopen",
+                   return_value=FakeResponse({"response": bad_answer})):
+            with self.assertRaises(LlmUnavailable):
+                llm_compose(QUESTION, SOURCES)
+
+    # A faithful paraphrase of the cited node's OWN content shares plenty of
+    # content stems and must still pass the floor.
+    def test_faithful_paraphrase_passes(self):
+        good_answer = (
+            "- A lighthouse node with a public IP is required. [mem:1|endorsed]\n"
+            "- Use UDP 4242 on every host. [mem:2|user]"
+        )
+        with patch("memdag_llm.urllib.request.urlopen",
+                   return_value=FakeResponse({"response": good_answer})):
+            text, used = llm_compose(QUESTION, SOURCES)
+        self.assertEqual(used, [1, 2])
+        self.assertIn("[mem:1|endorsed]", text)
+
+    # MEMDAG_LLM_CITE_OVERLAP=0 disables the floor (fail-open): the laundered line
+    # that test_semantic_laundering_rejected rejects now passes the gate.
+    def test_cite_overlap_floor_disabled(self):
+        bad_answer = "- Quarterly budget spreadsheet totals here. [mem:1|endorsed]"
+        orig = os.environ.pop("MEMDAG_LLM_CITE_OVERLAP", None)
+        os.environ["MEMDAG_LLM_CITE_OVERLAP"] = "0"
+        try:
+            with patch("memdag_llm.urllib.request.urlopen",
+                       return_value=FakeResponse({"response": bad_answer})):
+                text, used = llm_compose(QUESTION, SOURCES)
+            # parents still anchored to det_used regardless of the LLM's citation
+            self.assertEqual(used, [1, 2])
+        finally:
+            os.environ.pop("MEMDAG_LLM_CITE_OVERLAP", None)
+            if orig is not None:
+                os.environ["MEMDAG_LLM_CITE_OVERLAP"] = orig
+
+    def test_cite_overlap_floor_env_clamped(self):
+        orig = os.environ.pop("MEMDAG_LLM_CITE_OVERLAP", None)
+        try:
+            os.environ["MEMDAG_LLM_CITE_OVERLAP"] = "2.5"   # > 1 -> clamp to 1.0
+            self.assertEqual(memdag_llm._cite_overlap_floor(), 1.0)
+            os.environ["MEMDAG_LLM_CITE_OVERLAP"] = "-1"    # < 0 -> clamp to 0.0
+            self.assertEqual(memdag_llm._cite_overlap_floor(), 0.0)
+            os.environ["MEMDAG_LLM_CITE_OVERLAP"] = "garbage"  # unparsable -> default
+            self.assertEqual(memdag_llm._cite_overlap_floor(),
+                             memdag_llm.DEFAULT_CITE_OVERLAP)
+            os.environ.pop("MEMDAG_LLM_CITE_OVERLAP", None)   # unset -> default
+            self.assertEqual(memdag_llm._cite_overlap_floor(),
+                             memdag_llm.DEFAULT_CITE_OVERLAP)
+        finally:
+            os.environ.pop("MEMDAG_LLM_CITE_OVERLAP", None)
+            if orig is not None:
+                os.environ["MEMDAG_LLM_CITE_OVERLAP"] = orig
+
     def test_used_anchored_to_det_used_not_llm_subset(self):
         # Valid answer that cites ONLY the endorsed source, dropping the user one.
         answer = "- Lighthouse with public IP required. [mem:1|endorsed]"
