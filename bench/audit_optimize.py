@@ -28,7 +28,7 @@ from dataset import from_longmemeval                # noqa: E402
 from judge import synthesize, judge_correct         # noqa: E402
 
 NOMIC_URL = "http://localhost:11434/api/embed"; NOMIC_MODEL = "nomic-embed-text"
-BGE_URL = "http://127.0.0.20:11435/embed"; RRF_C = 60
+BGE_URL = "http://127.0.0.1:11435/embed"; RRF_C = 60
 
 
 def nomic_embed(texts, is_query):

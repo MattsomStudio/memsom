@@ -20,7 +20,7 @@ BENCH = r"C:\Users\you\memdag\bench"; REPO = r"C:\Users\you\memdag"
 sys.path.insert(0, BENCH); sys.path.insert(0, REPO)
 from memdag_retrieve import tokenize                       # noqa: E402
 
-BGE_URL = "http://127.0.0.20:11435/embed"
+BGE_URL = "http://127.0.0.1:11435/embed"
 RRF_C = 60; K1 = 1.2; B = 0.75
 
 

@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dataset import from_longmemeval                       # noqa: E402
 
 NOMIC_URL = "http://localhost:11434/api/embed"; NOMIC_MODEL = "nomic-embed-text"
-BGE_URL = "http://127.0.0.20:11435/embed"; RRF_C = 60
+BGE_URL = "http://127.0.0.1:11435/embed"; RRF_C = 60
 
 
 # ---------- embedding (only for queries; corpus comes from cache) ----------
