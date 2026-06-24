@@ -1,4 +1,4 @@
-"""memdag_bridge_import — import Matthew's flat-file Claude memory into memdag.
+"""memdag_bridge_import — import the user's flat-file Claude memory into memdag.
 
 Phase 1 of the "bridge" (see plan dreamy-giggling-piglet): make memdag the
 store-of-record for the personal memory currently living as markdown files at
@@ -370,11 +370,17 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 # --- CLI ----------------------------------------------------------------------
 
 def default_memory_dir():
-    """Best-effort default: the live PC store, or $MEMDAG_BRIDGE_MEMORY_DIR."""
+    """Locate the live Claude memory dir without hard-coding a username.
+
+    Override with $MEMDAG_BRIDGE_MEMORY_DIR; otherwise discover the first
+    `~/.claude/projects/*/memory/MEMORY.md` (the project-dir name differs per
+    machine, so it is globbed, never hard-coded)."""
     env = os.environ.get("MEMDAG_BRIDGE_MEMORY_DIR")
     if env:
         return Path(env)
-    return Path.home() / ".claude" / "projects" / "C--Users-you" / "memory"
+    for p in sorted((Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")):
+        return p.parent
+    return Path.home() / ".claude" / "projects"
 
 
 def _print_stats(stats, dry_run):

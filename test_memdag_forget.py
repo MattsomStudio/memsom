@@ -207,6 +207,19 @@ class Adapter(unittest.TestCase):
         forget.recompute_forget(self.conn)
         self.assertIsNotNone(forget._get_updated(self.conn))
 
+    def test_check_and_fix_pins(self):
+        self.add_mem("user_pin", "endorsed", forget_tier="hot")
+        self.assertEqual(forget.check_pins(self.conn), [])
+        # tamper: force the pinned node cold
+        self.conn.execute("UPDATE nodes SET forget_tier='cold' WHERE source_ref=?",
+                          ("memory:user_pin",))
+        self.conn.commit()
+        v = forget.check_pins(self.conn)
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0]["kind"], "pin-violation")
+        self.assertEqual(forget.fix_pins(self.conn), 1)
+        self.assertEqual(forget.check_pins(self.conn), [])  # healed
+
     def test_dry_run_writes_nothing(self):
         old = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.add_mem("project_g", "user",

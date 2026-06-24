@@ -35,7 +35,8 @@ from pathlib import Path
 import memdag
 import memdag_schema
 from memdag_bridge_import import (split_frontmatter, fm_top_level,
-                                  parse_index_entries, parse_primary_index)
+                                  parse_index_entries, parse_primary_index,
+                                  default_memory_dir)
 
 # section order must match the hand-curated MEMORY.md taxonomy
 SECTIONS = [
@@ -49,7 +50,9 @@ SECTIONS = [
     "Feedback",
 ]
 BUDGET = 16384
-DEFAULT_TITLE = "# Memory - Matthew Somanlall"
+# generic default; the real H1 is set per-user via $MEMDAG_DIGEST_TITLE so this
+# shippable module carries no author identity.
+DEFAULT_TITLE = "# Memory"
 
 
 class DigestTooLarge(Exception):
@@ -143,6 +146,29 @@ def render_digest(conn, *, title=None, budget=BUDGET):
         dropped.add(id(nxt))
 
 
+def validate(conn, *, budget=BUDGET, title=None):
+    """Export-boundary check: the digest must render, be non-empty, and fit budget.
+
+    This is the Phase-6 cutover PRE-FLIGHT: the hook renders + validates, and only
+    overwrites the real MEMORY.md when this returns [] — otherwise it leaves the
+    existing good file in place (fail-safe, never fail-open).  Returns a list of
+    problem dicts ([] = safe to write)."""
+    try:
+        text = render_digest(conn, title=title, budget=budget)
+    except DigestTooLarge as exc:
+        return [{"kind": "export-boundary", "detail": str(exc)}]
+    except Exception as exc:  # any render failure must block the write, not crash it
+        return [{"kind": "export-boundary", "detail": f"render failed: {exc!r}"}]
+    problems = []
+    if not text.strip():
+        problems.append({"kind": "export-boundary", "detail": "rendered digest is empty"})
+    size = len(text.encode("utf-8"))
+    if size > budget:
+        problems.append({"kind": "export-boundary",
+                         "detail": f"digest {size} > {budget} byte budget"})
+    return problems
+
+
 def write_shadow(conn, memory_dir, *, name="MEMORY.memdag.md", title=None):
     """Render and write the SHADOW digest next to the real MEMORY.md.
 
@@ -152,6 +178,26 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memdag.md", title=None):
     path = Path(memory_dir) / name
     path.write_text(text, encoding="utf-8")
     return path, text
+
+
+def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=BUDGET):
+    """CUTOVER write: validate, then overwrite the REAL MEMORY.md ONLY if valid.
+
+    Fail-safe, never fail-open: on ANY validation problem the existing file is left
+    exactly as-is and (False, problems) is returned — so a broken render can never
+    blank or truncate the always-on brain.  On success writes atomically (tmp +
+    replace) and returns (True, {"bytes", "path"}).  This is what the Phase-6 Stop
+    hook calls; until that hook is wired, nothing invokes it.
+    """
+    problems = validate(conn, budget=budget, title=title)
+    if problems:
+        return False, problems
+    text = render_digest(conn, title=title, budget=budget)
+    path = Path(memory_dir) / name
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return True, {"bytes": len(text.encode("utf-8")), "path": str(path)}
 
 
 # --- verification (the cutover GO check) -------------------------------------
@@ -193,17 +239,10 @@ def compare_index(real_text, shadow_text):
 
 # --- CLI ----------------------------------------------------------------------
 
-def _default_memory_dir():
-    env = os.environ.get("MEMDAG_BRIDGE_MEMORY_DIR")
-    if env:
-        return Path(env)
-    return Path.home() / ".claude" / "projects" / "C--Users-you" / "memory"
-
-
 def _cmd_shadow(args):
     conn = memdag.get_connection()
     try:
-        mem = Path(args.memory_dir) if args.memory_dir else _default_memory_dir()
+        mem = Path(args.memory_dir) if args.memory_dir else default_memory_dir()
         path, text = write_shadow(conn, mem)
         size = len(text.encode("utf-8"))
         print(f"[digest] wrote shadow {path} ({size} / {BUDGET} bytes)")

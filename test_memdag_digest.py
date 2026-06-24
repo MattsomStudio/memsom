@@ -71,9 +71,17 @@ class Base(unittest.TestCase):
 class TestRender(Base):
     def test_has_title_and_sections(self):
         out = digest.render_digest(self.conn)
-        self.assertTrue(out.startswith("# Memory - Matthew Somanlall"))
+        self.assertTrue(out.startswith("# Memory"))  # generic default title
         self.assertIn("## About the User", out)
         self.assertIn("## Feedback", out)
+
+    def test_title_overridable_via_env(self):
+        os.environ["MEMDAG_DIGEST_TITLE"] = "# Memory - Test User"
+        try:
+            out = digest.render_digest(self.conn)
+            self.assertTrue(out.startswith("# Memory - Test User"))
+        finally:
+            os.environ.pop("MEMDAG_DIGEST_TITLE", None)
 
     def test_file_links_and_literals_rendered(self):
         out = digest.render_digest(self.conn)
@@ -117,6 +125,37 @@ class TestRender(Base):
         forget.recompute_forget(self.conn)
         out = digest.render_digest(self.conn)
         self.assertNotIn("project_orphan.md", out)
+
+
+class TestValidate(Base):
+    def test_valid_store_passes(self):
+        self.assertEqual(digest.validate(self.conn), [])
+
+    def test_over_budget_blocks(self):
+        problems = digest.validate(self.conn, budget=10)
+        self.assertTrue(problems)
+        self.assertEqual(problems[0]["kind"], "export-boundary")
+
+
+class TestWriteLive(Base):
+    def test_writes_real_when_valid(self):
+        target = self.root / "out"
+        target.mkdir()
+        ok, info = digest.write_live(self.conn, target)
+        self.assertTrue(ok)
+        self.assertTrue((target / "MEMORY.md").exists())
+        self.assertIn("## About the User", (target / "MEMORY.md").read_text(encoding="utf-8"))
+
+    def test_failsafe_leaves_existing_file_when_invalid(self):
+        target = self.root / "out"
+        target.mkdir()
+        good = "# existing good brain\n"
+        (target / "MEMORY.md").write_text(good, encoding="utf-8")
+        ok, problems = digest.write_live(self.conn, target, budget=10)  # forces failure
+        self.assertFalse(ok)
+        self.assertTrue(problems)
+        # the existing file is untouched (fail-safe, not fail-open)
+        self.assertEqual((target / "MEMORY.md").read_text(encoding="utf-8"), good)
 
 
 class TestBudget(Base):

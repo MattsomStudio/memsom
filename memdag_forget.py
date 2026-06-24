@@ -1,6 +1,6 @@
 """memdag_forget — the RS/SS "forgetting" layer, ported into memdag (Phase 2).
 
-This is a faithful port of Matthew's flat-file forgetting layer
+This is a faithful port of the user's flat-file forgetting layer
 (~/.claude/episodic/mem_weights.py) onto memdag nodes.  It is the ranking signal
 the digest exporter (Phase 3) needs: which memories are "hot" enough to render
 into the always-on MEMORY.md vs which have gone cold (kept in the store, dropped
@@ -335,6 +335,34 @@ def _set_updated(conn, ts):
         "ON CONFLICT(id) DO UPDATE SET updated = excluded.updated",
         (ts,),
     )
+
+
+def check_pins(conn):
+    """Invariant: a pinned (endorsed) bridge memory must never be cold — losing
+    one from the digest would forget who the user is.  compute() enforces this, so
+    a violation means external tampering or a bug.  Returns a list of violations."""
+    if not memdag_schema.column_exists(conn, "nodes", "forget_tier"):
+        return []
+    rows = conn.execute(
+        "SELECT id, source_ref FROM nodes WHERE channel = 'endorsed' "
+        "AND forget_tier = 'cold' AND tombstoned = 0 "
+        "AND source_ref LIKE 'memory:%'"
+    ).fetchall()
+    return [{"kind": "pin-violation", "node": nid,
+             "detail": f"pinned (endorsed) memory {sref} is cold"}
+            for nid, sref in rows]
+
+
+def fix_pins(conn):
+    """Force every pinned (endorsed) bridge memory back to hot.  Returns count."""
+    if not memdag_schema.column_exists(conn, "nodes", "forget_tier"):
+        return 0
+    with conn:
+        cur = conn.execute(
+            "UPDATE nodes SET forget_tier = 'hot' WHERE channel = 'endorsed' "
+            "AND forget_tier = 'cold' AND tombstoned = 0 "
+            "AND source_ref LIKE 'memory:%'")
+    return cur.rowcount
 
 
 def recompute_forget(conn, *, usage_dir=None, events=None, now=None,
