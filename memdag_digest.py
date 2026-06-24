@@ -176,7 +176,9 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memdag.md", title=None):
     """
     text = render_digest(conn, title=title)
     path = Path(memory_dir) / name
-    path.write_text(text, encoding="utf-8")
+    # write_bytes (not write_text): keep LF on Windows so the on-disk size matches
+    # the budget accounting and the file's line endings match the original.
+    path.write_bytes(text.encode("utf-8"))
     return path, text
 
 
@@ -195,7 +197,9 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=BUDGET)
     text = render_digest(conn, title=title, budget=budget)
     path = Path(memory_dir) / name
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    # write_bytes (not write_text): keep LF on Windows so on-disk size == the
+    # validated budget and the file's line endings match the original MEMORY.md.
+    tmp.write_bytes(text.encode("utf-8"))
     tmp.replace(path)
     return True, {"bytes": len(text.encode("utf-8")), "path": str(path)}
 
