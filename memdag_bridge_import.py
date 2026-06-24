@@ -378,9 +378,14 @@ def default_memory_dir():
     env = os.environ.get("MEMDAG_BRIDGE_MEMORY_DIR")
     if env:
         return Path(env)
-    for p in sorted((Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")):
-        return p.parent
-    return Path.home() / ".claude" / "projects"
+    candidates = [m.parent for m in
+                  (Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")]
+    if not candidates:
+        return Path.home() / ".claude" / "projects"
+    # the real brain is the memory dir with the MOST .md files; project-scoped
+    # memory dirs (created by running Claude in another cwd) hold ~1 file and must
+    # not be mistaken for it just because they sort first.
+    return max(candidates, key=lambda d: len(list(d.glob("*.md"))))
 
 
 def _print_stats(stats, dry_run):
