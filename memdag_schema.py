@@ -429,6 +429,12 @@ def taint_filter_clauses(conn: sqlite3.Connection, clearance=None,
     function owns only the taint dimensions, so the next taint column is added
     here once and every pool inherits it (the historical _build_pool vs
     _build_retrieve_pool divergence bug class cannot recur).
+
+    DELIBERATELY EXCLUDED: `stale` (memdag_stale). Staleness is NOT a security
+    dimension — a stale node still answers, the answer is just flagged, and
+    exclusion is an explicit operator opt-in (`ask --fresh-only`). Folding `stale`
+    in here would make "outdated" silently mean "dead". The opt-in fragment lives
+    in memdag_stale.stale_exclude_clauses and is appended only on the fresh-only path.
     """
     clauses = ["tombstoned = 0"]
     params = []

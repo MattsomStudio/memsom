@@ -63,6 +63,7 @@ import memdag_session
 import memdag_capgate
 import memdag_broker
 import memdag_hook
+import memdag_stale
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +93,7 @@ def migrate_all(conn):
     memdag_compact.migrate(conn)
     memdag_obsidian.migrate(conn)
     memdag_rederive.migrate(conn)
+    memdag_stale.migrate(conn)
     # Versioned, once-only steps run AFTER all additive per-module migrate()s.
     # Owns operations that must run exactly once in order (e.g. the destructive
     # status-CHECK table rebuild) and is gated by PRAGMA user_version.
@@ -198,6 +200,19 @@ def cmd_ask(args):
             )
         elif args.retrieve:
             pool = memdag_retrieve.retrieve(conn, args.question, k=args.topk, clearance=clearance)
+
+        # --fresh-only: opt-in exclusion of stale sources (disclose-by-default
+        # otherwise). Applied uniformly over the finalized pool so it covers the
+        # default / --retrieve / --graph paths identically. stale is NOT in
+        # taint_filter_clauses by design (see memdag_stale): staleness never
+        # excludes unless the operator asks for it here.
+        stale_excluded = 0
+        if getattr(args, "fresh_only", False) and pool:
+            stale_in_pool = set(memdag_stale.stale_annotations(
+                conn, [r[0] for r in pool]).keys())
+            if stale_in_pool:
+                stale_excluded = len(stale_in_pool)
+                pool = [r for r in pool if r[0] not in stale_in_pool]
 
         # Count total sources for summary
         total_sources = conn.execute(
@@ -341,18 +356,33 @@ def cmd_ask(args):
         # Stamp confidentiality high-water mark
         memdag_confid.recompute_conf(conn, nid)
 
+        # Staleness disclosure: flag exactly the cited sources that have gone
+        # stale (precise — `used` is compose's own citation set, not a heuristic).
+        stale_used = memdag_stale.stale_annotations(conn, used)
+
         excl_detail = (
             f"tombstoned: {excl['tombstoned']}, quarantined: {excl['quarantined']}, "
             f"redacted: {excl['redacted']}, archived: {excl['archived']}, "
             f"above-clearance: {excl['above_clearance']}"
         )
         print(text)
+        if stale_used:
+            print("\n[STALE] this answer draws on stale source(s):")
+            for sid in sorted(stale_used):
+                info = stale_used[sid]
+                fresh = info.get("fresh_id")
+                fresh_note = f" -- fresh version [{fresh}] available" if fresh else ""
+                reason = info.get("reason") or "source changed"
+                print(f"  [{sid}] {reason} (since {info.get('stale_at')}){fresh_note}")
+            print("Pass --fresh-only to exclude, or `memdag freshen <derived_id>` to repoint.")
         print(
             f"\nstored as node [{nid}] | integrity: {memdag.NAME[label]}"
             f" (floor of {len(used)} parents)"
             f" | sources considered: {total_sources}, used: {len(used)},"
             f" excluded: {excl_total} ({excl_detail})"
         )
+        if getattr(args, "fresh_only", False) and stale_excluded:
+            print(f"({stale_excluded} stale source(s) excluded by --fresh-only)")
         p = memdag_profile.profile(conn, nid)
         print(memdag_profile.format_profile(p))
 
@@ -502,6 +532,8 @@ def main(argv=None):
                        help="graph expansion hops for --graph (default 1)")
     s_ask.add_argument("--topk", type=int, default=8,
                        help="max results when using --retrieve/--graph (default 8)")
+    s_ask.add_argument("--fresh-only", action="store_true",
+                       help="exclude stale sources (default: include + flag them)")
     s_ask.set_defaults(func=cmd_ask)
 
     # ---- Core explain ----
@@ -567,6 +599,7 @@ def main(argv=None):
     memdag_capgate.register(sub)
     memdag_broker.register(sub)
     memdag_hook.register(sub)
+    memdag_stale.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

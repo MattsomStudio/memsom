@@ -258,6 +258,28 @@ def _try_index(conn: sqlite3.Connection, nid: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _find_live_predecessor(conn: sqlite3.Connection, source_ref: str, channel: str,
+                           new_hash: str):
+    """Return the LIVE, same-channel node with the SAME source_ref but a DIFFERENT
+    content_hash — the prior version this re-ingest supersedes (newest if several).
+
+    Sources its liveness WHERE-fragment from the shared taint filter (same
+    discipline as _find_live_by_hash), so it never selects a tombstoned / redacted
+    / quarantined / archived node — a re-ingest cannot "supersede" an already-dead
+    version. Returns None when source_ref is empty or no prior version exists.
+    """
+    if not source_ref:
+        return None
+    clauses, params = memdag_schema.taint_filter_clauses(conn)
+    row = conn.execute(
+        "SELECT id FROM nodes WHERE source_ref = ? AND channel = ?"
+        " AND content_hash IS NOT NULL AND content_hash != ? AND "
+        + " AND ".join(clauses) + " ORDER BY id DESC LIMIT 1",
+        [source_ref, channel, new_hash] + params,
+    ).fetchone()
+    return row[0] if row else None
+
+
 def ingest_text(
     conn: sqlite3.Connection,
     text: str,
@@ -324,6 +346,20 @@ def ingest_text(
 
         _try_index(conn, nid)
         ids.append(nid)
+
+        # Staleness auto-detect (single-chunk only — multi-chunk has no clean
+        # chunk-to-chunk supersession alignment; those use the manual stale-cascade
+        # verb). If this re-ingest replaces a prior LIVE version of the SAME source,
+        # record old->new and fire the staleness cascade. Best-effort: a failure
+        # here must never break ingest (the new node is already committed).
+        if len(chunks) == 1 and source_ref:
+            pred = _find_live_predecessor(conn, source_ref, channel, h)
+            if pred is not None and pred != nid:
+                try:
+                    import memdag_stale  # noqa: PLC0415 — lazy: avoid import cycle
+                    memdag_stale.on_reingest_supersede(conn, pred, nid, source_ref)
+                except Exception:  # noqa: BLE001 — staleness is best-effort
+                    pass
 
     return ids
 

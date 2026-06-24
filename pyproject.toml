@@ -83,6 +83,7 @@ only-include = [
     "memdag_retrieve.py",
     "memdag_schema.py",
     "memdag_session.py",
+    "memdag_stale.py",
     "memdag_trust.py",
 ]
 
@@ -134,6 +135,7 @@ only-include = [
     "memdag_retrieve.py",
     "memdag_schema.py",
     "memdag_session.py",
+    "memdag_stale.py",
     "memdag_trust.py",
     "external_fallback.txt",
 ]
