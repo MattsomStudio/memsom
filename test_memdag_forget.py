@@ -183,23 +183,31 @@ class Adapter(unittest.TestCase):
         self.assertAlmostEqual(row[0], 1.0, places=3)  # rs_seed, no decay (born now)
 
     def test_usage_events_reinforce(self):
+        # Two identical 40-day-old hot memories; only project_e receives usage
+        # hits. Reinforcement is proven by comparing the hit node against the
+        # no-hit control AFTER the same 40-day decay — NOT against the pre-decay
+        # seed (0.3). Seed-vs-after is the wrong baseline: 40 days of decay
+        # naturally outpaces 2 hits (decay-only floor is ~0.006), so the hits
+        # land well above the floor but below the un-decayed seed. The right
+        # question is "did hits lift RS vs no hits", and they do (0.006 -> 0.28).
         usage = Path(self.tmp.name) / "usage"
         usage.mkdir()
         (usage / "pc.jsonl").write_text(
             '{"ts": "2026-06-23T00:00:00Z", "stem": "project_e", "hits": 2}\n',
             encoding="utf-8")
         old = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self.add_mem("project_e", "user",
-                     forget_rs=0.3, forget_ss=0.0,
-                     forget_first_seen=old, forget_last_used=old, forget_tier="hot")
-        before = self.conn.execute(
-            "SELECT forget_rs FROM nodes WHERE source_ref = ?",
-            ("memory:project_e",)).fetchone()[0]
+        for stem in ("project_e", "project_e_ctrl"):
+            self.add_mem(stem, "user",
+                         forget_rs=0.3, forget_ss=0.0,
+                         forget_first_seen=old, forget_last_used=old, forget_tier="hot")
         forget.recompute_forget(self.conn, usage_dir=usage)
-        after = self.conn.execute(
+        hit = self.conn.execute(
             "SELECT forget_rs FROM nodes WHERE source_ref = ?",
             ("memory:project_e",)).fetchone()[0]
-        self.assertGreater(after, before)  # 2 hits lifted RS
+        ctrl = self.conn.execute(
+            "SELECT forget_rs FROM nodes WHERE source_ref = ?",
+            ("memory:project_e_ctrl",)).fetchone()[0]
+        self.assertGreater(hit, ctrl)  # 2 hits reinforced RS above the decay-only control
 
     def test_watermark_advances(self):
         self.add_mem("project_f", "user")
