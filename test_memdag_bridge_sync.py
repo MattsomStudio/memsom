@@ -20,6 +20,13 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.syncdir = self.root / "claude-sync" / "memdag"
+        # Pin a sentinel self-origin so federation's migrate-time self-trust
+        # auto-registers THIS sentinel, not the ambient machine's MEMDAG_ORIGIN.
+        # Without this, on a host whose MEMDAG_ORIGIN equals a peer name used
+        # below (e.g. 'pc'), the peer collides with the auto-trusted self origin
+        # and the untrusted-import clamp test sees it as trusted (env leak).
+        self._saved_origin = os.environ.get("MEMDAG_ORIGIN")
+        os.environ["MEMDAG_ORIGIN"] = "bridge-test-self"
         self.pc = memdag.get_connection(self.root / "pc.db")
         self.mac = memdag.get_connection(self.root / "mac.db")
         sync.migrate(self.pc)
@@ -29,6 +36,10 @@ class Base(unittest.TestCase):
         self.pc.close()
         self.mac.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._saved_origin is None:
+            os.environ.pop("MEMDAG_ORIGIN", None)
+        else:
+            os.environ["MEMDAG_ORIGIN"] = self._saved_origin
         self.tmp.cleanup()
 
     def add(self, conn, stem, channel="endorsed"):

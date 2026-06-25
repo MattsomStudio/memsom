@@ -231,7 +231,21 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
             (nid, length),
         )
 
-    # Optional vector — degrade silently if Ollama is down or errors
+    # Optional vector — backend-dispatched; degrade silently on any failure.
+    import memdag_embed  # lazy: cheap, stdlib-only at import
+    b = memdag_embed.backend()
+    if b == "bm25":
+        return  # BM25-only by request; no vectors stored
+    if b == "bge-m3" and memdag_embed.bge_available():
+        try:
+            enc = memdag_embed.encode_doc(content)
+            if enc is not None:
+                memdag_embed.store_bge(conn, nid, enc)
+                return
+        except Exception:
+            pass  # bge failed -> fall through to Ollama, then BM25-only
+
+    # Ollama dense path (default, or bge fall-through). Unchanged behavior.
     try:
         vec = _call_ollama_embed(content)
         blob = _vec_to_blob(vec)
@@ -261,11 +275,16 @@ def deindex_node(conn: sqlite3.Connection, nid: int) -> None:
     """
     if not memdag_schema.table_exists(conn, "postings"):
         return
+    import memdag_embed  # lazy: cheap, stdlib-only at import
     with conn:
         conn.execute("DELETE FROM postings WHERE node_id = ?", (nid,))
         conn.execute("DELETE FROM docstats WHERE node_id = ?", (nid,))
         if memdag_schema.table_exists(conn, "embeddings"):
             conn.execute("DELETE FROM embeddings WHERE node_id = ?", (nid,))
+        # Purge the bge side-tables in the SAME txn (deindex_bge is bare-exec +
+        # table-guarded). Keeps the invariant: anything that drops `embeddings`
+        # drops sparse_vecs + colbert_vecs too — no orphaned vectors can resurface.
+        memdag_embed.deindex_bge(conn, nid)
 
 
 # ---------------------------------------------------------------------------
@@ -351,20 +370,42 @@ def bm25(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
 # ---------------------------------------------------------------------------
 
 def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
-    """Embed query via Ollama, brute-force cosine over stored embeddings.
+    """Embed query via the active backend, brute-force cosine over the stored
+    DENSE embeddings of that SAME backend.
 
     Returns [(nid, score)] sorted desc, up to k.
-    Returns [] if no embeddings stored or Ollama is down — never crashes.
+    Returns [] if no embeddings stored or the embedder is down — never crashes.
+
+    Backend dispatch (MEMDAG_EMBED_BACKEND):
+      ollama  -> Ollama dense (nomic), model='nomic-embed-text'
+      bge-m3  -> FlagEmbedding dense, model='bge-m3'
+      bm25    -> [] (BM25-only)
+
+    Collision fix: read ONLY the active backend's rows (`WHERE model = ?`). Two
+    backends with different dims (768 nomic vs 1024 bge) can coexist in the
+    embeddings table; without this filter _cosine() silently scores every
+    mismatched-dim row as 0.0, corrupting ranking after a backend switch.
     """
     migrate(conn)
+    import memdag_embed  # lazy: cheap, stdlib-only at import
+    b = memdag_embed.backend()
+    if b == "bm25":
+        return []
     try:
-        q_vec = _call_ollama_embed(query)
+        if b == "bge-m3" and memdag_embed.bge_available():
+            enc = memdag_embed.encode_query(query)
+            if enc is None:
+                return []
+            q_vec = enc["dense"]
+        else:
+            q_vec = _call_ollama_embed(query)
     except Exception:
-        return []  # Ollama down -> silent fallback to BM25
+        return []  # embedder down -> silent fallback to BM25
 
-    # Load all stored embeddings
+    # Load this backend's stored embeddings ONLY (dim-collision fix).
     rows = conn.execute(
-        "SELECT node_id, vec FROM embeddings"
+        "SELECT node_id, vec FROM embeddings WHERE model = ?",
+        (memdag_embed.active_model_name(),),
     ).fetchall()
     if not rows:
         return []
@@ -380,20 +421,105 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Sparse (BGE-M3 learned lexical) retrieval — bge backend only
+# ---------------------------------------------------------------------------
+
+def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
+    """Score the query's BGE-M3 sparse (lexical) weights against stored doc
+    sparse weights by shared-token dot product.
+
+    Returns [(nid, score)] sorted desc, up to k. Returns [] for any non-bge
+    backend, when bge is unavailable, or when the encoder fails — so it
+    contributes nothing to fusion outside the bge path (degrades cleanly).
+    """
+    migrate(conn)
+    import memdag_embed
+    if memdag_embed.backend() != "bge-m3" or not memdag_embed.bge_available():
+        return []
+    enc = memdag_embed.encode_query(query)
+    if enc is None:
+        return []
+    q_sparse = enc["sparse"]
+    if not memdag_schema.table_exists(conn, "sparse_vecs"):
+        return []
+    rows = conn.execute(
+        "SELECT node_id, weights_json FROM sparse_vecs WHERE model = ?",
+        (memdag_embed.active_model_name(),),
+    ).fetchall()
+    scored = []
+    for nid, wj in rows:
+        try:
+            d_sparse = json.loads(wj)
+        except Exception:
+            continue
+        s = memdag_embed.sparse_dot(q_sparse, d_sparse)
+        if s > 0.0:
+            scored.append((nid, s))
+    scored.sort(key=lambda x: -x[1])
+    return scored[:k]
+
+
+# ---------------------------------------------------------------------------
+# ColBERT late-interaction RE-RANKER (bge backend only)
+# ---------------------------------------------------------------------------
+
+def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) -> list:
+    """Re-order an ALREADY-POOL-GATED candidate id list by ColBERT MaxSim.
+
+    SECURITY: this only re-orders the ids it is given; it has NO membership
+    power. `candidate_ids` must already be the taint/clearance-filtered fused
+    window (see retrieve()), so a crafted strong-match per-token vector on an
+    excluded node can never enter here.
+
+    Returns [(nid, score)] for EVERY candidate (a candidate with no colbert
+    vectors keeps score 0.0 and, via the stable sort, its incoming fused order).
+    For any non-bge backend / bge-unavailable, returns the candidates unchanged
+    (all score 0.0) so the caller's fused order is preserved.
+    """
+    if not candidate_ids:
+        return []
+    import memdag_embed
+    if memdag_embed.backend() != "bge-m3" or not memdag_embed.bge_available():
+        return [(nid, 0.0) for nid in candidate_ids]
+    enc = memdag_embed.encode_query(query)
+    if enc is None or not memdag_schema.table_exists(conn, "colbert_vecs"):
+        return [(nid, 0.0) for nid in candidate_ids]
+    q_colbert = enc["colbert"]
+    placeholders = ",".join("?" * len(candidate_ids))
+    rows = conn.execute(
+        "SELECT node_id, n_tokens, dim, vecs FROM colbert_vecs"
+        f" WHERE model = ? AND node_id IN ({placeholders})",
+        [memdag_embed.active_model_name()] + list(candidate_ids),
+    ).fetchall()
+    have = {}
+    for nid, n_tokens, dim, blob in rows:
+        d_colbert = memdag_embed.blob_to_colbert(blob, n_tokens, dim)
+        have[nid] = memdag_embed.colbert_maxsim(q_colbert, d_colbert)
+    # Preserve incoming (fused) order for ties / missing-vector candidates: build
+    # scores in candidate order, then stable-sort by score descending.
+    scored = [(nid, have.get(nid, 0.0)) for nid in candidate_ids]
+    scored.sort(key=lambda x: -x[1])
+    return scored
+
+
+# ---------------------------------------------------------------------------
 # RRF fusion
 # ---------------------------------------------------------------------------
 
-def _rrf_fuse(bm25_ranks: list, vec_ranks: list, rrf_c: int = 60) -> list:
-    """Reciprocal Rank Fusion of two ranked lists.
+def _rrf_fuse(*rank_lists, rrf_c: int = 60) -> list:
+    """Reciprocal Rank Fusion of N ranked lists (>=1).
 
     Each list is [(nid, score)]; positions are 1-indexed for RRF.
     Returns merged [(nid, rrf_score)] sorted by rrf_score descending.
+
+    Variadic so bm25 + dense + sparse fuse in one call. `rrf_c` is keyword-only
+    (after `*rank_lists`) so a third rank list can't be misread as the constant.
+    Two-list callers `_rrf_fuse(a, b)` are numerically identical to the original.
     """
     rrf = {}
-    for rank, (nid, _) in enumerate(bm25_ranks, start=1):
-        rrf[nid] = rrf.get(nid, 0.0) + 1.0 / (rrf_c + rank)
-    for rank, (nid, _) in enumerate(vec_ranks, start=1):
-        rrf[nid] = rrf.get(nid, 0.0) + 1.0 / (rrf_c + rank)
+    for ranks in rank_lists:
+        for rank, (nid, _) in enumerate(ranks, start=1):
+            rrf[nid] = rrf.get(nid, 0.0) + 1.0 / (rrf_c + rank)
     return sorted(rrf.items(), key=lambda x: -x[1])
 
 
@@ -467,22 +593,33 @@ def retrieve(
     if not pool:
         return []
 
-    # BM25 + vector over full index, then intersect with pool
+    # BM25 + dense + (bge) sparse over full index, then intersect with pool.
     bm25_all = bm25(conn, query, k=len(pool) + k)
     vec_all = vector_search(conn, query, k=len(pool) + k)
+    sparse_all = sparse_search(conn, query, k=len(pool) + k)  # [] off the bge path
 
-    # Filter each ranked list to pool members only
+    # Filter each ranked list to pool members only (the trust intersection).
     bm25_filtered = [(nid, s) for nid, s in bm25_all if nid in pool]
     vec_filtered = [(nid, s) for nid, s in vec_all if nid in pool]
+    sparse_filtered = [(nid, s) for nid, s in sparse_all if nid in pool]
 
-    # Fuse
-    fused = _rrf_fuse(bm25_filtered, vec_filtered)
+    # Fuse. Off the bge path sparse_filtered is [] -> numerically identical to
+    # the original two-list RRF (pure-zero pool members are omitted by design;
+    # retrieval is about relevance, not "give me all nodes").
+    fused = _rrf_fuse(bm25_filtered, vec_filtered, sparse_filtered)
 
-    # If a pool member has no score at all (not in either rank), append it at
-    # the tail so every pool member is at least reachable (bm25 fallback).
-    # Actually we want only scored results — pure-zero pool members are fine to
-    # omit; retrieval is about relevance, not "give me all nodes".
-    top_nids = [nid for nid, _ in fused[:k]]
+    # ColBERT late-interaction re-rank, BOUNDED: take the top-N fused candidates
+    # (already pool-gated) and let MaxSim reorder ONLY those before the final
+    # top-k slice — cost is N×tokens, not corpus×tokens. No-op off the bge path,
+    # where it preserves the fused order exactly.
+    import memdag_embed
+    if memdag_embed.backend() == "bge-m3" and memdag_embed.bge_available():
+        cand_n = min(memdag_embed.colbert_candidates(), len(fused))
+        cand_ids = [nid for nid, _ in fused[:cand_n]]
+        reranked = colbert_rerank(conn, query, cand_ids)
+        top_nids = [nid for nid, _ in reranked[:k]]
+    else:
+        top_nids = [nid for nid, _ in fused[:k]]
 
     # Fetch rows in fused order
     if not top_nids:
@@ -557,9 +694,14 @@ def retrieve_graph(
     scan_k = max(n_idx, k)
     bm25_all = bm25(conn, query, k=scan_k)
     vec_all = vector_search(conn, query, k=scan_k)
+    sparse_all = sparse_search(conn, query, k=scan_k)  # [] off the bge path
     bm25_f = [(nid, s) for nid, s in bm25_all if nid in pool]
     vec_f = [(nid, s) for nid, s in vec_all if nid in pool]
-    base = dict(_rrf_fuse(bm25_f, vec_f))  # {nid: rrf_score}, scored pool members
+    sparse_f = [(nid, s) for nid, s in sparse_all if nid in pool]
+    # Sparse joins the fuse; ColBERT is deliberately NOT layered here — the graph
+    # re-rank below is itself a re-ordering, and stacking a second one risks a
+    # double-reorder. Off the bge path sparse_f is [] -> identical to the old fuse.
+    base = dict(_rrf_fuse(bm25_f, vec_f, sparse_f))  # {nid: rrf_score}, scored pool members
     if not base:
         return []
 
@@ -633,6 +775,11 @@ def _cmd_reindex(args):
         print(f"indexed {n} source node(s)")
     finally:
         conn.close()
+    # VRAM hygiene: a batch reindex is the canonical place a 2.2GB bge model gets
+    # loaded. Unload it after if asked, so it doesn't evict the daily driver.
+    if (os.environ.get("MEMDAG_BGE_UNLOAD") or "").strip().lower() in ("1", "true", "yes", "on"):
+        import memdag_embed
+        memdag_embed.unload()
 
 
 # ---------------------------------------------------------------------------
