@@ -38,3 +38,21 @@ class MemoryAdapter:
         """Action-time integrity gate. Default: allow (no gate). memdag overrides
         with check-action. Returns True if the composed answer clears `require`."""
         return True
+
+    # -- staleness harness (additive; poison harness never calls these) --------
+
+    def seed(self, text: str, channel: str, source_ref: str | None = None) -> None:
+        """Seed an initial v1 source. Default: plain add (ref ignored). memdag
+        overrides to ingest under a stable source_ref so a later update supersedes."""
+        self.add(text, channel)
+
+    def update(self, source_ref: str, text: str, channel: str) -> None:
+        """Apply a source CHANGE. Default (no supersession machinery): just add the
+        new version, so old+new coexist — the realistic RAG/Mem0 behaviour."""
+        self.add(text, channel)
+
+    def stale_attribution(self, node_id: int | None) -> bool | None:
+        """Does the system know *node_id* now depends on a CHANGED source?
+        None = cannot attribute (no provenance edges). memdag overrides with a
+        real answer; everyone else is honestly n/a, never scored 0."""
+        return None

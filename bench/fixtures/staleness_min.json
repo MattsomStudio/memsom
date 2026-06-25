@@ -1,0 +1,94 @@
+{
+  "name": "staleness_min",
+  "note": "Tiny built-in staleness set. Validates the staleness harness end-to-end against real memdag WITHOUT the LongMemEval download. Each item seeds a v1 fact under a stable source_ref, an answer is derived, then (for 'updated' items) the SAME source is re-ingested with a v2 fact on the SAME channel (a legitimate update, NOT external poison) -> the derived answer goes stale. 'control' items get no update and must stay fresh (precision). These prove the pipe; the headline number is the LongMemEval knowledge-update run.",
+  "items": [
+    {
+      "id": "st-001",
+      "kind": "updated",
+      "question": "What is the project deadline?",
+      "source_ref": "schedule.md",
+      "channel": "user",
+      "evidence_v1": "The project deadline is March 15.",
+      "v1_gold_terms": ["March"],
+      "update_text": "The project deadline is April 20.",
+      "v2_gold_terms": ["April"]
+    },
+    {
+      "id": "st-002",
+      "kind": "updated",
+      "question": "Where is the team offsite being held?",
+      "source_ref": "offsite.md",
+      "channel": "user",
+      "evidence_v1": "The team offsite is being held in Denver.",
+      "v1_gold_terms": ["Denver"],
+      "update_text": "The team offsite is being held in Austin.",
+      "v2_gold_terms": ["Austin"]
+    },
+    {
+      "id": "st-003",
+      "kind": "updated",
+      "question": "Who is the on-call engineer this week?",
+      "source_ref": "oncall.md",
+      "channel": "user",
+      "evidence_v1": "The on-call engineer this week is Priya.",
+      "v1_gold_terms": ["Priya"],
+      "update_text": "The on-call engineer this week is Marcus.",
+      "v2_gold_terms": ["Marcus"]
+    },
+    {
+      "id": "st-004",
+      "kind": "updated",
+      "question": "What is the production database version?",
+      "source_ref": "infra.md",
+      "channel": "user",
+      "evidence_v1": "The production database runs Postgres 14.",
+      "v1_gold_terms": ["14"],
+      "update_text": "The production database runs Postgres 16.",
+      "v2_gold_terms": ["16"]
+    },
+    {
+      "id": "st-005",
+      "kind": "updated",
+      "question": "What is the monthly budget cap?",
+      "source_ref": "budget.md",
+      "channel": "user",
+      "evidence_v1": "The monthly budget cap is twelve thousand dollars.",
+      "v1_gold_terms": ["twelve"],
+      "update_text": "The monthly budget cap is twenty thousand dollars.",
+      "v2_gold_terms": ["twenty"]
+    },
+    {
+      "id": "st-006",
+      "kind": "updated",
+      "question": "Which vendor provides the email service?",
+      "source_ref": "vendors.md",
+      "channel": "user",
+      "evidence_v1": "The email service is provided by Mailgun.",
+      "v1_gold_terms": ["Mailgun"],
+      "update_text": "The email service is provided by Postmark.",
+      "v2_gold_terms": ["Postmark"]
+    },
+    {
+      "id": "ctl-001",
+      "kind": "control",
+      "question": "What is the company founding year?",
+      "source_ref": "about.md",
+      "channel": "user",
+      "evidence_v1": "The company was founded in 2009.",
+      "v1_gold_terms": ["2009"],
+      "update_text": null,
+      "v2_gold_terms": null
+    },
+    {
+      "id": "ctl-002",
+      "kind": "control",
+      "question": "What is the office wifi network name?",
+      "source_ref": "wifi.md",
+      "channel": "user",
+      "evidence_v1": "The office wifi network is named Skylab.",
+      "v1_gold_terms": ["Skylab"],
+      "update_text": null,
+      "v2_gold_terms": null
+    }
+  ]
+}
