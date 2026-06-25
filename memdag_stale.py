@@ -247,6 +247,65 @@ def stale_annotations(conn, node_ids):
     }
 
 
+def _passes_pool_gate(conn, nid, clearance_int):
+    """True if *nid* may enter an answer pool — the EXACT filter
+    _build_retrieve_pool applies, for one id. A fresh node injected by
+    substitute_fresh bypassed retrieval, so it must re-clear this gate: a
+    supersedes hop can never become a backdoor that pulls a tombstoned / redacted
+    / archived / quarantined / above-clearance node into the answer.
+    """
+    clauses, params = memdag_schema.taint_filter_clauses(conn, clearance=clearance_int)
+    clauses.append("channel != 'agent-derived'")
+    return conn.execute(
+        "SELECT 1 FROM nodes WHERE id = ? AND " + " AND ".join(clauses),
+        [nid] + params).fetchone() is not None
+
+
+def substitute_fresh(conn, pool, clearance_int):
+    """Staleness-aware hybrid serving (read-time, NON-mutating).
+
+    For each STALE source in *pool* that has a live fresh head clearing the pool
+    gate, REPLACE the stale row with the fresh row (the deterministic supersedes
+    edge rescuing what retrieval surfaced) — so the composed answer resolves to
+    the CURRENT value instead of serving the stale one. Substitution, not
+    augmentation: keeping both would still serve stale.
+
+    *pool* is a list of (id, content, channel, label, source_ref) rows. Returns
+    (new_pool, substitutions) where substitutions = [(old_id, fresh_id), ...].
+    The store is untouched — this is a per-answer pool swap, distinct from the
+    `freshen` VERB which rewrites provenance. A stale node with no fresh head, or
+    whose fresh head fails the gate, is KEPT (falls back to default disclosure).
+    """
+    if not pool:
+        return pool, []
+    ann = stale_annotations(conn, [r[0] for r in pool])  # one call over all ids
+    if not ann:
+        return pool, []
+
+    present = {r[0] for r in pool}
+    new_pool = []
+    substitutions = []
+    for row in pool:
+        sid = row[0]
+        info = ann.get(sid)
+        fresh_id = info.get("fresh_id") if info else None
+        if fresh_id is not None and _passes_pool_gate(conn, fresh_id, clearance_int):
+            substitutions.append((sid, fresh_id))
+            if fresh_id in present:
+                continue  # drop stale; fresh already in the pool (dedup)
+            fresh_row = conn.execute(
+                "SELECT id, content, channel, label, source_ref FROM nodes WHERE id = ?",
+                (fresh_id,)).fetchone()
+            if fresh_row is not None:
+                new_pool.append(fresh_row)
+                present.add(fresh_id)
+            else:                     # fresh head vanished between calls -> keep stale
+                new_pool.append(row)
+        else:
+            new_pool.append(row)      # no fresh / gate-fail -> keep + let [STALE] disclose
+    return new_pool, substitutions
+
+
 def stale_status(conn, node_id):
     """Display reader for `stale-status <id>`. ValueError on unknown id."""
     migrate(conn)

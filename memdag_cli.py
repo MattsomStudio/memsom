@@ -201,6 +201,17 @@ def cmd_ask(args):
         elif args.retrieve:
             pool = memdag_retrieve.retrieve(conn, args.question, k=args.topk, clearance=clearance)
 
+        # --prefer-fresh: staleness-aware hybrid serving. SUBSTITUTE each stale
+        # source in the pool with its current version (the deterministic supersedes
+        # edge rescuing what retrieval surfaced) so the answer resolves clean.
+        # Read-time + non-mutating (the store is untouched; that's the `freshen`
+        # VERB). Runs BEFORE --fresh-only so the two compose: substitute what we
+        # can, then exclude any leftover un-substitutable stale.
+        substitutions = []
+        if getattr(args, "prefer_fresh", False) and pool:
+            pool, substitutions = memdag_stale.substitute_fresh(
+                conn, pool, memdag_confid.parse_conf(clearance))
+
         # --fresh-only: opt-in exclusion of stale sources (disclose-by-default
         # otherwise). Applied uniformly over the finalized pool so it covers the
         # default / --retrieve / --graph paths identically. stale is NOT in
@@ -366,6 +377,13 @@ def cmd_ask(args):
             f"above-clearance: {excl['above_clearance']}"
         )
         print(text)
+        if substitutions:
+            print(f"\n[FRESHENED] resolved {len(substitutions)} stale source(s)"
+                  " to their current version:")
+            for old, new in substitutions:
+                print(f"  [{old}] -> [{new}]")
+            print("(read-time substitution; the store is unchanged."
+                  " run `memdag freshen <id>` to persist.)")
         if stale_used:
             print("\n[STALE] this answer draws on stale source(s):")
             for sid in sorted(stale_used):
@@ -534,6 +552,8 @@ def main(argv=None):
                        help="max results when using --retrieve/--graph (default 8)")
     s_ask.add_argument("--fresh-only", action="store_true",
                        help="exclude stale sources (default: include + flag them)")
+    s_ask.add_argument("--prefer-fresh", action="store_true",
+                       help="substitute stale sources with their current version (hybrid serving)")
     s_ask.set_defaults(func=cmd_ask)
 
     # ---- Core explain ----

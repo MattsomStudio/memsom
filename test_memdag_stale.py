@@ -301,6 +301,90 @@ class TestFreshen(Base):
         self.assertIn(a1, parents)
 
 
+class TestSubstituteFresh(Base):
+    def _row(self, nid):
+        return self.conn.execute(
+            "SELECT id, content, channel, label, source_ref FROM nodes WHERE id=?",
+            (nid,)).fetchone()
+
+    def test_substitute_swaps_stale_for_fresh(self):
+        a1 = memdag_ingest.ingest_text(self.conn, "deadline march", "user", source_ref="s.md")[0]
+        a2 = memdag_ingest.ingest_text(self.conn, "deadline april", "user", source_ref="s.md")[0]
+        self.assertTrue(self.is_stale(a1))
+        pool = [self._row(a1)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in new_pool], [a2])   # a1 replaced by a2
+        self.assertEqual(subs, [(a1, a2)])
+
+    def test_dedup_when_fresh_already_present(self):
+        a1 = memdag_ingest.ingest_text(self.conn, "deadline march", "user", source_ref="s.md")[0]
+        a2 = memdag_ingest.ingest_text(self.conn, "deadline april", "user", source_ref="s.md")[0]
+        pool = [self._row(a1), self._row(a2)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in new_pool], [a2])   # stale dropped, fresh kept once
+        self.assertEqual(subs, [(a1, a2)])
+
+    def test_chain_resolves_to_live_head(self):
+        a1 = memdag_ingest.ingest_text(self.conn, "deadline march", "user", source_ref="s.md")[0]
+        a2 = memdag_ingest.ingest_text(self.conn, "deadline april", "user", source_ref="s.md")[0]
+        a3 = memdag_ingest.ingest_text(self.conn, "deadline may", "user", source_ref="s.md")[0]
+        pool = [self._row(a1)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in new_pool], [a3])   # head of the chain, not a2
+        self.assertEqual(subs, [(a1, a3)])
+
+    def test_gate_blocks_above_clearance_fresh(self):
+        import memdag_confid
+        memdag_confid.migrate(self.conn)
+        a1 = self.src("the deadline is march fifteenth.", ref="s.md")
+        a2 = self.src("the deadline is april twentieth.", ref="s.md")
+        memdag_stale.record_source_supersession(self.conn, a1, a2, "s.md")
+        memdag_stale.mark_stale_cascade(self.conn, a1, "x")
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET conf_label=2 WHERE id=?", (a2,))  # SECRET
+        pool = [self._row(a1)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 0)  # PUBLIC clearance
+        self.assertEqual([r[0] for r in new_pool], [a1])   # fresh above clearance -> kept stale
+        self.assertEqual(subs, [])
+
+    def test_gate_blocks_tombstoned_fresh(self):
+        a1 = memdag_ingest.ingest_text(self.conn, "deadline march", "user", source_ref="s.md")[0]
+        a2 = memdag_ingest.ingest_text(self.conn, "deadline april", "user", source_ref="s.md")[0]
+        memdag.revoke_cascade(self.conn, a2, "fresh killed")
+        pool = [self._row(a1)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in new_pool], [a1])   # dead fresh -> kept stale
+        self.assertEqual(subs, [])
+
+    def test_no_fresh_head_kept(self):
+        a = self.src("alpha", ref="s.md")
+        memdag_stale.mark_stale_cascade(self.conn, a, "manually stale")  # stale, no successor
+        pool = [self._row(a)]
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in new_pool], [a])
+        self.assertEqual(subs, [])
+
+    def test_non_mutating(self):
+        a1 = memdag_ingest.ingest_text(self.conn, "deadline march", "user", source_ref="s.md")[0]
+        memdag_ingest.ingest_text(self.conn, "deadline april", "user", source_ref="s.md")
+        nodes_before = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        edges_before = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        memdag_stale.substitute_fresh(self.conn, [self._row(a1)], 3)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0], nodes_before)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0], edges_before)
+
+    def test_substituted_row_carries_fresh_label(self):
+        # the swapped-in row is the fresh node -> its (lower) integrity will floor
+        # the composed answer down via derive_node's min(); here we assert the row.
+        a1 = self.src("the deadline is march fifteenth.", channel="endorsed", ref="s.md")
+        a2 = self.src("the deadline is april twentieth.", channel="external", ref="s.md")
+        memdag_stale.record_source_supersession(self.conn, a1, a2, "s.md")
+        memdag_stale.mark_stale_cascade(self.conn, a1, "x")
+        new_pool, subs = memdag_stale.substitute_fresh(self.conn, [self._row(a1)], 3)
+        self.assertEqual(new_pool[0][0], a2)
+        self.assertEqual(new_pool[0][2], "external")  # channel of the fresh row
+
+
 class TestUnstale(Base):
     def test_unstale_clears_one(self):
         a = self.src("alpha")
