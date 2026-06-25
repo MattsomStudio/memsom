@@ -15,6 +15,7 @@ import memdag
 import memdag_bridge_import as bi
 import memdag_forget as forget
 import memdag_digest as digest
+import memdag_stale
 
 
 FILES = {
@@ -174,6 +175,62 @@ class TestBudget(Base):
     def test_raises_when_pinned_exceed_budget(self):
         with self.assertRaises(digest.DigestTooLarge):
             digest.render_digest(self.conn, budget=10)  # can't fit pinned+literal
+
+
+class TestStaleRender(Base):
+    """Phase-2 render: inline ⚠ marker + the synthetic Needs Reverification block."""
+
+    def _mark(self, stem, reason="unverified since 2026-05"):
+        nid = self.conn.execute(
+            "SELECT id FROM nodes WHERE source_ref = ?", (f"memory:{stem}",)
+        ).fetchone()[0]
+        memdag_stale.mark_stale_cascade(self.conn, nid, reason)
+        return nid
+
+    def test_nothing_stale_is_byte_identical(self):
+        # Phase-1 no-op guard: with no stale flags the render is unchanged from the
+        # pre-feature behaviour (no markers, no Needs Reverification section).
+        out = digest.render_digest(self.conn)
+        self.assertNotIn("Needs Reverification", out)
+        self.assertNotIn("⚠", out)
+        # and it still matches the source index exactly
+        self.assertEqual(digest.compare_index(INDEX, out), {})
+
+    def test_stale_marker_inline(self):
+        self._mark("project_kali", "unverified since 2026-04")
+        out = digest.render_digest(self.conn)
+        # the inline body line carries a BARE glyph (reason lives in the section)
+        line = next(ln for ln in out.splitlines()
+                    if "project_kali.md" in ln and "⚠" in ln)
+        self.assertIn("⚠", line)
+        self.assertNotIn("unverified since", line)        # reason NOT inline (cheap)
+        self.assertIn("unverified since 2026-04", out)     # reason IS in the section
+
+    def test_needs_reverification_section_first(self):
+        self._mark("project_kali")
+        out = digest.render_digest(self.conn)
+        self.assertIn("## Needs Reverification", out)
+        # it is the FIRST section under the H1
+        self.assertLess(out.index("## Needs Reverification"),
+                        out.index("## About the User"))
+
+    def test_compare_index_ignores_reverify_section(self):
+        # the synthetic section carries no real file entries, so the GO criterion
+        # (per-section file-set equivalence) is unaffected by staleness
+        self._mark("project_kali")
+        out = digest.render_digest(self.conn)
+        self.assertEqual(digest.compare_index(INDEX, out), {})
+
+    def test_reverify_section_dropped_first_under_budget(self):
+        self._mark("project_kali")
+        full = digest.render_digest(self.conn)
+        self.assertIn("## Needs Reverification", full)
+        # a budget just under full forces the worklist section to shed FIRST,
+        # while the inline marker on the note itself is retained
+        tight = len(full.encode("utf-8")) - 5
+        out = digest.render_digest(self.conn, budget=tight)
+        self.assertNotIn("## Needs Reverification", out)
+        self.assertIn("⚠", out)                       # inline marker still present
 
 
 if __name__ == "__main__":

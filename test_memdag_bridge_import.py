@@ -69,6 +69,20 @@ class Base(unittest.TestCase):
         return memdag.get_node(self.conn, row[0]) if row else None
 
 
+# --- migrate now also lays the staleness columns (Mac-safe path) --------------
+
+class TestStaleMigrate(Base):
+    def test_migrate_adds_stale_columns_and_tables(self):
+        import memdag_schema
+        for col in ("stale", "stale_at", "stale_reason"):
+            self.assertTrue(memdag_schema.column_exists(self.conn, "nodes", col),
+                            f"missing nodes.{col}")
+        tables = {r[0] for r in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        self.assertIn("source_supersedes", tables)
+        self.assertIn("stale_log", tables)
+
+
 # --- pure helpers -------------------------------------------------------------
 
 class TestHelpers(unittest.TestCase):

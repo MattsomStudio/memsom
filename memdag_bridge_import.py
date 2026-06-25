@@ -54,11 +54,16 @@ def migrate(conn) -> None:
     """Idempotent: ensure the columns this importer writes exist.
 
     obsidian_path / obsidian_mtime come from memdag_obsidian; content_hash from
-    memdag_ingest.  Both are additive nullable columns (frozen core never reads
-    them), so this is safe to call standalone or via migrate_all.
+    memdag_ingest; the stale triple + source_supersedes/stale_log from memdag_stale
+    (so the verification-staleness pass + the render's stale-awareness have their
+    columns on BOTH machines via the existing bridge migrate chain).  All additive
+    nullable columns (frozen core never reads them), so this is safe to call
+    standalone or via migrate_all.
     """
     memdag_obsidian.migrate(conn)
     memdag_ingest.migrate(conn)
+    import memdag_stale          # lazy: mirror memdag_ingest's defensive import style
+    memdag_stale.migrate(conn)   # nodes.{stale,stale_at,stale_reason} + supersedes/log
 
 
 # --- frontmatter parsing (light, stdlib) -------------------------------------

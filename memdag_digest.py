@@ -64,15 +64,18 @@ class DigestTooLarge(Exception):
 def _rows(conn):
     has_tier = memdag_schema.column_exists(conn, "nodes", "forget_tier")
     has_rs = memdag_schema.column_exists(conn, "nodes", "forget_rs")
+    has_stale = memdag_schema.column_exists(conn, "nodes", "stale")
     tcol = "forget_tier" if has_tier else "NULL AS forget_tier"
     rcol = "forget_rs" if has_rs else "NULL AS forget_rs"
+    scol = "stale" if has_stale else "0 AS stale"
+    zcol = "stale_reason" if has_stale else "NULL AS stale_reason"
     return conn.execute(
-        f"SELECT content, channel, source_ref, {tcol}, {rcol} FROM nodes "
-        "WHERE tombstoned = 0 AND source_ref LIKE 'memory:%'"
+        f"SELECT content, channel, source_ref, {tcol}, {rcol}, {scol}, {zcol} "
+        "FROM nodes WHERE tombstoned = 0 AND source_ref LIKE 'memory:%'"
     ).fetchall()
 
 
-def _entry(content, channel, sref, tier, rs):
+def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None):
     fm_lines, body, _ = split_frontmatter(content or "")
     fm = fm_top_level(fm_lines)
     is_literal = (sref.startswith("memory:literal:")
@@ -80,7 +83,8 @@ def _entry(content, channel, sref, tier, rs):
     section = fm.get("section") or None
     if is_literal:
         return {"kind": "literal", "section": section, "line": body.strip(),
-                "channel": channel}
+                "channel": channel,
+                "stale": bool(stale), "stale_reason": stale_reason}
     stem = sref.split(":", 1)[1] if sref.startswith("memory:") else sref
     # prefer the curated MEMORY.md title + hook (terser, byte-matches the
     # hand-maintained index); fall back to frontmatter name + a LENGTH-CAPPED
@@ -93,7 +97,8 @@ def _entry(content, channel, sref, tier, rs):
     return {"kind": "file", "section": section, "stem": stem,
             "name": name, "desc": hook,
             "pinned": channel == "endorsed", "tier": tier or "hot",
-            "rs": rs, "channel": channel}
+            "rs": rs, "channel": channel,
+            "stale": bool(stale), "stale_reason": stale_reason}
 
 
 def _select_hot(entries):
@@ -107,22 +112,46 @@ def _select_hot(entries):
     return out
 
 
-def _assemble(title, entries):
+def _marker():
+    """Inline staleness flag: a BARE glyph (cheap — ~4 bytes).  The reason lives in
+    the droppable Needs Reverification section + `memdag verify-stale`, so a flag on
+    a near-budget brain never evicts a real memory to make room for prose."""
+    return " ⚠"
+
+
+def _assemble(title, entries, *, include_reverify=True):
     by_sec = {}
     for e in entries:
         by_sec.setdefault(e["section"], []).append(e)
     lines = [title, ""]
+
+    # Synthetic worklist: every stale note, as the FIRST block under the H1 (a
+    # glanceable "go re-check these" list).  Built from the stale flag — not any
+    # node's section: — so it carries no real files and compare_index ignores it.
+    stale = [e for e in entries if e.get("stale")]
+    if include_reverify and stale:
+        lines.append("## Needs Reverification")
+        for e in sorted([x for x in stale if x["kind"] == "file"],
+                        key=lambda x: x["stem"]):
+            lines.append(f"- [{e['name']}]({e['stem']}.md) — "
+                         f"{e['stale_reason'] or 'unverified'}")
+        for e in [x for x in stale if x["kind"] == "literal"]:
+            lines.append(f"- {e['line']} — {e['stale_reason'] or 'unverified'}")
+        lines.append("")
+
     order = SECTIONS + sorted(s for s in by_sec if s and s not in SECTIONS)
     for sec in order:
         if sec not in by_sec:
             continue
         lines.append(f"## {sec}")
         for e in [x for x in by_sec[sec] if x["kind"] == "literal"]:
-            lines.append(e["line"])
+            mk = _marker() if e.get("stale") else ""
+            lines.append(e["line"] + mk)
         for e in sorted([x for x in by_sec[sec] if x["kind"] == "file"],
                         key=lambda x: x["stem"]):
             hook = f" — {e['desc']}" if e["desc"] else ""
-            lines.append(f"- [{e['name']}]({e['stem']}.md){hook}")
+            mk = _marker() if e.get("stale") else ""
+            lines.append(f"- [{e['name']}]({e['stem']}.md){hook}{mk}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -135,10 +164,17 @@ def render_digest(conn, *, title=None, budget=BUDGET):
     droppable = sorted([e for e in hot if e["kind"] == "file" and not e["pinned"]],
                        key=lambda e: (e["rs"] if e["rs"] is not None else 0.0))
     dropped = set()  # ids of dropped entries
+    include_reverify = True  # the worklist section is the FIRST thing shed if tight
     while True:
-        text = _assemble(title, [e for e in hot if id(e) not in dropped])
+        live = [e for e in hot if id(e) not in dropped]
+        text = _assemble(title, live, include_reverify=include_reverify)
         if len(text.encode("utf-8")) <= budget:
             return text
+        if include_reverify:
+            # the worklist is redundant with the inline ⚠ markers, so it sheds
+            # first under budget pressure (the markers are the load-bearing signal).
+            include_reverify = False
+            continue
         nxt = next((e for e in droppable if id(e) not in dropped), None)
         if nxt is None:
             raise DigestTooLarge(

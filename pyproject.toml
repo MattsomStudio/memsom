@@ -85,6 +85,7 @@ only-include = [
     "memdag_session.py",
     "memdag_stale.py",
     "memdag_trust.py",
+    "memdag_verify_stale.py",
 ]
 
 # Data file: memdag.py resolves external_fallback.txt next to itself
@@ -137,5 +138,6 @@ only-include = [
     "memdag_session.py",
     "memdag_stale.py",
     "memdag_trust.py",
+    "memdag_verify_stale.py",
     "external_fallback.txt",
 ]
