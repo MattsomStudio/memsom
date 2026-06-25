@@ -52,6 +52,7 @@ import memdag_gate
 import memdag_corroborate
 import memdag_ingest
 import memdag_retrieve
+import memdag_embed
 import memdag_compact
 import memdag_reflex
 import memdag_chats
@@ -90,6 +91,7 @@ def migrate_all(conn):
     memdag_corroborate.migrate(conn)
     memdag_ingest.migrate(conn)
     memdag_retrieve.migrate(conn)
+    memdag_embed.migrate(conn)
     memdag_compact.migrate(conn)
     memdag_obsidian.migrate(conn)
     memdag_rederive.migrate(conn)
@@ -189,6 +191,20 @@ def cmd_ask(args):
         except ValueError as exc:
             print(f"[memdag] invalid --clearance: {exc}", file=sys.stderr)
             sys.exit(1)
+
+        # --embed-backend overrides MEMDAG_EMBED_BACKEND for this process so the
+        # retrieve/reindex paths pick it up. Warn once on an interactive bge
+        # single-shot: a per-invocation CLI reloads ~2.2GB cold (10-30s) — bge is
+        # meant for batch `reindex` + the long-lived MCP/server, not one-offs.
+        if getattr(args, "embed_backend", None):
+            os.environ["MEMDAG_EMBED_BACKEND"] = args.embed_backend
+            uses_retrieval = getattr(args, "retrieve", False) or getattr(args, "graph", False)
+            if (args.embed_backend == "bge-m3" and uses_retrieval
+                    and memdag_embed.bge_available()):
+                print("[memdag] bge-m3: cold-loading the model (~2.2GB) for a "
+                      "single query; prefer a warm reindex/server for repeated use.",
+                      file=sys.stderr)
+
         pool = _build_pool(conn, clearance)
 
         if getattr(args, "graph", False):
@@ -550,6 +566,11 @@ def main(argv=None):
                        help="graph expansion hops for --graph (default 1)")
     s_ask.add_argument("--topk", type=int, default=8,
                        help="max results when using --retrieve/--graph (default 8)")
+    s_ask.add_argument("--embed-backend", choices=["ollama", "bge-m3", "bm25"],
+                       default=None,
+                       help="embedding backend for this query (overrides "
+                            "MEMDAG_EMBED_BACKEND; bge-m3 = FlagEmbedding triple "
+                            "fusion, best as a warm reindex/server, ~2.2GB cold load)")
     s_ask.add_argument("--fresh-only", action="store_true",
                        help="exclude stale sources (default: include + flag them)")
     s_ask.add_argument("--prefer-fresh", action="store_true",

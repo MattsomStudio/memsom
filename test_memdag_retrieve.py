@@ -330,11 +330,11 @@ class TestVectorSearch(Base):
         with self.conn:
             self.conn.execute(
                 "INSERT OR REPLACE INTO embeddings(node_id, model, dim, vec) VALUES (?,?,?,?)",
-                (nid_a, "test", 4, _pack_vec(vec_a)),
+                (nid_a, memdag_retrieve._embed_model(), 4, _pack_vec(vec_a)),
             )
             self.conn.execute(
                 "INSERT OR REPLACE INTO embeddings(node_id, model, dim, vec) VALUES (?,?,?,?)",
-                (nid_b, "test", 4, _pack_vec(vec_b)),
+                (nid_b, memdag_retrieve._embed_model(), 4, _pack_vec(vec_b)),
             )
 
         # Query vector close to vec_b (y direction)
@@ -354,7 +354,7 @@ class TestVectorSearch(Base):
             with self.conn:
                 self.conn.execute(
                     "INSERT OR REPLACE INTO embeddings(node_id, model, dim, vec) VALUES (?,?,?,?)",
-                    (nid, "test", 4, _pack_vec(vec)),
+                    (nid, memdag_retrieve._embed_model(), 4, _pack_vec(vec)),
                 )
         query_vec = [1.0, 0.0, 0.0, 0.0]
         with patch.object(memdag_retrieve, "_call_ollama_embed", _make_fake_embed(query_vec)):

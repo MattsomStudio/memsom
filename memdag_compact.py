@@ -410,6 +410,15 @@ def compact(
                 if memdag_schema.table_exists(conn, "embeddings"):
                     conn.executemany("DELETE FROM embeddings WHERE node_id = ?",
                                      [(i,) for i in group_ids])
+                # BGE side-tables (sparse_vecs/colbert_vecs) follow embeddings in
+                # lock-step — same atomic txn, same corpus-hygiene reason. Inlined
+                # (not memdag_embed.deindex_bge per id) to stay in this one txn.
+                if memdag_schema.table_exists(conn, "sparse_vecs"):
+                    conn.executemany("DELETE FROM sparse_vecs WHERE node_id = ?",
+                                     [(i,) for i in group_ids])
+                if memdag_schema.table_exists(conn, "colbert_vecs"):
+                    conn.executemany("DELETE FROM colbert_vecs WHERE node_id = ?",
+                                     [(i,) for i in group_ids])
 
         consumed.update(group_ids)
         minted.append(nid)
