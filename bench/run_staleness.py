@@ -45,6 +45,10 @@ def _make_adapter(name: str, repo: str):
         return MemdagAdapter(repo=repo, no_embed=False, prefer_fresh=True)
     if name == "memdag-bm25":
         return MemdagAdapter(repo=repo, no_embed=True)
+    if name == "memdag-bm25-fresh":
+        return MemdagAdapter(repo=repo, no_embed=True, fresh_only=True)
+    if name == "memdag-bm25-prefer":
+        return MemdagAdapter(repo=repo, no_embed=True, prefer_fresh=True)
     if name == "rag":
         return RagAdapter()
     if name == "mem0":
@@ -53,14 +57,22 @@ def _make_adapter(name: str, repo: str):
     raise SystemExit(f"unknown system: {name}")
 
 
-def run_system(name: str, items: list[dict], repo: str, run_root: str) -> dict:
+def run_system(name: str, items: list[dict], repo: str, run_root: str,
+               haystack: bool = False, topk: int = 8) -> dict:
     adapter = _make_adapter(name, repo)
     scores = []
     for i, item in enumerate(items):
         item_dir = os.path.join(run_root, name, f"item_{i:04d}")
         adapter.reset(item_dir)
+        # HAYSTACK: seed the item's other turns as noise FIRST, so retrieval must
+        # find the right node among dozens. This is the pressure that separates
+        # --prefer-fresh (substitute the buried fresh head) from --fresh-only
+        # (exclude, which fails when the fresh node never made top-k).
+        if haystack:
+            for di, dtext in enumerate(item.get("distractors", [])):
+                adapter.seed(dtext, item["channel"], f"{item['id']}:d{di}.md")
         adapter.seed(item["evidence_v1"], item["channel"], item.get("source_ref"))
-        a1 = adapter.ask(item["question"])
+        a1 = adapter.ask(item["question"], topk=topk)
 
         if item.get("kind") == "updated" and item.get("update_text"):
             adapter.update(item["source_ref"], item["update_text"], item["channel"])
@@ -68,7 +80,7 @@ def run_system(name: str, items: list[dict], repo: str, run_root: str) -> dict:
         # attribution verdict on the PRE-update answer node (post-update state)
         affected = adapter.stale_attribution(a1.composed_node_id)
 
-        a2 = adapter.ask(item["question"])
+        a2 = adapter.ask(item["question"], topk=topk)
         flagged = "[STALE]" in (a2.raw or "")
 
         s = score_stale_item(item, a2, affected, flagged, adapter.has_provenance)
@@ -95,7 +107,12 @@ def main(argv=None):
                     help="comma list: memdag,memdag-fresh,memdag-prefer-fresh,memdag-bm25,rag,mem0")
     ap.add_argument("--dataset", default=None,
                     help="LongMemEval json (knowledge-update); default = bundled fixture")
+    ap.add_argument("--fixture", default=None,
+                    help="path to a curated staleness fixture json (e.g. staleness_curated.json)")
     ap.add_argument("--max-items", type=int, default=None)
+    ap.add_argument("--haystack", action="store_true",
+                    help="seed each item's other turns as distractors (retrieval pressure)")
+    ap.add_argument("--topk", type=int, default=8)
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
@@ -103,6 +120,10 @@ def main(argv=None):
         items, report = dataset_stale.from_longmemeval_update(args.dataset, args.max_items)
         print(f"LongMemEval knowledge-update: used {report['used']}, "
               f"skipped {report['skipped_total']} {report['skipped']}")
+    elif args.fixture:
+        items = dataset_stale.load_stale_fixture(args.fixture)
+        if args.max_items:
+            items = items[: args.max_items]
     else:
         items = dataset_stale.load_stale_fixture()
         if args.max_items:
@@ -115,7 +136,8 @@ def main(argv=None):
     results = {}
     for name in systems:
         print(f"\n=== {name} ===")
-        results[name] = run_system(name, items, args.repo, args.run_root)
+        results[name] = run_system(name, items, args.repo, args.run_root,
+                                   haystack=args.haystack, topk=args.topk)
 
     cols = ["attribution_recall", "attribution_fpr",
             "fresh_present_rate", "fresh_clean_rate", "served_stale_rate",

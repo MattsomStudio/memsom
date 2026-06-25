@@ -32,6 +32,24 @@ def _hit(terms, text: str) -> bool:
     return any(str(term).lower() in t for term in terms)
 
 
+def _recall(seeded: str, citations) -> bool:
+    """True if one of the answer's citations IS the seeded source (bidirectional
+    containment — a composed bullet is a sentence OF the seeded turn, or vice
+    versa for a one-line fact). id-free serving signal: needs no old-value label,
+    works identically across systems whose citation texts echo the source."""
+    if not seeded:
+        return False
+    s = seeded.lower().strip()
+    return any(s in c.text.lower() or c.text.lower().strip() in s
+               for c in citations if getattr(c, "text", ""))
+
+
+def _is_synth_v1(v1_text: str) -> bool:
+    # the loader's placeholder when no real prior turn existed -> v1 not seeded as
+    # a distinct source, so served_stale is undefined for that item.
+    return not v1_text or v1_text.startswith("(prior note")
+
+
 @dataclass
 class StaleScore:
     item_id: str
@@ -49,12 +67,14 @@ class StaleScore:
 def score_stale_item(item: dict, a2: AskResult, affected: bool | None,
                      flagged: bool, has_provenance: bool) -> StaleScore:
     kind = item.get("kind", "updated")
-    v1 = item.get("v1_gold_terms") or []
-    v2 = item.get("v2_gold_terms") or []
     ans = a2.answer_text or ""
-
-    has_v2 = _hit(v2, ans)
-    has_v1 = _hit(v1, ans)
+    cites = a2.citations
+    v1_text = item.get("evidence_v1")
+    v2_text = item.get("update_text")
+    # serving signal: prefer recall of the exact seeded strings against citations
+    # (id-free, works on LME); fall back to gold-term hit if no seeded text.
+    has_v2 = _recall(v2_text, cites) if v2_text else _hit(item.get("v2_gold_terms"), ans)
+    has_v1 = _recall(v1_text, cites) if v1_text else _hit(item.get("v1_gold_terms"), ans)
 
     # ground truth: an 'updated' item's prior answer IS affected; a 'control'
     # item's is NOT. attribution_correct only defined where provenance exists.
@@ -66,15 +86,15 @@ def score_stale_item(item: dict, a2: AskResult, affected: bool | None,
 
     if kind == "control":
         # nothing changed -> "fresh" just means the (unchanged) truth is served.
-        fresh_present = _hit(v1, ans)
+        fresh_present = has_v1
         served_stale = None
         fresh_clean = None
     else:
         fresh_present = has_v2
-        if v1:                       # old value known -> strict metrics defined
-            served_stale = has_v1    # the failure mode: still surfacing the old value
-            fresh_clean = has_v2 and not has_v1   # actually resolved to the new value only
-        else:                        # LME: no clean old value -> strict metrics n/a
+        if not _is_synth_v1(v1_text):   # v1 seeded as a real source -> strict metrics defined
+            served_stale = has_v1       # the failure mode: still surfacing the old value
+            fresh_clean = has_v2 and not has_v1   # resolved to the new value only
+        else:                           # synthesized placeholder v1 -> strict metrics n/a
             served_stale = None
             fresh_clean = None
 

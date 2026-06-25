@@ -41,21 +41,36 @@ FIXTURE = Path(__file__).parent / "fixtures" / "staleness_min.json"
 
 
 def load_stale_fixture(path: str | Path = FIXTURE) -> list[dict]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))["items"]
+    """Load a curated staleness fixture. A top-level `distractors` pool (if present)
+    is attached to every item's `distractors` key, so --haystack mode seeds the
+    same noise for each item uniformly."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    pool = data.get("distractors", [])
+    items = data["items"]
+    for it in items:
+        it.setdefault("distractors", list(pool))
+    return items
 
 
 _UPDATE_TYPE = "knowledge-update"
 
 
-def from_longmemeval_update(path: str | Path, max_items: int | None = None
+def from_longmemeval_update(path: str | Path, max_items: int | None = None,
+                            max_distractors: int = 30
                             ) -> tuple[list[dict], dict]:
     """Adapt LongMemEval knowledge-update entries into the staleness schema.
 
     We CONTROL the update (seed an early turn as v1 at a synthetic source_ref,
     then re-ingest the answer-bearing turn as v2 at the SAME ref), so attribution
-    is exact regardless of LME's semantics. gold (v2) = the LME answer, giving a
-    real fresh_serve number. v1_gold is left empty -> the scorer reports
-    stale_serve as n/a for these items (documented honest limit, not faked).
+    is exact regardless of LME's semantics. gold (v2) = the LME answer.
+
+    HAYSTACK: every OTHER turn in the item's sessions is carried as a `distractors`
+    list. The orchestrator (in --haystack mode) seeds those as noise sources under
+    their own refs, so retrieval must FIND the right node among ~dozens — the
+    pressure that makes --prefer-fresh (substitute the buried fresh head via the
+    supersedes edge) diverge from --fresh-only (exclude, which fails when the fresh
+    node never made top-k). Serving is scored by recall of the EXACT seeded v1/v2
+    strings against the answer's citations (id-free, no old-value needed).
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     items: list[dict] = []
@@ -87,6 +102,9 @@ def from_longmemeval_update(path: str | Path, max_items: int | None = None
         # answer-bearing turn (current truth). If no distinct context turn exists,
         # synthesize a neutral v1 so the update still fires.
         v1 = context_turns[0] if context_turns else f"(prior note re: {entry['question'].rstrip('?')})"
+        # distractors = every remaining turn (other answer-bearing turns + the rest
+        # of the context), bounded. These become the haystack noise.
+        distractors = (answer_turns[1:] + context_turns[1:])[:max_distractors]
         items.append({
             "id": qid,
             "kind": "updated",
@@ -94,9 +112,10 @@ def from_longmemeval_update(path: str | Path, max_items: int | None = None
             "source_ref": f"lme:{qid}.md",
             "channel": "user",
             "evidence_v1": v1,
-            "v1_gold_terms": [],                 # LME gives no clean old value -> stale_serve n/a
+            "v1_gold_terms": [],                 # no clean old VALUE -> serving scored by seeded-text recall
             "update_text": answer_turns[0],
             "v2_gold_terms": [gold],
+            "distractors": distractors,
         })
         if max_items and len(items) >= max_items:
             break

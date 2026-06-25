@@ -373,6 +373,26 @@ class TestSubstituteFresh(Base):
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0], nodes_before)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0], edges_before)
 
+    def test_buried_fresh_prefer_recovers_where_exclude_loses(self):
+        # THE structural property: the operative case where prefer-fresh beats
+        # fresh-only. Retrieval surfaced ONLY the stale node (the fresh version was
+        # buried below the cutoff). --fresh-only excludes it -> empty pool -> the
+        # answer is LOST. --prefer-fresh follows the supersedes edge -> recovers
+        # the current version. (Deterministic dual of the k=1 CLI demo.)
+        a1 = memdag_ingest.ingest_text(self.conn, "production runs postgres", "user", source_ref="db.md")[0]
+        a2 = memdag_ingest.ingest_text(self.conn, "migrated to mysql last week", "user", source_ref="db.md")[0]
+        pool = [self._row(a1)]   # only the stale node was retrieved
+
+        # fresh-only path (the cmd_ask exclusion): drop stale ids from the pool
+        stale_ids = set(memdag_stale.stale_annotations(self.conn, [a1]).keys())
+        fresh_only_pool = [r for r in pool if r[0] not in stale_ids]
+        self.assertEqual(fresh_only_pool, [])   # exclude LOSES the answer
+
+        # prefer-fresh path: substitute via the edge
+        pref_pool, subs = memdag_stale.substitute_fresh(self.conn, pool, 3)
+        self.assertEqual([r[0] for r in pref_pool], [a2])   # RECOVERS the fresh value
+        self.assertEqual(subs, [(a1, a2)])
+
     def test_substituted_row_carries_fresh_label(self):
         # the swapped-in row is the fresh node -> its (lower) integrity will floor
         # the composed answer down via derive_node's min(); here we assert the row.
