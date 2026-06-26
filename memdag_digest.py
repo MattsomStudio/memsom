@@ -91,6 +91,8 @@ def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None):
     # description so a node imported without curated text can't bloat the file.
     name = fm.get("index_title") or fm.get("name", stem)
     hook = fm.get("index_hook")
+    if hook and "⚠" in hook:                  # defensive: never re-emit a baked-in
+        hook = hook.split("⚠", 1)[0].rstrip() or None   # render marker (see bridge bug)
     if not hook:
         d = fm.get("description", "")
         hook = (d[:70].rstrip() + "…") if len(d) > 71 else d

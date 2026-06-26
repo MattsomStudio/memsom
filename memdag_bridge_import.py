@@ -151,6 +151,23 @@ def index_hooks(memory_md_text: str) -> dict:
     return out
 
 
+def _strip_render_marker(hook):
+    """Drop a render-time staleness marker (' ⚠ ...') from a captured hook.
+
+    The digest appends a ' ⚠' flag to stale lines AT RENDER.  Because the next
+    import re-derives each hook by parsing the previous MEMORY.md, an un-stripped
+    marker round-trips into the stored hook and compounds one glyph per cycle
+    (the 16x-⚠ bug).  Stripping at capture makes the hook idempotent and
+    self-healing: a polluted MEMORY.md collapses back to a single flag next render.
+    """
+    if not hook:
+        return hook
+    i = hook.find("⚠")
+    if i != -1:
+        hook = hook[:i].rstrip()
+    return hook or None
+
+
 def parse_primary_index(memory_md_text: str) -> dict:
     """{filename: (title, hook_or_None, section)} for line-leading primary entries.
 
@@ -171,7 +188,8 @@ def parse_primary_index(memory_md_text: str) -> dict:
         m = _PRIMARY_RE.match(line)
         if m:
             out[m.group(2)] = (m.group(1).strip(),
-                               (m.group(3) or "").strip() or None, section)
+                               _strip_render_marker((m.group(3) or "").strip()),
+                               section)
     return out
 
 
