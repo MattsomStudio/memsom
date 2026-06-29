@@ -86,6 +86,18 @@ salience: <0.00-1.00>
   - Guard: similarity ≠ contradiction. "uses tool X" and "tool X is v2.1" overlap
     but are compatible — that's an update, not a conflict.
 
+## Deleting a memory
+
+If a memory turns out to be wrong or obsolete, don't just delete the file (its node
+stays live in the store and keeps rendering). Use the sanctioned path, which revokes
+the node (auditable, cascades to anything derived from it) and removes the file:
+
+```
+memdag tombstone <stem> --reason "why"
+```
+
+Pinned `user_`/`feedback_`/`personal_` memories are refused unless you pass `--force`.
+
 ## Step 4 — Don't hand-edit MEMORY.md
 
 `MEMORY.md` is generated from the store. After you write the per-fact files, the
