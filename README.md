@@ -212,8 +212,10 @@ overwrite an existing same-named skill** without `--force`. Set
 `MEMDAG_DIGEST_TITLE` for the `MEMORY.md` H1 and `MEMDAG_BRIDGE_AUTHOR=0` on extra
 machines that should mirror without re-rendering.
 
-> Recall (`/recall`) and the episodic/vault search engine are a separate, larger
-> project and are **not** part of this loop yet — they arrive in a follow-up stage.
+> `/recall` ships too — it drives `memdag retrieve` (hybrid BM25 + local nomic
+> vectors) over the store, so it searches everything ingested, not just the loaded
+> MEMORY.md. The author's GPU/vault-coupled BGE retrieval engine is intentionally
+> **not** included; `memdag retrieve` is the portable substrate.
 
 ## Command catalog
 
