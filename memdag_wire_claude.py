@@ -73,10 +73,13 @@ def gate_event_groups(abs_exe):
 
 
 def _has_command(groups, substr):
-    """True if any hook command under *groups* contains *substr* (dedupe probe)."""
+    """True if any hook command under *groups* contains *substr* (dedupe probe).
+    Tolerates malformed (non-dict) entries without crashing."""
     for g in groups or []:
+        if not isinstance(g, dict):
+            continue
         for h in (g.get("hooks") or []):
-            if substr in (h.get("command") or ""):
+            if isinstance(h, dict) and substr in (h.get("command") or ""):
                 return True
     return False
 
@@ -91,7 +94,9 @@ def merge_hooks(data, abs_exe, *, with_gate=False):
     changed = []
 
     stop = hooks.setdefault("Stop", [])
-    if isinstance(stop, list) and not _has_command(stop, "bridge-render"):
+    if not isinstance(stop, list):
+        raise ValueError("settings 'hooks.Stop' is not a list")
+    if not _has_command(stop, "bridge-render"):
         stop.append(stop_group(abs_exe))
         changed.append("Stop")
 
@@ -99,7 +104,9 @@ def merge_hooks(data, abs_exe, *, with_gate=False):
         for event, groups in gate_event_groups(abs_exe).items():
             probe = "hook-post" if event == "PostToolUse" else "hook-pre"
             arr = hooks.setdefault(event, [])
-            if isinstance(arr, list) and not _has_command(arr, probe):
+            if not isinstance(arr, list):
+                raise ValueError(f"settings 'hooks.{event}' is not a list")
+            if not _has_command(arr, probe):
                 arr.extend(groups)
                 changed.append(event)
     return changed
@@ -173,7 +180,8 @@ def wire_skills(src_dir, dst_dir, *, force=False, print_only=False):
             if bak.exists():
                 shutil.rmtree(bak)
             shutil.copytree(dst, bak)                              # back up before clobber
-            shutil.copytree(skill, dst, dirs_exist_ok=True)
+            shutil.rmtree(dst)                                     # replace, not merge
+            shutil.copytree(skill, dst)                            # (stale files don't survive)
             results.append((skill.name, "updated"))
         else:
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +232,7 @@ def cmd_wire_claude(args):
     if s.get("snippet") and s["action"] in ("print", "malformed"):
         print(s["snippet"])
     cm = res["claude_md"]
-    print(f"[claude.md] {cm['action']} -> {cm.get('path', '')}")
+    print(f"[claude.md] {cm['action']}: {cm.get('detail') or cm.get('path', '')}")
     if cm.get("snippet") and cm["action"] == "print":
         print(cm["snippet"])
 

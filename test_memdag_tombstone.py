@@ -107,6 +107,19 @@ class TestTombstone(Base):
         self.assertEqual(self.node_state("project_widget")[0], 1)   # node still revoked
 
 
+    def test_path_traversal_refused(self):
+        victim = self.root / "victim.md"          # one level OUTSIDE the memory dir
+        victim.write_text("important\n", encoding="utf-8")
+        res = tomb.tombstone_memory(self.conn, self.mem, "../victim")
+        self.assertEqual(res["status"], "refused-traversal")
+        self.assertFalse(res["file_deleted"])
+        self.assertTrue(victim.exists())          # not deleted
+
+    def test_traversal_into_dotclaude_refused(self):
+        res = tomb.tombstone_memory(self.conn, self.mem, "../../.claude/CLAUDE")
+        self.assertEqual(res["status"], "refused-traversal")
+
+
 class TestCLI(Base):
     def _ns(self, **kw):
         base = dict(stem=None, reason="", force=False, memory_dir=str(self.mem))

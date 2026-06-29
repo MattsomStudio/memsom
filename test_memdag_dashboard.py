@@ -96,6 +96,31 @@ class TestRender(Base):
         self.assertEqual(scrub_gate.scan_text(html), [], "dashboard HTML leaks identity")
 
 
+class TestSecurity(Base):
+    def test_malicious_section_cannot_break_out_of_script(self):
+        t = dash.build_telemetry()
+        payload = "</script><img src=x onerror=alert(1)>"
+        t["graph"]["sections"].append(payload)
+        out = self.root / "x.html"
+        dash.render(t, out)
+        html = out.read_text(encoding="utf-8")
+        self.assertNotIn("</script><img", html)        # raw breakout absent
+        self.assertIn("<" + chr(92) + "/script>", html)  # escaped form present
+
+    def test_body_pin_line_does_not_mark_pinned(self):
+        # only frontmatter pin counts; a body line "pin: yes" must not (bug_012)
+        (self.mem / "project_pinbody.md").write_text(
+            "---\nname: P\ndescription: d\ntype: project\n---\nnotes:\npin: yes please\n",
+            encoding="utf-8")
+        import memdag, memdag_bridge_import as bi2, memdag_forget as f2
+        conn = memdag.get_connection()
+        bi2.import_all(conn, self.mem, dry_run=False)
+        f2.recompute_forget(conn)
+        conn.close()
+        rows = {r["stem"]: r for r in dash.load_weights()}
+        self.assertEqual(rows["project_pinbody"]["pinned"], 0)
+
+
 class TestCLI(Base):
     def test_no_open_writes_file(self):
         out = self.root / "out.html"

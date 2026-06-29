@@ -43,13 +43,6 @@ def _is_author() -> bool:
     return os.environ.get("MEMDAG_BRIDGE_AUTHOR", "1") != "0"
 
 
-def _verify_stale_days() -> int:
-    try:
-        return int(os.environ.get("MEMDAG_VERIFY_STALE_DAYS", "14"))
-    except ValueError:
-        return 14
-
-
 def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     """Run import -> forget -> (verify-stale) -> write_live over *memory_dir*.
 
@@ -67,16 +60,17 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
         return {"rendered": False, "reason": "non-author (MEMDAG_BRIDGE_AUTHOR=0)"}
 
     stale_marked = 0
-    days = _verify_stale_days()
-    if days > 0:
-        # imported lazily: non-author machines never reach here, so a not-yet-synced
-        # module can't break a mirror-only run.
-        try:
-            import memdag_verify_stale as verify
-            vstats = verify.recompute_verify_stale(conn, threshold_days=days)
+    # imported lazily: non-author machines never reach here, so a not-yet-synced
+    # module can't break a mirror-only run. Threshold comes from the verify_stale
+    # module's own resolver (single source of truth — no divergent default here);
+    # <= 0 disables the pass.
+    try:
+        import memdag_verify_stale as verify
+        if verify._threshold_days() > 0:
+            vstats = verify.recompute_verify_stale(conn)
             stale_marked = len(vstats.get("marked", []))
-        except Exception as exc:  # staleness is advisory — never block the render
-            print(f"[bridge] verify-stale skipped: {exc!r}")
+    except Exception as exc:  # staleness is advisory — never block the render
+        print(f"[bridge] verify-stale skipped: {exc!r}")
 
     ok, info = digest.write_live(conn, str(memory_dir))
 

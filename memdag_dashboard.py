@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memdag_bridge_import import default_memory_dir
+from memdag_bridge_import import default_memory_dir, split_frontmatter, fm_top_level
 
 HOME = Path.home()
 
@@ -75,7 +75,6 @@ def load_weights() -> list[dict]:
         "AND source_ref NOT LIKE 'memory:literal:%'"
     ).fetchall()
     con.close()
-    pin_re = re.compile(r"(?im)^pin:\s*(?:true|1|yes)\b")
     out = []
     for sref, content, channel, rs, cnt, lused, fseen, tier in rows:
         out.append({
@@ -85,7 +84,7 @@ def load_weights() -> list[dict]:
             "last_used": lused,
             "first_seen": fseen,
             "tier": tier or "hot",
-            "pinned": 1 if (channel == "endorsed" or pin_re.search(content or "")) else 0,
+            "pinned": 1 if (channel == "endorsed" or str(fm_top_level(split_frontmatter(content or "")[0]).get("pin", "")).strip().lower() in ("1", "true", "yes")) else 0,
         })
     return out
 
@@ -350,6 +349,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 const D = __DATA__;
 const C = getComputedStyle(document.documentElement);
 const col = n => C.getPropertyValue(n).trim();
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
 Chart.defaults.color = col('--dim');
 Chart.defaults.font.family = "ui-monospace, monospace";
 Chart.defaults.borderColor = col('--grid');
@@ -417,7 +417,7 @@ new Chart(scatter, {type:'scatter', data:{datasets:[
 
 const stb = document.querySelector('#stale tbody');
 stb.innerHTML = D.stale.map(r=>`<tr>
-  <td class="stem">${r.stem}</td>
+  <td class="stem">${esc(r.stem)}</td>
   <td class="w">${r.weight}</td>
   <td class="w">${r.count}</td>
   <td class="w">${r.age_days==null?'—':r.age_days+'d'}</td></tr>`).join('')
@@ -483,8 +483,8 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
       tip.style.opacity = 1;
       tip.style.left = (e.clientX+14)+'px'; tip.style.top = (e.clientY+14)+'px';
       tip.innerHTML = d.kind==='section'
-        ? `<b>${d.label}</b><br><span style="color:var(--dim)">section (parent)</span>`
-        : `<b>${d.label}</b><br><span style="color:var(--dim)">${d.section} · ${d.tier}${d.pinned?' · pinned':''} · ${d.count} uses</span>`;
+        ? `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">section (parent)</span>`
+        : `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">${esc(d.section)} · ${d.tier}${d.pinned?' · pinned':''} · ${d.count} uses</span>`;
     })
     .on('mouseleave', () => tip.style.opacity = 0)
     .on('click', (e,d) => {  // highlight a node's neighbourhood
@@ -522,7 +522,7 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
   document.getElementById('graphLegend').innerHTML = sections.map(s =>
     `<span style="display:flex;align-items:center;gap:6px">
       <i style="width:11px;height:11px;border-radius:3px;background:${color(s)};display:inline-block"></i>
-      <span style="color:var(--dim);font-size:11px">${s}</span></span>`).join('') +
+      <span style="color:var(--dim);font-size:11px">${esc(s)}</span></span>`).join('') +
     `<span style="color:var(--dim);font-size:11px">· ring = pinned · faded = cold · click a node to isolate</span>`;
 })();
 </script>
@@ -532,7 +532,11 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
 
 
 def render(telemetry: dict, out: Path):
-    html = HTML_TEMPLATE.replace("__DATA__", json.dumps(telemetry))
+    # Escape "</" so a string field containing "</script>" cannot close the embedded
+    # <script> block (json.dumps does not escape slashes). memdag ingests untrusted
+    # text, so a poisoned section/stem name must not become live markup.
+    data = json.dumps(telemetry).replace("</", "<" + chr(92) + "/")
+    html = HTML_TEMPLATE.replace("__DATA__", data)
     out.write_text(html, encoding="utf-8")
 
 

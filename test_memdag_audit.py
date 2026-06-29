@@ -125,6 +125,19 @@ class TestChecks(Base):
         self.assertIn("budget-breach", names)
 
 
+    def test_uppercase_broken_wikilink_flagged(self):
+        (self.mem / "user_editor.md").write_text(
+            "---\nname: Editor\ndescription: d\ntype: user\n---\nsee [[Nonexistent]]\n",
+            encoding="utf-8")
+        self.assertIn("broken-wikilink", self.names(self.audit()))
+
+    def test_personal_type_not_flagged_bad_type(self):
+        (self.mem / "personal_note.md").write_text(
+            "---\nname: Note\ndescription: d\ntype: personal\n---\nx\n", encoding="utf-8")
+        bad = [f for f in self.audit() if f["name"] == "bad-type"]
+        self.assertEqual(bad, [])
+
+
 class TestDBUnavailableDegrades(Base):
     def test_orphan_downgrades_to_warn_without_store(self):
         idx = INDEX.replace("- [Widget](project_widget.md) — status\n", "")

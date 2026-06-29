@@ -35,8 +35,10 @@ from memdag_bridge_import import (split_frontmatter, fm_top_level,
                                   parse_primary_index, default_memory_dir)
 
 BUDGET = 16384
-VALID_TYPES = {"user", "feedback", "project", "reference"}
-WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9_-]*)\]\]")
+VALID_TYPES = {"user", "personal", "feedback", "project", "reference"}
+# IGNORECASE so detection mirrors the case-folding resolver (_norm); otherwise an
+# uppercase target like [[ADHD]] with no match would silently never be flagged.
+WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9_-]*)\]\]", re.IGNORECASE)
 SKIP_FILES = {"MEMORY.md", "MEMORY.memdag.md"}
 
 

@@ -31,6 +31,7 @@ Go through the session and bucket each save-worthy item into one type:
 | Type | What it is | File prefix |
 |---|---|---|
 | **user** | who the user is — role, skills, durable preferences, context | `user_<topic>.md` |
+| **personal** | private / self-reflection notes about the user (also endorsed/pinned) | `personal_<topic>.md` |
 | **feedback** | corrections, validated approaches, "from now on do X" | `feedback_<topic>.md` |
 | **project** | milestone, status change, decision, deadline, who's doing what | `project_<topic>.md` |
 | **reference** | external pointers — "the docs are at X", "issues go in tracker Y" | `reference_<topic>.md` |
@@ -49,7 +50,7 @@ Each memory is one file with this frontmatter:
 ---
 name: <short-kebab-case-slug>
 description: <one specific line; used to judge relevance on recall>
-type: user | feedback | project | reference
+type: user | personal | feedback | project | reference
 source: user | session:<YYYY-MM-DD>
 salience: <0.00-1.00>
 ---

@@ -55,7 +55,16 @@ def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file
     tombstones it (cascading to descendants) so blame/explain still walk it."""
     stem = stem[:-3] if stem.endswith(".md") else stem
     filename = f"{stem}.md"
-    local = Path(mem_dir) / filename
+    mem_root = Path(mem_dir).resolve()
+    local = mem_root / filename
+    # Containment: a crafted stem ("../../.claude/CLAUDE.md") must never resolve
+    # outside the memory dir. This is the documented agent surface and the store
+    # treats ingested content as untrusted, so a prompt-injected stem must not be
+    # able to escape and delete arbitrary files (the pin guard is also bypassable
+    # by a "../" prefix, so this check has to come first).
+    if not local.resolve().is_relative_to(mem_root):
+        return {"status": "refused-traversal", "stem": stem,
+                "node_id": None, "revoked": 0, "file_deleted": False}
     fm = {}
     if local.exists():
         fm_lines, _b, _ = split_frontmatter(local.read_text(encoding="utf-8", errors="replace"))
@@ -108,6 +117,10 @@ def _cmd_tombstone(args):
         res = tombstone_memory(conn, mem, args.stem, reason=args.reason, force=args.force)
     finally:
         conn.close()
+    if res["status"] == "refused-traversal":
+        print(f"[tombstone] REFUSED: {args.stem!r} escapes the memory dir "
+              f"(path traversal blocked).", file=sys.stderr)
+        return 2
     if res["status"] == "refused-pinned":
         print(f"[tombstone] REFUSED: {res['stem']} is pinned (identity/feedback/personal). "
               f"Re-run with --force only if you truly mean to forget it.", file=sys.stderr)

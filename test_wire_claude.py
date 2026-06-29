@@ -98,6 +98,20 @@ class TestSettingsIO(unittest.TestCase):
         self.assertEqual(res["action"], "print")
         self.assertFalse(self.path.exists())
 
+    def test_non_list_stop_is_malformed_not_silent(self):
+        # a non-list Stop must surface as malformed, not silently report "unchanged"
+        self.path.write_text(json.dumps({"hooks": {"Stop": "oops"}}), encoding="utf-8")
+        res = wc.wire_settings(self.path, EXE)
+        self.assertEqual(res["action"], "malformed")
+
+    def test_string_hook_entry_does_not_crash(self):
+        # a stray non-dict entry must not crash; our hook still gets installed
+        self.path.write_text(json.dumps({"hooks": {"Stop": ["a string"]}}), encoding="utf-8")
+        res = wc.wire_settings(self.path, EXE)
+        self.assertIn(res["action"], ("merged", "created"))
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertTrue(wc._has_command(data["hooks"]["Stop"], "bridge-render"))
+
 
 class TestSkillsCopy(unittest.TestCase):
     def setUp(self):
@@ -137,6 +151,15 @@ class TestSkillsCopy(unittest.TestCase):
         self.assertEqual(set(res.values()), {"print"})
         self.assertFalse(self.dst.exists())
 
+    def test_force_removes_stale_files(self):
+        (self.dst / "saveall").mkdir(parents=True)
+        (self.dst / "saveall" / "SKILL.md").write_text("OLD\n", encoding="utf-8")
+        (self.dst / "saveall" / "stale_extra.md").write_text("leftover\n", encoding="utf-8")
+        wc.wire_skills(self.src, self.dst, force=True)
+        self.assertFalse((self.dst / "saveall" / "stale_extra.md").exists())  # replaced, not merged
+        self.assertTrue((self.dst / "saveall" / "SKILL.md").exists())
+        self.assertTrue((self.dst / "saveall.bak" / "stale_extra.md").exists())  # preserved in .bak
+
 
 class TestOrchestration(unittest.TestCase):
     def test_wire_claude_full_run_isolated_home(self):
@@ -153,6 +176,21 @@ class TestOrchestration(unittest.TestCase):
             cm = home / ".claude" / "CLAUDE.md"
             self.assertTrue(cm.exists())
             self.assertIn("memdag:managed:start", cm.read_text(encoding="utf-8"))
+
+    def test_claude_md_error_carries_detail(self):
+        # a claude-sync failure must capture the exception detail (so the CLI can
+        # surface it instead of printing a blank "[claude.md] error -> ").
+        import memdag_claude
+        orig = memdag_claude.sync
+        memdag_claude.sync = lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied"))
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                src = _make_skills_src(Path(d))
+                out = wc.wire_claude(home=Path(d) / "home", abs_exe=EXE, skills_src=src)
+        finally:
+            memdag_claude.sync = orig
+        self.assertEqual(out["claude_md"]["action"], "error")
+        self.assertIn("PermissionError", out["claude_md"]["detail"])
 
 
 if __name__ == "__main__":

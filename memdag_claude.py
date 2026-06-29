@@ -39,7 +39,7 @@ file under your memory directory, with frontmatter:
 ---
 name: <short-kebab-case-slug>
 description: <one-line summary; used to judge relevance on recall>
-type: user | feedback | project | reference
+type: user | personal | feedback | project | reference
 source: user | session:<YYYY-MM-DD>
 salience: <0.00-1.00>      # optional: how strongly to encode (affect-weighted)
 ---
