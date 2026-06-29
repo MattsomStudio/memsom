@@ -202,7 +202,7 @@ def main(argv=None):
     os_name = platform.system()
 
     # 2. Install memdag
-    print("\n[1/5] Installing memdag (isolated)...")
+    print("\n[1/6] Installing memdag (isolated)...")
     try:
         method, mcp_exe, cli_exe = install_memdag(repo_dir, data_dir, os_name=os_name)
     except subprocess.CalledProcessError as exc:
@@ -212,7 +212,7 @@ def main(argv=None):
     print(f"  installed via {method}; server exe -> {mcp_exe}")
 
     # 3. Ollama (graceful-fail, continue)
-    print("\n[2/5] Installing Ollama + embedding model (required for semantic search)...")
+    print("\n[2/6] Installing Ollama + embedding model (required for semantic search)...")
     plan = ollama_install_plan(os_name)
     ostatus = install_ollama(plan)
     if ostatus.get("ok"):
@@ -222,7 +222,7 @@ def main(argv=None):
               f"BM25-only until you fix this:\n    {ostatus.get('manual', '')}")
 
     # 4. init
-    print("\n[3/5] Creating the database...")
+    print("\n[3/6] Creating the database...")
     try:
         db_path = run_init(cli_exe, data_dir)
     except RuntimeError as exc:
@@ -232,17 +232,17 @@ def main(argv=None):
 
     # 5. Opt-in chat ingest
     if not args.no_ingest:
-        print("\n[4/5] Seed from your OWN chat history? This reads local Claude Code / Codex "
+        print("\n[4/6] Seed from your OWN chat history? This reads local Claude Code / Codex "
               "transcripts and ingests them stamped 'user'. Nothing leaves your machine.")
         if should_ingest(input("  Ingest your chat history now? [y/N] ")):
             subprocess.run([str(cli_exe), "ingest-chats", "--yes"])
         else:
             print("  skipped (you can run `memdag ingest-chats` later).")
     else:
-        print("\n[4/5] Chat ingest skipped (--no-ingest).")
+        print("\n[4/6] Chat ingest skipped (--no-ingest).")
 
     # 6. Wire client configs
-    print("\n[5/5] Wiring MCP client config(s)...")
+    print("\n[5/6] Wiring MCP client config(s)...")
     wire = [str(cli_exe), "wire-config", "--exe", str(mcp_exe), "--db", db_path]
     if args.print_only:
         wire.append("--print-only")
@@ -258,6 +258,18 @@ def main(argv=None):
         print("ERROR: MCP client wiring failed; setup is incomplete. "
               "Run `memdag doctor` and re-run bootstrap.", file=sys.stderr)
         return 1
+
+    # 7. Wire the Claude Code memory loop (skills + Stop hook + CLAUDE.md block).
+    # Soft step: a failure here leaves the MCP server working, so warn but don't abort.
+    print("\n[6/6] Wiring the Claude Code memory loop (skills + Stop hook + CLAUDE.md)...")
+    wc = [str(cli_exe), "wire-claude",
+          "--exe", str(cli_exe),
+          "--skills-src", str(repo_dir / "claude" / "skills")]
+    if args.print_only:
+        wc.append("--print-only")
+    if subprocess.run(wc).returncode != 0 and not args.print_only:
+        print("  WARNING: memory-loop wiring incomplete (skills/hook/CLAUDE.md). The "
+              "MCP server still works; re-run `memdag wire-claude` to finish.")
 
     print("\n=== done ===")
     print(f"DB: {db_path}")

@@ -1,0 +1,37 @@
+# CLAUDE.md
+
+Your project- and user-level instructions live in this file. Add your own guidance
+above or below the memdag-managed block; memdag only ever rewrites the block between
+its markers.
+
+<!-- memdag:managed:start -->
+## Memory protocol (managed by memdag — do not hand-edit this block)
+
+You have a persistent, file-based memory store. Each memory is ONE fact in ONE
+file under your memory directory, with frontmatter:
+
+```
+---
+name: <short-kebab-case-slug>
+description: <one-line summary; used to judge relevance on recall>
+type: user | feedback | project | reference
+source: user | session:<YYYY-MM-DD>
+salience: <0.00-1.00>      # optional: how strongly to encode (affect-weighted)
+---
+
+<the fact. For feedback/project, follow with **Why:** and **How to apply:** lines.
+Link related memories with [[their-name]].>
+```
+
+**Channels** (trust, highest first): `endorsed > user > agent-derived > external`.
+`user_*` / `feedback_*` / `personal_*` files are endorsed (pinned, never auto-dropped);
+`project_*` / `reference_*` are user-channel and decay out of the index when unused.
+
+**MEMORY.md is the always-loaded index, and it is GENERATED** from the store on
+session end by the `memdag bridge-render` Stop hook. Do NOT hand-edit MEMORY.md —
+edit the per-fact files and let it regenerate. Keep it under ~16 KB.
+
+To capture a session's worth of facts, use **`/saveall`**. Before saving, check
+whether a file already covers the fact and update it instead of duplicating; delete
+(tombstone) memories that turn out to be wrong.
+<!-- memdag:managed:end -->

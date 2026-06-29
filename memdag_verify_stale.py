@@ -9,7 +9,7 @@ never fires for memory:% nodes — this trigger is the only thing that ever sets
 stale=1 on a bridge memory.
 
 Design:
-  - STATE-BEARING gate first.  Stable facts ("Matthew has ADHD") never go stale no
+  - STATE-BEARING gate first.  Stable facts ("the user prefers tabs") never go stale no
     matter how old; only notes that assert a transient state ("NOT deployed", "IN
     PROGRESS", "DUE <date>") are candidates.  The regex is the main false-positive
     tunable; it is held to the verified phrase list (precision over recall).

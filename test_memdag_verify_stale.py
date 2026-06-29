@@ -42,7 +42,7 @@ class TestAssess(unittest.TestCase):
 
     def test_not_state_bearing_never_stale(self):
         old = _ns(NOW - timedelta(days=2000))
-        stale, _ = vs.assess("Matthew has ADHD; classic-physique lifter", old, NOW, 21)
+        stale, _ = vs.assess("the user prefers tabs over spaces", old, NOW, 21)
         self.assertFalse(stale)        # age alone never flags a stable fact
 
     def test_due_past_immediate(self):

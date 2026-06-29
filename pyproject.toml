@@ -51,10 +51,12 @@ only-include = [
     "memdag_anticipatory.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
+    "memdag_bridge_render.py",
     "memdag_bridge_sync.py",
     "memdag_broker.py",
     "memdag_capgate.py",
     "memdag_chats.py",
+    "memdag_claude.py",
     "memdag_cli.py",
     "memdag_compact.py",
     "memdag_config.py",
@@ -87,6 +89,7 @@ only-include = [
     "memdag_stale.py",
     "memdag_trust.py",
     "memdag_verify_stale.py",
+    "memdag_wire_claude.py",
 ]
 
 # Data file: memdag.py resolves external_fallback.txt next to itself
@@ -94,6 +97,10 @@ only-include = [
 # beside memdag.py for `memdag seed --offline` to work after a wheel install.
 [tool.hatch.build.targets.wheel.force-include]
 "external_fallback.txt" = "external_fallback.txt"
+# Bundled Claude Code memory loop (skills + CLAUDE.md template) so a standalone
+# `pip install` + `memdag wire-claude` finds them without a repo clone. The CLI
+# resolves them relative to the installed package (site-packages/claude/...).
+"claude" = "claude"
 
 # ---------------------------------------------------------------------------
 # sdist: same allowlist + the data file (README/LICENSE/pyproject.toml are
@@ -105,10 +112,12 @@ only-include = [
     "memdag_anticipatory.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
+    "memdag_bridge_render.py",
     "memdag_bridge_sync.py",
     "memdag_broker.py",
     "memdag_capgate.py",
     "memdag_chats.py",
+    "memdag_claude.py",
     "memdag_cli.py",
     "memdag_compact.py",
     "memdag_config.py",
@@ -141,5 +150,7 @@ only-include = [
     "memdag_stale.py",
     "memdag_trust.py",
     "memdag_verify_stale.py",
+    "memdag_wire_claude.py",
     "external_fallback.txt",
+    "claude",
 ]

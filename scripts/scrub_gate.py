@@ -41,6 +41,7 @@ _TOKEN_HASHES = {
     "7a03b16c38a15b2133513a1b60a1d6fa7ee360ff549fac24b4d86415d8224d90": 14,  # author vault tree (fwd-slash)
     "64f1133ed55f365e7054da407e814a304ef7c11cc5d1d9a14cfe956628499e3f": 14,  # author vault tree (back-slash)
     "ecccfb45f0794e7b2ed874cfef40cfc34c5071a21d5f976c398fb5cecb2358b8": 28,  # author verbatim cert-policy phrase
+    "e006ae39171512218a2b73f57d57a21a66a83fc51eacfe43ad1f4a831e772c3a": 7,   # author employer name
 }
 
 # digests grouped by token length, for windowed matching

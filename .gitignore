@@ -26,3 +26,16 @@ _weights/
 _pkgtest_venv/
 dist/
 *.egg-info/
+
+# personal runtime artifacts — never commit. The forgetting/recall/episodic layers
+# emit these locally; the generated brain index and config backups carry user data.
+*.log
+*.bak
+secret_denylist.txt
+MEMORY.md
+MEMORY.memdag.md
+.weights/
+# (episodic engine stores, belt-and-suspenders on top of *.db above)
+sessions.db
+vault*.db
+mem_weights.db

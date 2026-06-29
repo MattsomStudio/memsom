@@ -120,6 +120,49 @@ In Claude Code / Desktop / Codex, ask it to use the memdag tools. For example:
 
 ---
 
+## Part 3.5 — The always-on memory loop (Claude Code only, ~5 min)
+
+If you use the **Claude Code CLI**, `bootstrap.py` also installed a memory loop: a
+`/saveall` skill, a Stop hook that regenerates your loaded `MEMORY.md` from the
+store, and a managed block in your `CLAUDE.md`. This part checks it wired up. (Skip
+if you only use Claude Desktop or Codex — the loop is Claude Code-specific.)
+
+### Step 1: Confirm what got wired
+```
+memdag wire-claude --print-only
+```
+**Expected:** it prints the skill(s) it would install, a `Stop` hook running
+`... bridge-render`, and the CLAUDE.md managed block — and writes nothing. If you
+already ran bootstrap, a real re-run should say `exists-skipped` / `unchanged` /
+`already current` (it is idempotent and never clobbers your files).
+
+### Step 2: Check your CLAUDE.md has the managed block
+Open `~/.claude/CLAUDE.md`. **Expected:** a block fenced by
+`<!-- memdag:managed:start -->` and `<!-- memdag:managed:end -->` describing the
+memory format. Anything you write outside that block is yours and must never be
+touched on a re-run — **if memdag ever edits outside the markers, that's a bug.**
+
+### Step 3: Watch MEMORY.md regenerate
+Create a quick fact file and regenerate the index by hand (the Stop hook does this
+automatically when a session ends):
+```
+memdag bridge-render
+```
+**Expected:** it prints `[bridge] MEMORY.md regenerated ...`. Open the `MEMORY.md`
+in your memory dir (`~/.claude/projects/<project>/memory/MEMORY.md`) — it's a
+generated index. **Don't hand-edit it**; edit the per-fact files and re-run.
+
+### Step 4: Prove it's fail-safe
+`bridge-render` must never blank your brain. Even if the store is empty or a render
+is rejected, the existing `MEMORY.md` is left exactly as-is and the command still
+exits 0. **Tell me** if you ever see `MEMORY.md` get truncated or emptied — that's
+the one thing this layer exists to prevent.
+
+**Tell me:** did the block land in CLAUDE.md? Did `MEMORY.md` regenerate? Did a
+re-run touch anything it shouldn't have?
+
+---
+
 ## Part 4 — Try to break it (for the technically inclined, optional)
 
 If you like poking at security models, here's where the interesting stuff is. I *want* you to find holes.
