@@ -1,4 +1,4 @@
-"""qa_real — end-to-end recall test on Matthew's REAL corpus with Claude as the
+"""qa_real — end-to-end recall test on a real personal corpus with Claude as the
 consumer. The LongMemEval benchmark's utility ceiling was the weak local
 synthesizer (qwen2.5:7b); the real system feeds Claude. This harness does the
 machine half: sample real sessions, generate a grounded question+gold-answer from

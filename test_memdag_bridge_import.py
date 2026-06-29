@@ -19,19 +19,19 @@ import memdag_bridge_import as bi
 SAMPLE = {
     "user_adhd.md": "---\nname: ADHD\ndescription: has ADHD\ntype: user\n---\n\nbody one\n",
     "feedback_debug.md": "---\nname: Debug loop\ndescription: use the loop\ntype: feedback\n---\n\nrule\n",
-    "personal_[redacted].md": "---\nname: [redacted]\ndescription: context\ntype: personal\n---\n\nnote\n",
+    "personal_sam.md": "---\nname: Sam\ndescription: context\ntype: personal\n---\n\nnote\n",
     "project_kali.md": "---\nname: Kali VM\ndescription: status\ntype: project\nsalience: 0.30\n---\n\nstate\n",
     "reference_vault.md": "---\nname: Vault path\ndescription: where the vault is\ntype: reference\n---\n\npath\n",
 }
 
-INDEX = """# Memory - Matthew
+INDEX = """# Memory - Alex
 
 ## About the User
-- **Matthew** — goal: cybersecurity
+- **Alex** — goal: cybersecurity
 - [ADHD](user_adhd.md) — has ADHD
 
 ## Personal context
-- [[redacted]](personal_[redacted].md) — context
+- [Sam](personal_sam.md) — context
 ⏰ **Progress check DUE 2026-06-30** — raise it proactively
 
 ## Current Setup & Learning
@@ -150,7 +150,7 @@ class TestImport(Base):
     def test_channels_assigned_by_type(self):
         bi.import_memory_dir(self.conn, self.mem, dry_run=False)
         self.assertEqual(self.live_node("user_adhd.md")["channel"], "endorsed")
-        self.assertEqual(self.live_node("personal_[redacted].md")["channel"], "endorsed")
+        self.assertEqual(self.live_node("personal_sam.md")["channel"], "endorsed")
         self.assertEqual(self.live_node("feedback_debug.md")["channel"], "endorsed")
         self.assertEqual(self.live_node("project_kali.md")["channel"], "user")
         self.assertEqual(self.live_node("reference_vault.md")["channel"], "user")
@@ -218,7 +218,7 @@ class TestLiterals(Base):
         lits = [p for s, k, p in entries if k == "literal"]
         self.assertIn("user_adhd.md", files)
         # the two file-less lines are literals
-        self.assertTrue(any("Matthew" in t for t in lits))
+        self.assertTrue(any("Alex" in t for t in lits))
         self.assertTrue(any("Progress check" in t for t in lits))
         # a backtick'd .md inside a literal must NOT be misread as a file link
         self.assertNotIn("progress-check-2026-05-31.md", files)
@@ -226,7 +226,7 @@ class TestLiterals(Base):
     def test_literals_imported_as_endorsed(self):
         bi.import_literals(self.conn, self.mem, dry_run=False)
         rows = self._literal_nodes()
-        self.assertEqual(len(rows), 2)  # Matthew lead + progress-check
+        self.assertEqual(len(rows), 2)  # Alex lead + progress-check
         ch = self.conn.execute(
             "SELECT DISTINCT channel FROM nodes WHERE source_ref LIKE 'memory:literal:%'"
         ).fetchall()

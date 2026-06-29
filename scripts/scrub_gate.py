@@ -42,6 +42,24 @@ _TOKEN_HASHES = {
     "64f1133ed55f365e7054da407e814a304ef7c11cc5d1d9a14cfe956628499e3f": 14,  # author vault tree (back-slash)
     "ecccfb45f0794e7b2ed874cfef40cfc34c5071a21d5f976c398fb5cecb2358b8": 28,  # author verbatim cert-policy phrase
     "e006ae39171512218a2b73f57d57a21a66a83fc51eacfe43ad1f4a831e772c3a": 7,   # author employer name
+    # Stage B (episodic fork): names + vault folder the to-be-forked code hardcodes.
+    "68be7550846ecd878947b4eb0ac13d3cca3cf6c4940c94d90163e0a15e947203": 7,   # author first name (Mac home-path component)
+    "6d2b9bc3369e4b302a74573697194369a161a4f221a623aed75eb125cf429f30": 9,   # author surname
+    "f9b87cab13a1f660ca0bf58ea1b0cbc7c4527fcac21046717be58db31344687e": 5,   # author associate (person) name
+    "c585d9151156f7e1de88bf652913dab399d0091c45d235e7dc33294d7a380410": 22,  # author vault folder name
+}
+
+# Tokens that are INTENTIONAL author attribution (AGPL credit) in specific files —
+# permitted THERE, still blocked everywhere else. Keyed by basename -> {token hash}.
+# This is why banning the author's name doesn't fight the deliberate pyproject/LICENSE
+# credit: the name is allowed in those two files and nowhere else.
+_AUTHOR_NAME_HASHES = frozenset({
+    "68be7550846ecd878947b4eb0ac13d3cca3cf6c4940c94d90163e0a15e947203",  # first name
+    "6d2b9bc3369e4b302a74573697194369a161a4f221a623aed75eb125cf429f30",  # surname
+})
+_ALLOW_IN = {
+    "pyproject.toml": _AUTHOR_NAME_HASHES,
+    "LICENSE": _AUTHOR_NAME_HASHES,
 }
 
 # digests grouped by token length, for windowed matching
@@ -131,8 +149,12 @@ def scan(root):
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        allow = _ALLOW_IN.get(path.name, frozenset())
         for lineno, line in enumerate(text.splitlines(), 1):
             for tok in _hits_in_line(line):
+                if allow and hashlib.sha256(
+                        tok.encode("utf-8", "replace")).hexdigest() in allow:
+                    continue  # intentional attribution in this file
                 hits.append((path, lineno, tok, line.strip()))
     return hits
 
