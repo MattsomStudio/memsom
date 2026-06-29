@@ -338,7 +338,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
     files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
     stats = {"total_files": len(files), "created": 0, "updated": 0,
-             "skipped": 0, "tombstoned": 0}
+             "skipped": 0, "tombstoned": 0, "swept": 0}
 
     def _do():
         for path in files:
@@ -380,6 +380,29 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 (rel, _mtime_sig(path), new_hash, nid),
             )
 
+        # reconcile deletions: tombstone live file-backed nodes whose source
+        # file has vanished. The loop above only ever touches files that EXIST,
+        # so without this a deleted memory's node lingers live forever (the gap
+        # that orphaned project_redacted_vps_hardening). Literals (obsidian_path
+        # IS NULL) are excluded here — import_literals reconciles those against
+        # the index.
+        present = {p.name for p in files}
+        gone = conn.execute(
+            "SELECT id, obsidian_path FROM nodes "
+            "WHERE source_ref LIKE 'memory:%' AND source_ref NOT LIKE 'memory:literal:%' "
+            "AND tombstoned = 0 AND obsidian_path IS NOT NULL"
+        ).fetchall()
+        for nid, opath in gone:
+            if opath in present:
+                continue
+            stats["swept"] += 1
+            if not dry_run:
+                conn.execute(
+                    "UPDATE nodes SET tombstoned = 1, tombstoned_at = ?, revoke_reason = ? "
+                    "WHERE id = ?",
+                    (memdag.now_iso(), "source file removed (bridge reconcile)", nid),
+                )
+
     if dry_run:
         _do()
     else:
@@ -419,6 +442,7 @@ def _print_stats(stats, dry_run):
     print(f"  files created  : {f['created']}")
     print(f"  files updated  : {f['updated']} (old tombstoned: {f['tombstoned']})")
     print(f"  files skipped  : {f['skipped']} (unchanged)")
+    print(f"  deleted swept  : {f['swept']} (source file gone -> node tombstoned)")
     print(f"  literals       : {l['total']} total | {l['created']} created | "
           f"{l['skipped']} skipped | {l['tombstoned']} tombstoned")
 

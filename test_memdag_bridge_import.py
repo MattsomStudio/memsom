@@ -257,5 +257,44 @@ class TestLiterals(Base):
         self.assertEqual(stats["literals"]["created"], 2)
 
 
+class TestSweep(Base):
+    """Reconcile deletions: a removed source file tombstones its node."""
+
+    def test_deleted_file_node_is_swept(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        (self.mem / "project_kali.md").unlink()
+        stats = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(stats["swept"], 1)
+        self.assertIsNone(bi._live_node_for_path(self.conn, "project_kali.md"))
+        live = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE tombstoned = 0").fetchone()[0]
+        self.assertEqual(live, len(SAMPLE) - 1)
+
+    def test_sweep_dry_run_counts_but_keeps_node(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        (self.mem / "project_kali.md").unlink()
+        stats = bi.import_memory_dir(self.conn, self.mem, dry_run=True)
+        self.assertEqual(stats["swept"], 1)
+        self.assertIsNotNone(bi._live_node_for_path(self.conn, "project_kali.md"))
+
+    def test_clean_reimport_sweeps_nothing(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        stats = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(stats["swept"], 0)
+
+    def test_sweep_spares_literal_nodes(self):
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        lits_before = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE source_ref LIKE 'memory:literal:%' "
+            "AND tombstoned = 0").fetchone()[0]
+        self.assertGreater(lits_before, 0)
+        (self.mem / "project_kali.md").unlink()
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        lits_after = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE source_ref LIKE 'memory:literal:%' "
+            "AND tombstoned = 0").fetchone()[0]
+        self.assertEqual(lits_after, lits_before)  # file sweep never touches literals
+
+
 if __name__ == "__main__":
     unittest.main()
