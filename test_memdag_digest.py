@@ -24,10 +24,10 @@ FILES = {
     "project_kali.md": "---\nname: Kali VM\ndescription: status\ntype: project\n---\ns\n",
     "reference_vault.md": "---\nname: Vault\ndescription: where\ntype: reference\n---\np\n",
 }
-INDEX = """# Memory - Matthew
+INDEX = """# Memory - Alex
 
 ## About the User
-- **Matthew** — goal: cybersecurity
+- **Alex** — goal: cybersecurity
 - [ADHD](user_adhd.md) — has ADHD
 
 ## Current Setup & Learning
@@ -87,7 +87,7 @@ class TestRender(Base):
     def test_file_links_and_literals_rendered(self):
         out = digest.render_digest(self.conn)
         self.assertIn("- [ADHD](user_adhd.md) — has ADHD", out)
-        self.assertIn("- **Matthew** — goal: cybersecurity", out)  # literal verbatim
+        self.assertIn("- **Alex** — goal: cybersecurity", out)  # literal verbatim
 
     def test_equivalent_to_source_index(self):
         # rendering the freshly-imported store reproduces the same per-section

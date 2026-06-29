@@ -1,4 +1,4 @@
-"""run_recall_h2h — nomic vs BGE-M3 retrieval head-to-head for Matthew's recall system.
+"""run_recall_h2h — nomic vs BGE-M3 retrieval head-to-head for the recall system.
 
 Mirrors the memdag bench's principle (one substrate, same judge, fair-both-ways,
 report losses) but the metric is RETRIEVAL DISCRIMINATION, which is the actual

@@ -49,17 +49,21 @@ memdag-broker = "memdag_broker:main"
 only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
+    "memdag_audit.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
+    "memdag_bridge_render.py",
     "memdag_bridge_sync.py",
     "memdag_broker.py",
     "memdag_capgate.py",
     "memdag_chats.py",
+    "memdag_claude.py",
     "memdag_cli.py",
     "memdag_compact.py",
     "memdag_config.py",
     "memdag_confid.py",
     "memdag_corroborate.py",
+    "memdag_dashboard.py",
     "memdag_digest.py",
     "memdag_distill.py",
     "memdag_doctor.py",
@@ -85,8 +89,10 @@ only-include = [
     "memdag_schema.py",
     "memdag_session.py",
     "memdag_stale.py",
+    "memdag_tombstone.py",
     "memdag_trust.py",
     "memdag_verify_stale.py",
+    "memdag_wire_claude.py",
 ]
 
 # Data file: memdag.py resolves external_fallback.txt next to itself
@@ -94,6 +100,10 @@ only-include = [
 # beside memdag.py for `memdag seed --offline` to work after a wheel install.
 [tool.hatch.build.targets.wheel.force-include]
 "external_fallback.txt" = "external_fallback.txt"
+# Bundled Claude Code memory loop (skills + CLAUDE.md template) so a standalone
+# `pip install` + `memdag wire-claude` finds them without a repo clone. The CLI
+# resolves them relative to the installed package (site-packages/claude/...).
+"claude" = "claude"
 
 # ---------------------------------------------------------------------------
 # sdist: same allowlist + the data file (README/LICENSE/pyproject.toml are
@@ -103,17 +113,21 @@ only-include = [
 only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
+    "memdag_audit.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
+    "memdag_bridge_render.py",
     "memdag_bridge_sync.py",
     "memdag_broker.py",
     "memdag_capgate.py",
     "memdag_chats.py",
+    "memdag_claude.py",
     "memdag_cli.py",
     "memdag_compact.py",
     "memdag_config.py",
     "memdag_confid.py",
     "memdag_corroborate.py",
+    "memdag_dashboard.py",
     "memdag_digest.py",
     "memdag_distill.py",
     "memdag_doctor.py",
@@ -139,7 +153,10 @@ only-include = [
     "memdag_schema.py",
     "memdag_session.py",
     "memdag_stale.py",
+    "memdag_tombstone.py",
     "memdag_trust.py",
     "memdag_verify_stale.py",
+    "memdag_wire_claude.py",
     "external_fallback.txt",
+    "claude",
 ]

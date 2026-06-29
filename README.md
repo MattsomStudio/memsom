@@ -180,6 +180,43 @@ when Claude Code runs inside this repo. No global config is touched.
 
 > Keep `memdag.db` out of any synced or backup trees so private memories are not replicated.
 
+## Claude Code memory loop
+
+Beyond the MCP tools, memdag ships the always-on memory loop for the Claude Code
+CLI — a write skill, a Stop hook that keeps the loaded index current, and a managed
+block in your `CLAUDE.md`. `bootstrap.py` wires all of it (step `[6/6]`); to (re)do
+it by hand:
+
+```powershell
+memdag wire-claude              # install skills + Stop hook + CLAUDE.md block
+memdag wire-claude --print-only # show what it would do, write nothing
+memdag wire-claude --with-gate  # also wire the opt-in Gate #3 taint hooks
+```
+
+How the loop works:
+
+- **Capture** — the bundled `/saveall` skill sweeps a conversation and writes each
+  fact as one file in your memory dir (`~/.claude/projects/<project>/memory/`).
+- **Regenerate** — on session end the Stop hook runs `memdag bridge-render`, which
+  re-imports those files, runs the forgetting pass, and rewrites the always-loaded
+  `MEMORY.md` index from the store via the fail-safe digest writer (a bad render
+  never blanks the file). `MEMORY.md` is **generated** — edit the per-fact files,
+  not the index.
+- **Instruct** — `memdag claude-sync` keeps a delimited, memdag-managed block in
+  `~/.claude/CLAUDE.md` (the memory protocol) current. It only ever rewrites the
+  block between its markers; everything else in your `CLAUDE.md` is yours.
+
+Safety: `wire-claude` mirrors the MCP wiring contract — it backs up before writing,
+merges (never overwrites your other hooks), is idempotent, and **refuses to
+overwrite an existing same-named skill** without `--force`. Set
+`MEMDAG_DIGEST_TITLE` for the `MEMORY.md` H1 and `MEMDAG_BRIDGE_AUTHOR=0` on extra
+machines that should mirror without re-rendering.
+
+> `/recall` ships too — it drives `memdag retrieve` (hybrid BM25 + local nomic
+> vectors) over the store, so it searches everything ingested, not just the loaded
+> MEMORY.md. The author's GPU/vault-coupled BGE retrieval engine is intentionally
+> **not** included; `memdag retrieve` is the portable substrate.
+
 ## Command catalog
 
 | Subcommand       | Module             | What it does |
@@ -231,6 +268,9 @@ when Claude Code runs inside this repo. No global config is touched.
 | `reindex`        | memdag_retrieve    | Rebuild BM25 postings for all live source nodes |
 | `compact`        | memdag_compact     | Consolidate related episodes into a semantic node (edge-preserving, archived) |
 | `archived-list`  | memdag_compact     | List all archived (compacted) episodes |
+| `bridge-render`  | memdag_bridge_render | Regenerate MEMORY.md from the store (the Stop-hook command; fail-safe) |
+| `claude-sync`    | memdag_claude      | Seed/refresh the memdag-managed memory block in CLAUDE.md |
+| `wire-claude`    | memdag_wire_claude | Install the Claude Code memory loop (skills + Stop hook + CLAUDE.md) |
 
 ## Spine v1
 

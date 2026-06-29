@@ -81,7 +81,7 @@ class TestParity(unittest.TestCase):
     def setUp(self):
         self.mw = _load_mem_weights()
         if self.mw is None:
-            self.skipTest("mem_weights.py not present (CI / non-Matthew machine)")
+            self.skipTest("mem_weights.py not present (CI / non-author machine)")
 
     def test_compute_identical_to_original(self):
         canon, mems, events, now = _sample_inputs()

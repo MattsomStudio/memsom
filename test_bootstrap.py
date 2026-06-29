@@ -116,5 +116,27 @@ class TestWireFailureAborts(unittest.TestCase):
         self.assertIn("=== done ===", out)
 
 
+class TestMemoryLoopStepSoftFails(unittest.TestCase):
+    """Step [6/6] (wire-claude) is a SOFT step: if it fails, the MCP server still
+    works, so main() warns but completes (rc 0, '=== done ===' printed)."""
+
+    def test_wire_claude_failure_warns_but_completes(self):
+        # call order: subprocess.run #1 = wire-config (ok), #2 = wire-claude (fails)
+        with mock.patch.object(bootstrap, "install_memdag",
+                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+             mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
+             mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
+             mock.patch.object(bootstrap.subprocess, "run",
+                               side_effect=[mock.Mock(returncode=0), mock.Mock(returncode=1)]):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = bootstrap.main(["--no-ingest"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)                                  # soft fail, not fatal
+        self.assertIn("[6/6]", out)
+        self.assertIn("memory-loop wiring incomplete", out)
+        self.assertIn("=== done ===", out)
+
+
 if __name__ == "__main__":
     unittest.main()

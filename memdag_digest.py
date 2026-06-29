@@ -38,18 +38,30 @@ from memdag_bridge_import import (split_frontmatter, fm_top_level,
                                   parse_index_entries, parse_primary_index,
                                   default_memory_dir)
 
-# section order must match the hand-curated MEMORY.md taxonomy
+# Default section display order. Carries no user-specific taxonomy so the shipped
+# module is identity-free; override with a comma-separated $MEMDAG_DIGEST_SECTIONS.
+# Any section present in a memory file but absent here still renders (sorted, after
+# the known ones), so a custom section never gets dropped — only reordered.
 SECTIONS = [
     "About the User",
     "Personal context",
     "Hardware",
     "Current Setup & Learning",
-    "Work / redacted Group",
+    "Work",
     "Personal projects",
     "References",
     "Feedback",
 ]
 BUDGET = 16384
+
+
+def _section_order():
+    """Section display order: $MEMDAG_DIGEST_SECTIONS (comma-separated) if set,
+    else the generic SECTIONS default."""
+    env = os.environ.get("MEMDAG_DIGEST_SECTIONS")
+    if env:
+        return [s.strip() for s in env.split(",") if s.strip()]
+    return SECTIONS
 # generic default; the real H1 is set per-user via $MEMDAG_DIGEST_TITLE so this
 # shippable module carries no author identity.
 DEFAULT_TITLE = "# Memory"
@@ -141,7 +153,8 @@ def _assemble(title, entries, *, include_reverify=True):
             lines.append(f"- {e['line']} — {e['stale_reason'] or 'unverified'}")
         lines.append("")
 
-    order = SECTIONS + sorted(s for s in by_sec if s and s not in SECTIONS)
+    secs = _section_order()
+    order = secs + sorted(s for s in by_sec if s and s not in secs)
     for sec in order:
         if sec not in by_sec:
             continue

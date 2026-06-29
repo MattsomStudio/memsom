@@ -62,5 +62,21 @@ class TestSeedNoPersonalData(unittest.TestCase):
         self.assertEqual(hits, [], f"seed content leaks tokens: {hits}")
 
 
+class TestAttributionAllowlist(unittest.TestCase):
+    """The author's name is INTENTIONAL credit in pyproject.toml / LICENSE, but a
+    leak anywhere else. Assemble the name at runtime so this test file stays clean."""
+
+    def test_name_allowed_in_pyproject_but_blocked_elsewhere(self):
+        name = "Mat" + "thew"                     # avoid the literal in this file
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "pyproject.toml").write_text(
+                f'authors = [{{ name = "{name} X" }}]\n', encoding="utf-8")
+            (Path(d) / "note.md").write_text(f"ask {name} about it\n", encoding="utf-8")
+            hit_files = {p.name for p, *_ in scrub_gate.scan(d)}
+        self.assertIn("note.md", hit_files, "name must be flagged in a normal file")
+        self.assertNotIn("pyproject.toml", hit_files,
+                         "name must be allowed in the attribution file")
+
+
 if __name__ == "__main__":
     unittest.main()
