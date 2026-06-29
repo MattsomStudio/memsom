@@ -69,6 +69,7 @@ import memdag_bridge_render
 import memdag_claude
 import memdag_wire_claude
 import memdag_audit
+import memdag_dashboard
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +650,7 @@ def main(argv=None):
     memdag_claude.register(sub)
     memdag_wire_claude.register(sub)
     memdag_audit.register(sub)
+    memdag_dashboard.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures
