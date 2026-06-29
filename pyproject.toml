@@ -49,6 +49,7 @@ memdag-broker = "memdag_broker:main"
 only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
+    "memdag_audit.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
     "memdag_bridge_render.py",
@@ -110,6 +111,7 @@ only-include = [
 only-include = [
     "memdag.py",
     "memdag_anticipatory.py",
+    "memdag_audit.py",
     "memdag_blame.py",
     "memdag_bridge_import.py",
     "memdag_bridge_render.py",
