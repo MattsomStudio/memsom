@@ -31,8 +31,14 @@ memsom is **stdlib-only** — there are no runtime dependencies to install.
 ```bash
 git clone https://github.com/MattsomStudio/memsom.git
 cd memsom
+git config core.hooksPath .githooks   # enable the pre-push leak scan (once per clone)
 python -m unittest discover -s . -p "test_*.py" -v
 ```
+
+The `pre-push` hook scans the commits you're about to push for author-identifying
+tokens and blocks the push if it finds one — the tree-scanning scrub gate can't see
+leaks that live only in history, so this closes that gap. It's opt-in per clone (git
+won't run a repo's committed hooks until you point `core.hooksPath` at them).
 
 ## Before you open a PR
 

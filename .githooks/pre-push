@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# pre-push: block the push if any commit being published adds an author-identifying
+# token (real name, username, subnet, vault paths...). Closes the history gap the
+# tree-only scrub_gate can't see. git feeds the ref lines on stdin; we forward them
+# to history_scan.py, which decides. Fails closed if python is missing.
+#
+# Version-controlled under .githooks; activate once per clone with:
+#   git config core.hooksPath .githooks     (run on both Mac and PC)
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "$PY" ]; then
+  echo "[pre-push] no python interpreter found; cannot run history leak scan — refusing to push." >&2
+  exit 1
+fi
+
+exec "$PY" "$REPO/scripts/history_scan.py"
