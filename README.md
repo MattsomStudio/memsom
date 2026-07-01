@@ -17,7 +17,7 @@ pull it out by the root.
 
 <p align="center"><em>An agent reads a poisoned doc. memsom composes the answer but floors its trust to <strong>EXTERNAL</strong>, blame traces it to the source, and the consolidation gate quarantines it. Revoke the source and the cascade tombstones everything derived from it; ask again and the answer heals — integrity rises to <strong>USER</strong>, with the tombstone still fully explainable. <strong>Revocation is not amnesia.</strong></em></p>
 
-<p align="center"><sub>Rendered from <a href="demo_poison.tape"><code>demo_poison.tape</code></a> with <a href="https://github.com/charmbracelet/vhs">vhs</a> · re-render any time the CLI changes · a 35s social cut lives at <a href="demo/demo_poison_social.gif"><code>demo/demo_poison_social.gif</code></a></sub></p>
+<p align="center"><sub>Rendered from <a href="demo/demo_poison.tape"><code>demo/demo_poison.tape</code></a> with <a href="https://github.com/charmbracelet/vhs">vhs</a> · re-render any time the CLI changes · a 35s social cut lives at <a href="demo/demo_poison_social.gif"><code>demo/demo_poison_social.gif</code></a></sub></p>
 
 ## How it works
 
@@ -210,7 +210,7 @@ python memsom.py ask "What is SQLite?"                                  # new an
 python memsom.py dump            # all nodes + all edges
 ```
 
-Walkthrough script: `demo.ps1`. Design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
+Walkthrough script: `demo/demo.ps1`. Design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Full surface — poison, catch, revoke, redact
 
@@ -227,7 +227,7 @@ python memsom_cli.py redact 4 --reason "malicious payload" --yes
 python memsom_cli.py dump
 ```
 
-Walkthrough script: `demo2.ps1`.
+Walkthrough script: `demo/demo2.ps1`.
 
 ### MCP server
 

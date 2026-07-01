@@ -329,7 +329,7 @@ def main(argv=None) -> None:
         try:
             s.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     ap = argparse.ArgumentParser(prog="memsom_digest", description=__doc__)
     ap.add_argument("memory_dir", nargs="?", default=None)
     _cmd_shadow(ap.parse_args(argv))

@@ -256,13 +256,13 @@ def _vector_sims(text, candidates):
     try:
         qv = memsom_retrieve._call_ollama_embed(text)
     except Exception:
-        return {}
+        return {}  # Ollama unreachable/model missing — degrade to {} (see docstring)
     out = {}
     for nid, content in candidates:
         try:
             cv = memsom_retrieve._call_ollama_embed(content)
         except Exception:
-            continue
+            continue  # this candidate's embed failed — skip it, keep the rest
         out[nid] = memsom_retrieve._cosine(qv, cv)
     return out
 

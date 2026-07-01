@@ -67,7 +67,7 @@ def _tokens(text: str) -> set:
         import memsom_retrieve
         return set(memsom_retrieve.tokenize(text))
     except Exception:
-        return memsom.stems(text)
+        return memsom.stems(text)  # import failed or tokenize raised — use the simpler stemmer
 
 
 # ---------------------------------------------------------------------------

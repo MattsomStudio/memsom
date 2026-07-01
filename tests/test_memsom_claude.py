@@ -12,7 +12,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom_claude as mc
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 
 
 class TestPureUpsert(unittest.TestCase):

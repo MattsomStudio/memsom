@@ -166,7 +166,7 @@ class TestEntryPointExitCodes(unittest.TestCase):
         # client=codex so wiring routes to wire_toml (an apostrophe exe refuses);
         # avoids the claude-code CLI path / real $HOME config writes.
         return subprocess.run(argv, capture_output=True, text=True,
-                              cwd=str(Path(__file__).resolve().parent))
+                              cwd=str(Path(__file__).resolve().parent.parent))
 
     def test_standalone_main_real_run_exits_1(self):
         # CFG-MAIN-EXITDROP-1: direct `python memsom_config.py` must not drop the code.

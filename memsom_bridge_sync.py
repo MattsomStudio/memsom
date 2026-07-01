@@ -127,7 +127,7 @@ def main(argv=None) -> None:
         try:
             s.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     ap = argparse.ArgumentParser(prog="memsom_bridge_sync", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     register(sub)

@@ -1,6 +1,6 @@
 # memsom — Architecture
 
-A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 28 runtime modules / ~11,800 LOC / 580 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
+A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 45+ runtime modules / ~18k LOC / ~880 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
 
 ## The mental model
 
@@ -82,8 +82,8 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 - `memsom_distill` / `memsom_reflex` — provenance-gated training export: only untainted + consolidated memory is eligible to bake into weights.
 
 **Surfaces:**
-- `memsom_cli` — unified CLI (35 subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
-- `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, ~18 tools), all diagnostics to stderr.
+- `memsom_cli` — unified CLI (75+ subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
+- `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, 15+ tools), all diagnostics to stderr.
 - `memsom_obsidian` — vault integration: `sync_vault` (notes → nodes, `[[wikilinks]]` → `rel_edges`), `export_note`, `watch_vault`. A note's frontmatter `memsom-channel` can only **lower** integrity (`min(default, declared)`) — closing the write→re-ingest laundering loop.
 - `memsom_config` (MCP client wiring), `bootstrap.py` (one-command install), `memsom_chats` (chat import).
 

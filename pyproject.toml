@@ -1,7 +1,7 @@
 # memsom packaging — flat layout, deliberately.
 #
 # The repo is a flat set of memsom_*.py modules at the root and memsom.py is
-# imported as `import memsom` by everything (frozen core + 404-test suite).
+# imported as `import memsom` by everything (frozen core + the full test suite).
 # DO NOT restructure into a memsom/ package: that breaks the frozen
 # `import memsom` contract.  Instead the wheel ships each module as a
 # top-level module (the hatchling equivalent of setuptools py-modules).
@@ -11,7 +11,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "memsom"  # working name
+name = "memsom"
 version = "0.2.0"
 description = "Derivation-DAG memory store for AI agents: provenance edges, channel-stamped Biba integrity labels, revoke-cascade, taint tracking. Stdlib-only."
 readme = "README.md"

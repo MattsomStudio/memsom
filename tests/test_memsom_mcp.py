@@ -22,7 +22,7 @@ warnings.simplefilter("error", DeprecationWarning)
 import memsom
 import memsom_mcp
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 MCP_SCRIPT = str(HERE / "memsom_mcp.py")
 
 

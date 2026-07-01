@@ -577,7 +577,7 @@ def _cmd_dashboard(args):
         try:
             stream.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     os.environ.setdefault("MEMDAG_DB", str(HOME / ".memdag" / "memdag.db"))
     out = Path(args.out) if getattr(args, "out", None) else HOME / "Desktop" / "memory-telemetry.html"
     telemetry = build_telemetry()

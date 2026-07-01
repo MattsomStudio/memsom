@@ -120,7 +120,7 @@ def _cmd_bridge_render_safe(args):
         try:
             s.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     try:
         _cmd_bridge_render(args)
     except Exception as exc:  # noqa: BLE001 — the hook must never crash the session

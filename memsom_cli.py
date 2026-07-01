@@ -431,7 +431,7 @@ def cmd_ask(args):
 
 
 # ---------------------------------------------------------------------------
-# add subcommand (inject a source node — used by demo2.ps1)
+# add subcommand (inject a source node — used by demo/demo2.ps1)
 # ---------------------------------------------------------------------------
 
 def cmd_add(args):

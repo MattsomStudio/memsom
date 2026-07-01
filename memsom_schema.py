@@ -277,6 +277,8 @@ def _step_status_check(conn: sqlite3.Connection) -> None:
             )
         conn.execute("COMMIT")
     except Exception:
+        # any failure during the rebuild must trigger a rollback before
+        # propagating, regardless of what raised — hence the broad catch.
         try:
             conn.execute("ROLLBACK")
         except sqlite3.OperationalError:

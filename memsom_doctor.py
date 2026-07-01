@@ -26,7 +26,7 @@ def _version():
         import importlib.metadata as im
         return im.version("memsom")
     except Exception:
-        return "unknown (not installed as a package)"
+        return "unknown (not installed as a package)"  # metadata lookup failed — best-effort label
 
 
 def _node_count():
@@ -43,7 +43,7 @@ def _node_count():
         finally:
             conn.close()
     except Exception:
-        return None
+        return None  # DB missing/locked/corrupt — node count unknown, not fatal
 
 
 def _ollama_status():

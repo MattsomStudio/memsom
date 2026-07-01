@@ -8,7 +8,7 @@
 #   - mid-take screwup => `python memsom.py seed --reset --offline` and restart the
 #     take (the DON'T-re-seed rule is about pre-take rehearsal only)
 $env:PYTHONUTF8 = '1'
-Set-Location $PSScriptRoot
+Set-Location (Split-Path $PSScriptRoot -Parent)
 
 # 0) fresh store (off camera for the 30s cut; on camera for the long cut)
 # --offline = the committed snapshot of the real README: byte-identical to every

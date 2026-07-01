@@ -179,7 +179,7 @@ def main(argv=None) -> None:
         try:
             s.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     ap = argparse.ArgumentParser(prog="memsom_claude", description=__doc__)
     ap.add_argument("--path", default=None)
     ap.add_argument("--print-only", action="store_true")

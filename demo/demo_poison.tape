@@ -1,6 +1,6 @@
 # memsom flagship demo — "poisoned agent memory, healed with an audit trail"
 # ---------------------------------------------------------------------------
-# RENDER:  vhs demo_poison.tape      (installs: `brew install vhs` on the Mac)
+# RENDER:  cd demo && vhs demo_poison.tape      (installs: `brew install vhs` on the Mac)
 # PREREQ:  `pip install -e .` in the repo so the `memsom` command is on PATH.
 # OUTPUT:  demo_poison.gif (README autoplay) + .mp4 + .webm (X / site, smaller).
 # Validated against real CLI output on 2026-07-01. Deterministic ids: 1=user,

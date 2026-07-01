@@ -450,7 +450,7 @@ def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     for nid, wj in rows:
         try:
             d_sparse = json.loads(wj)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             continue
         s = memsom_embed.sparse_dot(q_sparse, d_sparse)
         if s > 0.0:

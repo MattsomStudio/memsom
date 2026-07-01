@@ -229,7 +229,7 @@ def main(argv=None) -> None:
         try:
             s.reconfigure(encoding="utf-8")
         except Exception:
-            pass
+            pass  # reconfigure unsupported on this stream — keep its default encoding
     ap = argparse.ArgumentParser(prog="memsom_verify_stale", description=__doc__)
     ap.add_argument("--apply", action="store_true", help="apply (default: dry-run)")
     _cmd_verify_stale(ap.parse_args(argv))

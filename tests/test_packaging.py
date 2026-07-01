@@ -9,7 +9,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 
 
 def _pyproject():

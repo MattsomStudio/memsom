@@ -8,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "scripts"))
 import scrub_gate  # noqa: E402
 

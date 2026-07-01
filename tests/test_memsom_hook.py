@@ -103,7 +103,7 @@ class TestCli(Base):
         return subprocess.run(
             [sys.executable, "memsom_hook.py", verb],
             input=json.dumps(payload), capture_output=True, text=True, env=env,
-            cwd=str(Path(__file__).parent),
+            cwd=str(Path(__file__).parent.parent),
         )
 
     def test_post_then_pre_denies_over_stdin(self):
@@ -128,7 +128,7 @@ class TestCli(Base):
         env = dict(os.environ)
         r = subprocess.run([sys.executable, "memsom_hook.py", "hook-pre"],
                            input="{ not json", capture_output=True, text=True, env=env,
-                           cwd=str(Path(__file__).parent))
+                           cwd=str(Path(__file__).parent.parent))
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")  # no deny -> allow
 

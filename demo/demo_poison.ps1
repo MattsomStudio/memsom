@@ -13,7 +13,7 @@
 #     5=clean answer. If you fat-finger an extra ask, adjust the ids you explain.
 #   - mid-take screwup => delete the DB file and re-run from step 0.
 $env:PYTHONUTF8 = '1'
-Set-Location $PSScriptRoot
+Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $env:MEMDAG_DB) { $env:MEMDAG_DB = Join-Path $env:TEMP 'memsom_demo.db' }
 Remove-Item $env:MEMDAG_DB -ErrorAction SilentlyContinue
 

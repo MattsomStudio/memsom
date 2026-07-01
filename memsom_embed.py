@@ -153,7 +153,7 @@ def bge_available() -> bool:
             import FlagEmbedding  # noqa: F401
             _BGE_AVAILABLE = True
         except Exception:
-            _BGE_AVAILABLE = False
+            _BGE_AVAILABLE = False  # any import/DLL failure -> bge unavailable (never raises)
     return _BGE_AVAILABLE
 
 
@@ -188,7 +188,7 @@ def unload() -> None:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
-        pass
+        pass  # torch missing or cache-clear failed — nothing to free, ignore
 
 
 # ---------------------------------------------------------------------------

@@ -223,6 +223,8 @@ class Upstream:
                 self.proc.terminate()
                 self.proc.wait(timeout=5)
             except Exception:
+                # terminate/wait failed for any reason (timeout, already dead,
+                # OS error) — force kill as the last-resort cleanup.
                 self.proc.kill()
 
 

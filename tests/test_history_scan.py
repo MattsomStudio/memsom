@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE / "scripts"))
 import history_scan  # noqa: E402
 

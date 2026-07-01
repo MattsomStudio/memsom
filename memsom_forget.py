@@ -205,7 +205,7 @@ def read_usage_events(usage_dir, after_ts=None):
                 continue
             try:
                 rec = json.loads(line)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
             ts = rec.get("ts")
             if cutoff:

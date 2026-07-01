@@ -13,7 +13,7 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import scrub_gate                       # noqa: E402
 import memsom                           # noqa: E402
 import memsom_bridge_import as bi       # noqa: E402

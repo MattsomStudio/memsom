@@ -12,7 +12,7 @@
 #       second ask (after cleanup) -> node 6 (agent-derived, integrity higher)
 #   - mid-take screwup => re-run `python memsom_cli.py seed --reset --offline`
 $env:PYTHONUTF8 = '1'
-Set-Location $PSScriptRoot
+Set-Location (Split-Path $PSScriptRoot -Parent)
 
 # 0) Fresh store — three stamped sources
 python memsom_cli.py seed --reset --offline

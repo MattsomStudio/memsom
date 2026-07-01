@@ -319,7 +319,7 @@ def ping(base_url=None, timeout=5):
         with urllib.request.urlopen(tags_url, timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
-        return False
+        return False  # unreachable/timeout/HTTP error -> not reachable (see docstring)
 
 
 def register(subparsers):

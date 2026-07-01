@@ -1,6 +1,6 @@
 # memsom SOCIAL cut — ~30s, thumb-stopping. Clean screen per beat, big font.
 # ---------------------------------------------------------------------------
-# RENDER:  vhs demo_poison_social.tape
+# RENDER:  cd demo && vhs demo_poison_social.tape
 # Trusted base memory (nodes 1,2) is loaded OFF-CAMERA so the on-screen story is
 # just the drama: poison -> EXTERNAL -> revoke -> healed to USER. ids: 3=poison,
 # 4=first answer, 5=clean answer. Validated against real CLI output 2026-07-01.
