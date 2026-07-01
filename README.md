@@ -387,6 +387,13 @@ python -W error::DeprecationWarning -m unittest discover -s . -p "test_memsom*.p
 5. LLM is opt-in only (`--llm` flag); the default answer path is 100% deterministic.
 6. Redaction destroys payload, preserves shape — blame and explain still walk the tree.
 
+## Contributing
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). First-time contributors sign a
+one-time [Individual CLA](CLA.md) (a bot walks you through it on your PR). The CLA
+keeps a future dual-license / commercial option open without chasing down every past
+contributor; you retain full ownership of your work.
+
 ## License
 
 [AGPL-3.0-or-later](LICENSE). The network-use copyleft is deliberate: any fork —
