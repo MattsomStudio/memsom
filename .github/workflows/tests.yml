@@ -52,3 +52,21 @@ jobs:
       # Gate #3 broker entry point boots and enforces allow -> taint -> deny.
       - name: Gate 3 broker selfcheck
         run: python memsom_broker.py --selfcheck
+
+  # Server-side enforcement of the author-identifying-token gate across ALL git
+  # history. The pre-push hook (.githooks/pre-push) is opt-in per clone and never
+  # runs on a contributor's (or fork PR author's) machine — this job is where the
+  # gate actually holds for everyone. Runs on push AND pull_request by design.
+  leak-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history: the scan needs every commit, not a shallow clone
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan full git history for author-identifying leaks
+        run: python scripts/history_scan.py --all

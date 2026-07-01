@@ -90,6 +90,21 @@ class TestHistoryScan(_TempRepo):
         findings = history_scan.scan_push([(tip, zero)])
         self.assertTrue(any(tok == USERNAME.lower() for _, tok, _, _ in findings))
 
+    def test_scan_all_catches_leak_anywhere_in_history(self):
+        # CI's mode: scan every commit on every ref, no range needed. A leak buried
+        # mid-history (tree since cleaned) must still surface.
+        self._commit("a.md", "clean\n")
+        self._commit("leak.md", f"{USERNAME} was here\n")
+        _git("rm", "-q", "leak.md", cwd=self.repo)
+        _git("commit", "-q", "-m", "remove leak", cwd=self.repo)
+        findings = history_scan.scan_all()
+        self.assertTrue(any(tok == USERNAME.lower() for _, tok, _, _ in findings))
+
+    def test_scan_all_clean_history_passes(self):
+        self._commit("a.md", "clean\n")
+        self._commit("b.md", "also clean\n")
+        self.assertEqual(history_scan.scan_all(), [])
+
     def test_deletion_is_noop(self):
         self._commit("a.md", "clean\n")
         zero = "0" * 40

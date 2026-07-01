@@ -18,6 +18,10 @@ Deletion (local oid all-zero) -> nothing to scan.
 
 Exit: 0 = clean, 1 = at least one leak token found (commit + token printed to stderr).
 
+CI enforcement (server-side, non-skippable — the pre-push hook is opt-in per clone
+and never runs on a contributor's machine, so CI scans the WHOLE history):
+    python scripts/history_scan.py --all      (requires a full clone: fetch-depth 0)
+
 Standalone (for tests / manual use):
     python scripts/history_scan.py <local_oid> <remote_oid>
 """
@@ -38,10 +42,20 @@ def _is_zero(oid: str) -> bool:
 
 
 def _run(args):
-    r = subprocess.run(["git"] + args, capture_output=True, text=True, timeout=120)
+    # Force UTF-8 with errors="replace": history holds binary/non-UTF-8 blobs (DBs,
+    # .tape casts) whose diffs would otherwise crash text decoding under a non-UTF-8
+    # locale (e.g. cp1252 on Windows). Bad bytes become U+FFFD — harmless for token
+    # matching, which only cares about ASCII author tokens. Mirrors scrub_gate.
+    r = subprocess.run(["git"] + args, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {r.stderr.strip()}")
     return r.stdout
+
+
+def _all_commits():
+    """Every commit reachable from any ref — the full history CI must vet."""
+    return [c for c in _run(["rev-list", "--all"]).split() if c]
 
 
 def _commits_in_push(local: str, remote: str):
@@ -78,25 +92,44 @@ def _added_leaks_in_commit(sha: str):
             added = line[1:]
             allow = scrub_gate._ALLOW_IN.get(current or "", frozenset())
             for tok in scrub_gate.scan_text(added):
-                if allow and hashlib.sha256(
-                        tok.encode("utf-8", "replace")).hexdigest() in allow:
+                digest = hashlib.sha256(tok.encode("utf-8", "replace")).hexdigest()
+                # The author's NAME is public attribution (LICENSE/pyproject), not a
+                # secret — the history gate enforces genuinely-private tokens and lets
+                # the name be. The tree gate (scrub_gate) still keeps the name confined
+                # to the attribution files, so tidiness isn't lost.
+                if digest in scrub_gate._AUTHOR_NAME_HASHES:
+                    continue
+                if allow and digest in allow:
                     continue  # intentional attribution in LICENSE / pyproject.toml
                 hits.append((tok, current or "?", added.strip()))
     return hits
 
 
-def scan_push(refs):
-    """refs: iterable of (local_oid, remote_oid). Returns list of (sha, tok, file, line)."""
+def _scan_commits(shas):
     seen = set()
     findings = []
-    for local, remote in refs:
-        for sha in _commits_in_push(local, remote):
-            if sha in seen:
-                continue
-            seen.add(sha)
-            for tok, f, line in _added_leaks_in_commit(sha):
-                findings.append((sha, tok, f, line))
+    for sha in shas:
+        if sha in seen:
+            continue
+        seen.add(sha)
+        for tok, f, line in _added_leaks_in_commit(sha):
+            findings.append((sha, tok, f, line))
     return findings
+
+
+def scan_push(refs):
+    """refs: iterable of (local_oid, remote_oid). Returns list of (sha, tok, file, line)."""
+    shas = []
+    for local, remote in refs:
+        shas.extend(_commits_in_push(local, remote))
+    return _scan_commits(shas)
+
+
+def scan_all():
+    """Scan the full history (every commit on every ref). Used by CI, where the
+    pre-push hook can't reach a contributor's machine, so enforcement must be
+    server-side and cover everything — not just a push delta."""
+    return _scan_commits(_all_commits())
 
 
 def _refs_from_stdin():
@@ -110,14 +143,16 @@ def _refs_from_stdin():
 
 
 def main():
-    if len(sys.argv) == 3:
-        refs = [(sys.argv[1], sys.argv[2])]
-    else:
-        refs = _refs_from_stdin()
-    if not refs:
-        return 0
+    all_mode = len(sys.argv) == 2 and sys.argv[1] == "--all"
+    if not all_mode:
+        if len(sys.argv) == 3:
+            refs = [(sys.argv[1], sys.argv[2])]
+        else:
+            refs = _refs_from_stdin()
+        if not refs:
+            return 0
     try:
-        findings = scan_push(refs)
+        findings = scan_all() if all_mode else scan_push(refs)
     except RuntimeError as e:
         print(f"[history-scan] could not inspect commits: {e}", file=sys.stderr)
         return 1  # fail closed — a scanner that can't scan must not wave the push through
