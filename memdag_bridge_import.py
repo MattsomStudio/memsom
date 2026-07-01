@@ -383,7 +383,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
         # reconcile deletions: tombstone live file-backed nodes whose source
         # file has vanished. The loop above only ever touches files that EXIST,
         # so without this a deleted memory's node lingers live forever (the gap
-        # that orphaned project_redacted_vps_hardening). Literals (obsidian_path
+        # that once orphaned a deleted note's node). Literals (obsidian_path
         # IS NULL) are excluded here — import_literals reconciles those against
         # the index.
         present = {p.name for p in files}
