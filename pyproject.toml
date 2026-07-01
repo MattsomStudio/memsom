@@ -39,7 +39,10 @@ dependencies = []
 # pulls torch + transformers transitively (multi-GB). For CUDA acceleration,
 # install a matching torch build first (see README). Enable at runtime with
 # MEMDAG_EMBED_BACKEND=bge-m3.
-bge = ["FlagEmbedding>=1.3"]
+# Floor is the version this backend is verified against (the BGE service the
+# author runs); the code uses the `devices=` constructor kwarg, which this line
+# is known to accept. Bump only after re-testing.
+bge = ["FlagEmbedding>=1.4.0"]
 
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"

@@ -217,11 +217,38 @@ def _encode(text: str) -> dict:
     return {"dense": dense, "sparse": sparse, "colbert": colbert}
 
 
+_WARNED_FALLBACK = False
+
+
+def _warn_fallback(op: str, exc: Exception) -> None:
+    """Emit ONE stderr warning when bge was requested + importable but failed at
+    runtime, then stay quiet (reindex calls encode per-node — no spam).
+
+    Silent degrade-to-default is great for uptime but hides a broken bge setup:
+    the caller believes it's on the premium path while quietly getting the default
+    backend. A version/API mismatch (FlagEmbedding older than the pinned floor, so
+    the `devices=` kwarg or the encode() return shape differs) surfaces right here.
+    """
+    global _WARNED_FALLBACK
+    if _WARNED_FALLBACK:
+        return
+    _WARNED_FALLBACK = True
+    import sys
+    print(
+        f"[memsom] BGE-M3 backend requested but {op} FAILED "
+        f"({type(exc).__name__}: {exc}). Falling back to the default backend — "
+        f"retrieval quality is reduced. Verify `pip show FlagEmbedding` (need "
+        f">=1.4.0) and that the model is available. This warning shows once.",
+        file=sys.stderr,
+    )
+
+
 def encode_doc(text: str):
     """Encode a document. Returns the signal dict, or None on any failure."""
     try:
         return _encode(text)
-    except Exception:
+    except Exception as exc:
+        _warn_fallback("document encoding", exc)
         return None
 
 
@@ -233,7 +260,8 @@ def encode_query(text: str):
     """
     try:
         return _encode(text)
-    except Exception:
+    except Exception as exc:
+        _warn_fallback("query encoding", exc)
         return None
 
 

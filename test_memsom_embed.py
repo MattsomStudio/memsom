@@ -425,5 +425,47 @@ class TestRrfNary(unittest.TestCase):
         self.assertAlmostEqual(fused[1], 1.0 / (10 + 1), places=9)
 
 
+# ---------------------------------------------------------------------------
+# A broken bge setup (e.g. FlagEmbedding older than the pinned floor) must warn,
+# not silently degrade to the default backend. Warn exactly once, then stay quiet.
+# ---------------------------------------------------------------------------
+
+class TestBgeFallbackWarning(unittest.TestCase):
+    def setUp(self):
+        memsom_embed._WARNED_FALLBACK = False
+
+    def tearDown(self):
+        memsom_embed._WARNED_FALLBACK = False
+
+    def test_encode_failure_warns_exactly_once(self):
+        import contextlib
+        import io
+
+        def boom(*_a, **_k):
+            raise TypeError("unexpected keyword argument 'devices'")
+
+        buf = io.StringIO()
+        with patch.object(memsom_embed, "_encode", boom), \
+                contextlib.redirect_stderr(buf):
+            self.assertIsNone(memsom_embed.encode_doc("x"))   # first failure -> warns
+            self.assertIsNone(memsom_embed.encode_query("y"))  # second -> stays quiet
+        out = buf.getvalue()
+        self.assertEqual(out.count("BGE-M3 backend requested"), 1,
+                         "must warn exactly once across repeated failures")
+        self.assertIn("pip show FlagEmbedding", out)  # actionable
+        self.assertIn("devices", out)                 # surfaces the real error
+
+    def test_success_is_silent(self):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with patch.object(memsom_embed, "_encode",
+                          lambda t: {"dense": [], "sparse": {}, "colbert": []}), \
+                contextlib.redirect_stderr(buf):
+            self.assertIsNotNone(memsom_embed.encode_doc("x"))
+        self.assertEqual(buf.getvalue(), "", "no warning on a healthy encode")
+
+
 if __name__ == "__main__":
     unittest.main()
