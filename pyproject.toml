@@ -32,6 +32,15 @@ classifiers = [
 # integration is reached over urllib at runtime and is NOT a pip dependency.
 dependencies = []
 
+[project.optional-dependencies]
+# Best-quality retrieval: the BGE-M3 triple-fusion backend (dense + learned
+# sparse + ColBERT late-interaction re-rank). Opt-in ONLY — the core stays
+# zero-dependency and falls back to Ollama/BM25 if these are absent. FlagEmbedding
+# pulls torch + transformers transitively (multi-GB). For CUDA acceleration,
+# install a matching torch build first (see README). Enable at runtime with
+# MEMDAG_EMBED_BACKEND=bge-m3.
+bge = ["FlagEmbedding>=1.3"]
+
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"
 

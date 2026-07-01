@@ -126,6 +126,61 @@ env var. Running straight from the repo without installing works too
 > `MEMDAG_OLLAMA_KEEP_ALIVE=0` to unload the model from VRAM immediately after every
 > call; any Ollama duration string (e.g. `10m`) holds it warm longer.
 
+### Best-quality retrieval — the BGE-M3 backend (optional, recommended)
+
+The default embedder (Ollama `nomic-embed-text`, dense-only) is fast, zero-dependency,
+and good. **For the strongest retrieval, opt into the BGE-M3 backend** — it fuses three
+signals instead of one:
+
+- **dense** (1024-dim sentence vector) — a stronger embedder than nomic
+- **sparse** (BGE-M3 learned lexical weights) — recovers exact-term matches a pure
+  dense vector blurs away
+- **ColBERT** (per-token late-interaction re-rank) — MaxSim reranking of the top
+  candidates, which separates the answer-bearing passage from near-miss distractors
+
+The gain shows up most on a large, crowded corpus where the right passage has to beat
+many similar-looking ones. **This is the recommended setup when you have a GPU and want
+the best recall.** It stays fully opt-in: without the deps or model present, memsom
+degrades silently to Ollama, then BM25 — bge is never required.
+
+**Install the extra:**
+```bash
+pip install "memsom[bge]"     # adds FlagEmbedding (+ torch, transformers); multi-GB
+```
+For **GPU/CUDA**, install the matching `torch` build *first* (see
+https://pytorch.org/get-started/locally/), then `pip install "memsom[bge]"`. On CPU it
+runs but is slow — bge-m3 is meant for a GPU. The BGE-M3 weights (~2.2 GB) download from
+Hugging Face on first use and cache locally.
+
+**Enable it (runtime switch — no reinstall):**
+```bash
+export MEMDAG_EMBED_BACKEND=bge-m3          # macOS / Linux
+$env:MEMDAG_EMBED_BACKEND = "bge-m3"        # Windows PowerShell
+#   ...or per-invocation:  memsom ask "..." --embed-backend bge-m3
+```
+
+**Re-embed your existing store** — switching backends changes the vector model and
+dimensionality (768 nomic vs 1024 bge), so run a reindex once after enabling it:
+```bash
+memsom reindex        # re-embeds every source node with the active backend
+```
+The two models' rows coexist in the same DB (tagged by model name); search uses whichever
+backend is active, so you can switch back and forth without corrupting anything.
+
+**Tuning knobs (all optional):**
+
+| Env var | Default | What it does |
+|---|---|---|
+| `MEMDAG_BGE_DEVICE` | auto | Force device, e.g. `cuda` or `cpu` |
+| `MEMDAG_BGE_UNLOAD` | off | `1` frees the ~2.2 GB model from VRAM after a `reindex` |
+| `MEMDAG_COLBERT_CANDIDATES` | `100` | How many top candidates the ColBERT step re-ranks |
+| `MEMDAG_COLBERT_MAXLEN` | `512` | Token truncation cap for encoding |
+
+> **Don't take the recommendation on faith — reproduce it.** `bench/run_recall_h2h.py` is
+> a fair-both-ways head-to-head (identical items, queries, top-k, and judge) of
+> `nomic` vs `bge-dense` vs `bge-triple` on pooled LongMemEval evidence, reporting
+> hit@1 / hit@5 / MRR / recall@k. Run it on your own data to see the delta on your corpus.
+
 ### Uninstall
 ```bash
 rm -rf ~/.memdag                    # database + virtualenv
