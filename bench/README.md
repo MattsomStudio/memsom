@@ -1,8 +1,8 @@
-# memdag integrity benchmark
+# memsom integrity benchmark
 
-Measures the property memdag actually claims: **deterministic channel-provenance
-that a poison memory cannot launder up the integrity lattice.** Not "memdag never
-shows bad data" — it's "memdag tracks where data came from precisely enough that a
+Measures the property memsom actually claims: **deterministic channel-provenance
+that a poison memory cannot launder up the integrity lattice.** Not "memsom never
+shows bad data" — it's "memsom tracks where data came from precisely enough that a
 floor can exclude it without reading its content."
 
 ## Why these metrics
@@ -20,16 +20,16 @@ ASR alone is gameable (refuse everything → ASR 0). The honest figure is the
 
 ## Run it
 
-On the PC (memdag + Ollama live there):
+On the PC (memsom + Ollama live there):
 
 ```bat
-cd C:\Users\you\memdag\bench
+cd C:\Users\you\memsom\bench
 
 :: pipe validation against the bundled fixture (no download needed)
-python run_bench.py --repo C:\Users\you\memdag --run-root C:\Users\you\bench_runs --rate 1.0 --out C:\Users\you\bench_runs\fixture_result.json
+python run_bench.py --repo C:\Users\you\memsom --run-root C:\Users\you\bench_runs --rate 1.0 --out C:\Users\you\bench_runs\fixture_result.json
 
 :: the headline number: real LongMemEval substrate
-python run_bench.py --repo C:\Users\you\memdag --run-root C:\Users\you\bench_runs ^
+python run_bench.py --repo C:\Users\you\memsom --run-root C:\Users\you\bench_runs ^
   --dataset C:\path\to\longmemeval_s.json --max-items 200 --rate 0.5 ^
   --out C:\Users\you\bench_runs\lme_result.json
 ```
@@ -46,11 +46,11 @@ python run_bench.py --repo C:\Users\you\memdag --run-root C:\Users\you\bench_run
   `external`) → ASR should drop to ~0 while utility holds, because we already
   proved the provenance to gate on is tracked correctly. That delta vs baselines
   (vanilla RAG / mem0 / Zep / SuperLocalMemory) is the killer figure.
-- **Falsifiability (also step 4):** include attacks that *should* beat memdag —
+- **Falsifiability (also step 4):** include attacks that *should* beat memsom —
   federation honor-system origin, cold-machine pre-redaction residual — and
   report where it loses.
 
-## Isolation contract (memdag quirk)
+## Isolation contract (memsom quirk)
 
 `init --data-dir DIR` ignores `MEMDAG_DB` and builds `DIR/memdag.db`; every other
 command honors `MEMDAG_DB`. The runner inits a fresh DB per item, then pins

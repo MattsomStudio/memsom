@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bootstrap.py — one-command setup for a memdag friend-beta tester.
+"""bootstrap.py — one-command setup for a memsom friend-beta tester.
 
 Pure stdlib, cross-platform. From a cloned repo:
 
@@ -8,12 +8,12 @@ Pure stdlib, cross-platform. From a cloned repo:
 
 What it does, in order:
   1. Check Python >= 3.12 (the only hard stop).
-  2. Install memdag into an isolated env (pipx if present, else a venv in ~/.memdag).
+  2. Install memsom into an isolated env (pipx if present, else a venv in ~/.memdag).
   3. Install Ollama + pull the embedding model (graceful-fail: prints manual steps
-     and CONTINUES — memdag still works on BM25 until Ollama is present).
-  4. `memdag init` -> create + migrate the DB, capture its path.
+     and CONTINUES — memsom still works on BM25 until Ollama is present).
+  4. `memsom init` -> create + migrate the DB, capture its path.
   5. Opt-in: offer to seed from your OWN local chat history.
-  6. Wire your MCP client config(s) to launch memdag (absolute exe path; backup+merge).
+  6. Wire your MCP client config(s) to launch memsom (absolute exe path; backup+merge).
   7. Print a final report.
 
 The orchestration lives in main(); the decision logic (OS, install plan, exe path,
@@ -86,11 +86,11 @@ def venv_exe_path(data_dir, name, os_name=None):
 
 def pipx_exe_path(name, os_name=None, home=None):
     home = Path(home or Path.home())
-    return (home / ".local" / "pipx" / "venvs" / "memdag" / _bin_dir_name(os_name)
+    return (home / ".local" / "pipx" / "venvs" / "memsom" / _bin_dir_name(os_name)
             / f"{name}{_exe_suffix(os_name)}")
 
 
-def resolve_exe_path(method, data_dir, name="memdag-mcp", os_name=None, home=None):
+def resolve_exe_path(method, data_dir, name="memsom-mcp", os_name=None, home=None):
     """Absolute path to an installed console script. Always absolute — GUI MCP
     clients do not inherit the shell PATH, so a bare name fails with spawn ENOENT."""
     if method == "venv":
@@ -144,8 +144,8 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 
-def install_memdag(repo_dir, data_dir, os_name=None):
-    """Install memdag isolated; return (method, mcp_exe, cli_exe)."""
+def install_memsom(repo_dir, data_dir, os_name=None):
+    """Install memsom isolated; return (method, mcp_exe, cli_exe)."""
     if shutil.which("pipx"):
         _run(["pipx", "install", "--force", str(repo_dir)])
         method = "pipx"
@@ -155,8 +155,8 @@ def install_memdag(repo_dir, data_dir, os_name=None):
         pip = venv_exe_path(data_dir, "pip", os_name=os_name)
         _run([str(pip), "install", str(repo_dir)])
         method = "venv"
-    mcp = resolve_exe_path(method, data_dir, "memdag-mcp", os_name=os_name)
-    cli = resolve_exe_path(method, data_dir, "memdag", os_name=os_name)
+    mcp = resolve_exe_path(method, data_dir, "memsom-mcp", os_name=os_name)
+    cli = resolve_exe_path(method, data_dir, "memsom", os_name=os_name)
     return method, mcp, cli
 
 
@@ -167,7 +167,7 @@ def run_init(cli_exe, data_dir):
     # a DB path and proceeding as if setup succeeded.
     if r.returncode != 0:
         raise RuntimeError(
-            f"`memdag init` failed (exit {r.returncode}): {(r.stderr or '').strip()}"
+            f"`memsom init` failed (exit {r.returncode}): {(r.stderr or '').strip()}"
         )
     db = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else \
         str(Path(data_dir).expanduser() / "memdag.db")
@@ -179,7 +179,7 @@ def run_init(cli_exe, data_dir):
 # ---------------------------------------------------------------------------
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="bootstrap.py", description="Set up memdag for testing.")
+    ap = argparse.ArgumentParser(prog="bootstrap.py", description="Set up memsom for testing.")
     ap.add_argument("--data-dir", default=DATA_DIR_DEFAULT)
     ap.add_argument("--print-only", action="store_true",
                     help="print client-config snippets instead of writing them")
@@ -188,7 +188,7 @@ def main(argv=None):
                     help="comma-separated subset of: " + ",".join(CLIENTS))
     args = ap.parse_args(argv)
 
-    print("=== memdag bootstrap ===")
+    print("=== memsom bootstrap ===")
 
     # 1. Python gate (the one hard stop)
     if not python_ok():
@@ -201,12 +201,12 @@ def main(argv=None):
     data_dir = args.data_dir
     os_name = platform.system()
 
-    # 2. Install memdag
-    print("\n[1/6] Installing memdag (isolated)...")
+    # 2. Install memsom
+    print("\n[1/6] Installing memsom (isolated)...")
     try:
-        method, mcp_exe, cli_exe = install_memdag(repo_dir, data_dir, os_name=os_name)
+        method, mcp_exe, cli_exe = install_memsom(repo_dir, data_dir, os_name=os_name)
     except subprocess.CalledProcessError as exc:
-        print(f"ERROR: memdag install failed (exit {exc.returncode}). "
+        print(f"ERROR: memsom install failed (exit {exc.returncode}). "
               f"Aborting — nothing was wired.", file=sys.stderr)
         return 1
     print(f"  installed via {method}; server exe -> {mcp_exe}")
@@ -218,7 +218,7 @@ def main(argv=None):
     if ostatus.get("ok"):
         print(f"  ollama ready; {EMBED_MODEL} pulled.")
     else:
-        print(f"  WARNING: Ollama not ready ({ostatus.get('reason', '?')}). memdag will run on "
+        print(f"  WARNING: Ollama not ready ({ostatus.get('reason', '?')}). memsom will run on "
               f"BM25-only until you fix this:\n    {ostatus.get('manual', '')}")
 
     # 4. init
@@ -237,7 +237,7 @@ def main(argv=None):
         if should_ingest(input("  Ingest your chat history now? [y/N] ")):
             subprocess.run([str(cli_exe), "ingest-chats", "--yes"])
         else:
-            print("  skipped (you can run `memdag ingest-chats` later).")
+            print("  skipped (you can run `memsom ingest-chats` later).")
     else:
         print("\n[4/6] Chat ingest skipped (--no-ingest).")
 
@@ -256,7 +256,7 @@ def main(argv=None):
         rcs.append(subprocess.run(wire).returncode)
     if not args.print_only and any(rc != 0 for rc in rcs):
         print("ERROR: MCP client wiring failed; setup is incomplete. "
-              "Run `memdag doctor` and re-run bootstrap.", file=sys.stderr)
+              "Run `memsom doctor` and re-run bootstrap.", file=sys.stderr)
         return 1
 
     # 7. Wire the Claude Code memory loop (skills + Stop hook + CLAUDE.md block).
@@ -269,12 +269,12 @@ def main(argv=None):
         wc.append("--print-only")
     if subprocess.run(wc).returncode != 0 and not args.print_only:
         print("  WARNING: memory-loop wiring incomplete (skills/hook/CLAUDE.md). The "
-              "MCP server still works; re-run `memdag wire-claude` to finish.")
+              "MCP server still works; re-run `memsom wire-claude` to finish.")
 
     print("\n=== done ===")
     print(f"DB: {db_path}")
-    print("Restart your MCP client, then ask it to use the memdag tools.")
-    print("For a bug report, run:  memdag doctor   (paste the output into a GitHub issue)")
+    print("Restart your MCP client, then ask it to use the memsom tools.")
+    print("For a bug report, run:  memsom doctor   (paste the output into a GitHub issue)")
     return 0
 
 

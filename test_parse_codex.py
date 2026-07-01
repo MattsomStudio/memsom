@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import memdag_chats
+import memsom_chats
 
 
 def write_jsonl(path, records):
@@ -47,7 +47,7 @@ class TestParseCodex(unittest.TestCase):
             _user_msg("make an svg of a pelican"),
             _assistant_msg("done, saved it"),
         ])
-        recs = memdag_chats.parse_file("codex", self.path)
+        recs = memsom_chats.parse_file("codex", self.path)
         self.assertEqual([r["role"] for r in recs], ["user", "assistant"])
         self.assertEqual([r["text"] for r in recs],
                          ["make an svg of a pelican", "done, saved it"])
@@ -60,7 +60,7 @@ class TestParseCodex(unittest.TestCase):
             _user_msg("only once please"),
             _event_mirror("user", "only once please"),
         ])
-        recs = memdag_chats.parse_file("codex", self.path)
+        recs = memsom_chats.parse_file("codex", self.path)
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["text"], "only once please")
 
@@ -75,7 +75,7 @@ class TestParseCodex(unittest.TestCase):
              "payload": {"type": "function_call_output", "call_id": "c1", "output": "stuff"}},
             {"type": "event_msg", "payload": {"type": "token_count", "total": 42}},
         ])
-        recs = memdag_chats.parse_file("codex", self.path)
+        recs = memsom_chats.parse_file("codex", self.path)
         self.assertEqual(recs, [])
 
     def test_drops_developer_role(self):
@@ -85,7 +85,7 @@ class TestParseCodex(unittest.TestCase):
                          "content": [{"type": "input_text", "text": "system preamble"}]}},
             _user_msg("real user text"),
         ])
-        recs = memdag_chats.parse_file("codex", self.path)
+        recs = memsom_chats.parse_file("codex", self.path)
         self.assertEqual([r["role"] for r in recs], ["user"])
 
 

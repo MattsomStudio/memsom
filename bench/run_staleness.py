@@ -1,20 +1,20 @@
 r"""run_staleness — the staleness head-to-head orchestrator.
 
 Per item, per system, on an isolated store:
-  1. seed v1 under a stable source_ref        (memdag: ingest-text --ref)
+  1. seed v1 under a stable source_ref        (memsom: ingest-text --ref)
   2. ask  -> derive answer A1                  (capture its node id)
-  3. update the source to v2 (same ref)        (memdag: supersede + cascade;
+  3. update the source to v2 (same ref)        (memsom: supersede + cascade;
                                                  RAG/Mem0: just add the new version)
-  4. attribution: is A1 now flagged affected?  (memdag: exact; others: n/a)
+  4. attribution: is A1 now flagged affected?  (memsom: exact; others: n/a)
   5. ask  -> A2; measure fresh/stale serving + whether staleness is flagged
 
-Headline = attribution (memdag answers exactly; no-provenance systems are n/a,
-never scored 0). Serving is the honest secondary (memdag and a good RAG often
-TIE on fresh_serve — only memdag can attribute + flag).
+Headline = attribution (memsom answers exactly; no-provenance systems are n/a,
+never scored 0). Serving is the honest secondary (memsom and a good RAG often
+TIE on fresh_serve — only memsom can attribute + flag).
 
 Run (env-safe core, no mem0/API):
-  python run_staleness.py --repo C:\Users\you\memdag --run-root C:\Users\you\stale_runs \
-      --systems memdag,memdag-bm25,rag --out C:\Users\you\stale_runs\fixture.json
+  python run_staleness.py --repo C:\Users\you\memsom --run-root C:\Users\you\stale_runs \
+      --systems memsom,memsom-bm25,rag --out C:\Users\you\stale_runs\fixture.json
 LongMemEval knowledge-update scale:
   ... --dataset C:\path\longmemeval_s.json --max-items 100
 """
@@ -35,20 +35,20 @@ from score_stale import score_stale_item
 
 
 def _make_adapter(name: str, repo: str):
-    from adapters.memdag_adapter import MemdagAdapter
+    from adapters.memsom_adapter import MemsomAdapter
     from adapters.rag_adapter import RagAdapter
-    if name == "memdag":
-        return MemdagAdapter(repo=repo, no_embed=False)
-    if name == "memdag-fresh":
-        return MemdagAdapter(repo=repo, no_embed=False, fresh_only=True)
-    if name == "memdag-prefer-fresh":
-        return MemdagAdapter(repo=repo, no_embed=False, prefer_fresh=True)
-    if name == "memdag-bm25":
-        return MemdagAdapter(repo=repo, no_embed=True)
-    if name == "memdag-bm25-fresh":
-        return MemdagAdapter(repo=repo, no_embed=True, fresh_only=True)
-    if name == "memdag-bm25-prefer":
-        return MemdagAdapter(repo=repo, no_embed=True, prefer_fresh=True)
+    if name == "memsom":
+        return MemsomAdapter(repo=repo, no_embed=False)
+    if name == "memsom-fresh":
+        return MemsomAdapter(repo=repo, no_embed=False, fresh_only=True)
+    if name == "memsom-prefer-fresh":
+        return MemsomAdapter(repo=repo, no_embed=False, prefer_fresh=True)
+    if name == "memsom-bm25":
+        return MemsomAdapter(repo=repo, no_embed=True)
+    if name == "memsom-bm25-fresh":
+        return MemsomAdapter(repo=repo, no_embed=True, fresh_only=True)
+    if name == "memsom-bm25-prefer":
+        return MemsomAdapter(repo=repo, no_embed=True, prefer_fresh=True)
     if name == "rag":
         return RagAdapter()
     if name == "mem0":
@@ -103,8 +103,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="run_staleness")
     ap.add_argument("--repo", required=True)
     ap.add_argument("--run-root", required=True)
-    ap.add_argument("--systems", default="memdag,memdag-fresh,memdag-prefer-fresh,rag",
-                    help="comma list: memdag,memdag-fresh,memdag-prefer-fresh,memdag-bm25,rag,mem0")
+    ap.add_argument("--systems", default="memsom,memsom-fresh,memsom-prefer-fresh,rag",
+                    help="comma list: memsom,memsom-fresh,memsom-prefer-fresh,memsom-bm25,rag,mem0")
     ap.add_argument("--dataset", default=None,
                     help="LongMemEval json (knowledge-update); default = bundled fixture")
     ap.add_argument("--fixture", default=None,

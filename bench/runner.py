@@ -1,11 +1,11 @@
-"""runner — thin, deterministic wrapper around the memdag CLI for benchmarking.
+"""runner — thin, deterministic wrapper around the memsom CLI for benchmarking.
 
-The whole harness talks to memdag ONLY through its CLI (memdag_cli.py). That is
+The whole harness talks to memsom ONLY through its CLI (memsom_cli.py). That is
 deliberate: the benchmark must measure the shipping product's behaviour, not poke
 at internals that could drift. If a metric can't be derived from CLI output, it
 isn't a property the product actually exposes.
 
-Isolation contract (verified against memdag 2026-06-16):
+Isolation contract (verified against memsom 2026-06-16):
   - `init --data-dir DIR`  builds a fresh DB at DIR/memdag.db. It IGNORES MEMDAG_DB.
   - every other command (add, ingest-text, reindex, ask, retrieve, dump) resolves
     its DB from `MEMDAG_DB` (falling back to repo/memdag.db). So we init once into
@@ -36,7 +36,7 @@ class Citation:
 
 @dataclass
 class AskResult:
-    composed: bool                       # did memdag compose, or refuse?
+    composed: bool                       # did memsom compose, or refuse?
     answer_text: str                     # concatenation of all answer bullet texts
     citations: list[Citation] = field(default_factory=list)
     used: int = 0                        # sources used count from the trailer
@@ -60,7 +60,7 @@ INTEGRITY_ORDER = {"external": 0, "agent-derived": 1, "user": 2, "endorsed": 3}
 #   ...
 #   stored as node [N] | integrity: LABEL (floor of P parents) | sources
 #       considered: X, used: Y, excluded: ...
-# Refusal: "[memdag] no live sources - refusing to compose ..."
+# Refusal: "[memsom] no live sources - refusing to compose ..."
 _BULLET = re.compile(r"^-\s+(?P<text>.*?)\s*\[mem:(?P<id>\d+)\|(?P<chan>[a-z-]+)\]\s*$")
 _TRAILER = re.compile(
     r"stored as node \[(?P<node>\d+)\].*?integrity:\s*(?P<integ>[A-Z-]+).*?"
@@ -100,11 +100,11 @@ def parse_ask(out: str) -> "AskResult":
     return res
 
 
-class MemdagRunner:
+class MemsomRunner:
     def __init__(self, repo: str, python: str = "python", data_dir: str | None = None):
         self.repo = Path(repo)
         self.python = python
-        self.cli = str(self.repo / "memdag_cli.py")
+        self.cli = str(self.repo / "memsom_cli.py")
         self.data_dir: Path | None = Path(data_dir) if data_dir else None
 
     # -- lifecycle --------------------------------------------------------
@@ -162,7 +162,7 @@ class MemdagRunner:
             cwd=str(self.repo), env=env,
             capture_output=True, text=True,
         )
-        # memdag prints answers to stdout and status to stderr; we want both.
+        # memsom prints answers to stdout and status to stderr; we want both.
         return (proc.stdout or "") + (proc.stderr or "")
 
     def _parse_ask(self, out: str) -> AskResult:

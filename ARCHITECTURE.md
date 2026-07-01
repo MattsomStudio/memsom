@@ -1,10 +1,10 @@
-# memdag — Architecture
+# memsom — Architecture
 
 A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 28 runtime modules / ~11,800 LOC / 580 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
 
 ## The mental model
 
-Most memory systems store facts and relate-to links. memdag also stores **came-from** links — a derivation DAG — so every answer can be traced to its sources, revoked, blamed, and gated. Three conceptual tiers:
+Most memory systems store facts and relate-to links. memsom also stores **came-from** links — a derivation DAG — so every answer can be traced to its sources, revoked, blamed, and gated. Three conceptual tiers:
 
 ```
 APPS       taint · blame · revocation · trust algebra · GraphRAG · anticipatory · weights · vault sync
@@ -23,7 +23,7 @@ Integrity flows **down** (one external source poisons everything derived from it
 
 ## Data model (SQLite)
 
-The **frozen core** owns two tables — `memdag.py` + `test_memdag.py` are kept byte-identical across every feature build (the trust anchor):
+The **frozen core** owns two tables — `memsom.py` + `test_memsom.py` are kept byte-identical across every feature build (the trust anchor; baseline re-anchored at the 2026-07-01 memdag→memsom rename, which only renamed the file + its `import`):
 
 ```sql
 nodes(id, content, channel, label, source_ref, created_at,
@@ -33,7 +33,7 @@ nodes(id, content, channel, label, source_ref, created_at,
 edges(child, parent)                 -- came-from / provenance (the DAG)
 ```
 
-Feature modules extend `nodes` **additively** via `memdag_schema.add_column` (never altering frozen behavior): `content_hash, status, quarantine_reason/at, redacted/at, redact_reason, archived/at, conf_label, uuid, origin, obsidian_path/mtime`. Each owns its own tables: `rel_edges` (relates-to/wikilinks), `postings/docstats/embeddings` (retrieval index), `elevations` (audited integrity-elevation log), `gate_log`, `claims/claim_assertions/corroborations/independence_roots`, `query_log/prefetch_cache`, `trusted_origins`, `redaction_log`.
+Feature modules extend `nodes` **additively** via `memsom_schema.add_column` (never altering frozen behavior): `content_hash, status, quarantine_reason/at, redacted/at, redact_reason, archived/at, conf_label, uuid, origin, obsidian_path/mtime`. Each owns its own tables: `rel_edges` (relates-to/wikilinks), `postings/docstats/embeddings` (retrieval index), `elevations` (audited integrity-elevation log), `gate_log`, `claims/claim_assertions/corroborations/independence_roots`, `query_log/prefetch_cache`, `trusted_origins`, `redaction_log`.
 
 **Two edge types, deliberately separate:**
 - `edges` (**came-from**): causal, one-hop, set by `derive_node`. Carries the Biba integrity floor.
@@ -47,7 +47,7 @@ RANK = endorsed:3 > user:2 > agent-derived:1 > external:0
 
 Channel is stamped by the transport/adapter, **never inferred from content**. `insert_node` stamps `label = RANK[channel]`. `derive_node` mints `agent-derived` nodes with `label = min(parent labels)` — the laundering-proof property: you cannot wash external content up to `user` by summarizing it. (In an injection benchmark, integrity held: laundering 0.00 / gated-ASR 0.00 across 96 attacks, at ~0 tokens and single-digit milliseconds per write.)
 
-## Frozen core — `memdag.py`
+## Frozen core — `memsom.py`
 
 - `insert_node(content, channel, label=None, source_ref)` — source nodes; label from channel.
 - `derive_node(content, parent_ids)` — mints `agent-derived`, `label=min(parents)`, writes provenance edges, all under `BEGIN IMMEDIATE` so a concurrent revoke can't race the liveness check.
@@ -56,36 +56,36 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 
 ## Layers (module map)
 
-**Schema (`memdag_schema`)** — `add_column`/`ensure_table` (idempotent DDL), `PRAGMA user_version` versioned migrations, and **`taint_filter_clauses` — the ONE shared "untainted pool" WHERE-fragment** every read path inherits (`tombstoned=0 AND status!='quarantined' AND redacted=0 AND archived=0 AND conf_label<=clearance`). Single source of truth = no pool drift.
+**Schema (`memsom_schema`)** — `add_column`/`ensure_table` (idempotent DDL), `PRAGMA user_version` versioned migrations, and **`taint_filter_clauses` — the ONE shared "untainted pool" WHERE-fragment** every read path inherits (`tombstoned=0 AND status!='quarantined' AND redacted=0 AND archived=0 AND conf_label<=clearance`). Single source of truth = no pool drift.
 
 **Integrity enforcement:**
-- `memdag_ingest` — the real write path: chunking, content-hash dedup (channel-aware), caller-layer guards **F-13** (`MEMDAG_CHANNEL_CEILING` caps ingest rank) and **F-14** (label dictated solely by channel, never a caller-supplied value).
-- `memdag_recompute` — order-independent multi-hop re-flooring (`effective_labels`, memoized DFS, O(V+E)).
-- `memdag_gate` — `check_action(node, required_floor)`: **the only enforcement point** (read paths never gate; the Windows-MIC / CaMeL action-boundary pattern). Names the weakest-leaf culprit on deny; logs every call.
-- `memdag_trust` — lattice `meet`/`join` + **audited `elevate`** (manual only; force-gated on the provenance floor, not the channel string).
-- `memdag_corroborate` — content-free trust *lift*: k independent **registered** roots asserting the same structured claim mint a lift node, **capped at agent-derived(1)**, fail-closed, auto-dropped if any asserting source is revoked.
+- `memsom_ingest` — the real write path: chunking, content-hash dedup (channel-aware), caller-layer guards **F-13** (`MEMDAG_CHANNEL_CEILING` caps ingest rank) and **F-14** (label dictated solely by channel, never a caller-supplied value).
+- `memsom_recompute` — order-independent multi-hop re-flooring (`effective_labels`, memoized DFS, O(V+E)).
+- `memsom_gate` — `check_action(node, required_floor)`: **the only enforcement point** (read paths never gate; the Windows-MIC / CaMeL action-boundary pattern). Names the weakest-leaf culprit on deny; logs every call.
+- `memsom_trust` — lattice `meet`/`join` + **audited `elevate`** (manual only; force-gated on the provenance floor, not the channel string).
+- `memsom_corroborate` — content-free trust *lift*: k independent **registered** roots asserting the same structured claim mint a lift node, **capped at agent-derived(1)**, fail-closed, auto-dropped if any asserting source is revoked.
 
-**Confidentiality (`memdag_confid`)** — Bell-LaPadula: `classify` (manual roots), `recompute_conf` (`max(parents)`, high-water-mark), order-independent `recompute_conf_all` (Gauss-Seidel fixpoint). Clearance filters results, not integrity conduction.
+**Confidentiality (`memsom_confid`)** — Bell-LaPadula: `classify` (manual roots), `recompute_conf` (`max(parents)`, high-water-mark), order-independent `recompute_conf_all` (Gauss-Seidel fixpoint). Clearance filters results, not integrity conduction.
 
 **Lifecycle:**
-- `memdag_redact` — destroys payload (`content=''`) but **preserves DAG shape** (edges/label/dates survive → blame still works), transitive cascade, and **F-15** purges the retrieval index so a redacted node can't resurface via BM25/vector.
-- `memdag_quarantine` — consolidation gate: external-tainted agent-derived nodes get `status='quarantined'`; promotion requires a live endorsed ancestor. External taint can never silently promote.
-- `memdag_compact` — consolidation engine: groups live episodes, mints a summary (`label=min`), archives members (edges preserved for blame).
-- `memdag_heal` — invariant checker/rebuilder (dangling edges, stored-vs-effective integrity/conf mismatch, orphaned live children).
-- `memdag_blame` — DFS trace from a node to all root sources; immutable history shows tombstoned/redacted state; clearance suppresses content but keeps metadata for audit.
-- `memdag_federation` — multi-machine sync: `export/import_changeset`, **first-death-wins** (monotonic — importing a stale live copy can't resurrect a tombstone), **trusted-origin allowlist** (default-deny; untrusted imports clamp channel→external + a conf floor, edges origin-authenticated on UUIDs actually inserted).
+- `memsom_redact` — destroys payload (`content=''`) but **preserves DAG shape** (edges/label/dates survive → blame still works), transitive cascade, and **F-15** purges the retrieval index so a redacted node can't resurface via BM25/vector.
+- `memsom_quarantine` — consolidation gate: external-tainted agent-derived nodes get `status='quarantined'`; promotion requires a live endorsed ancestor. External taint can never silently promote.
+- `memsom_compact` — consolidation engine: groups live episodes, mints a summary (`label=min`), archives members (edges preserved for blame).
+- `memsom_heal` — invariant checker/rebuilder (dangling edges, stored-vs-effective integrity/conf mismatch, orphaned live children).
+- `memsom_blame` — DFS trace from a node to all root sources; immutable history shows tombstoned/redacted state; clearance suppresses content but keeps metadata for audit.
+- `memsom_federation` — multi-machine sync: `export/import_changeset`, **first-death-wins** (monotonic — importing a stale live copy can't resurrect a tombstone), **trusted-origin allowlist** (default-deny; untrusted imports clamp channel→external + a conf floor, edges origin-authenticated on UUIDs actually inserted).
 
 **Retrieval & answering:**
-- `memdag_retrieve` — hybrid **BM25 (pure stdlib) + optional Ollama vectors**, RRF-fused, pool-filtered. `retrieve_graph` = **GraphRAG-lite**: re-ranks the retrieved pool by the wikilink graph — a relevant note linked from a strong hit is boosted into the top-k, without ever widening past the trusted pool (`base.keys() ⊆ pool`).
-- `memdag_anticipatory` — surprise-gated writes (cite existing on low novelty) + prefetch cache. Reads/learns **only from untainted memory** — which is why taint had to ship before it.
-- `memdag_llm` — **opt-in** Ollama compose behind a **citation firewall**: every line must carry a valid `[mem:id|channel]` tag validated against real sources, else it falls back to deterministic `compose`. Guarantees per-line provenance (not semantic faithfulness — a documented boundary).
-- `memdag_distill` / `memdag_reflex` — provenance-gated training export: only untainted + consolidated memory is eligible to bake into weights.
+- `memsom_retrieve` — hybrid **BM25 (pure stdlib) + optional Ollama vectors**, RRF-fused, pool-filtered. `retrieve_graph` = **GraphRAG-lite**: re-ranks the retrieved pool by the wikilink graph — a relevant note linked from a strong hit is boosted into the top-k, without ever widening past the trusted pool (`base.keys() ⊆ pool`).
+- `memsom_anticipatory` — surprise-gated writes (cite existing on low novelty) + prefetch cache. Reads/learns **only from untainted memory** — which is why taint had to ship before it.
+- `memsom_llm` — **opt-in** Ollama compose behind a **citation firewall**: every line must carry a valid `[mem:id|channel]` tag validated against real sources, else it falls back to deterministic `compose`. Guarantees per-line provenance (not semantic faithfulness — a documented boundary).
+- `memsom_distill` / `memsom_reflex` — provenance-gated training export: only untainted + consolidated memory is eligible to bake into weights.
 
 **Surfaces:**
-- `memdag_cli` — unified CLI (35 subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
-- `memdag_mcp` — stdio MCP server (JSON-RPC 2.0, ~18 tools), all diagnostics to stderr.
-- `memdag_obsidian` — vault integration: `sync_vault` (notes → nodes, `[[wikilinks]]` → `rel_edges`), `export_note`, `watch_vault`. A note's frontmatter `memdag-channel` can only **lower** integrity (`min(default, declared)`) — closing the write→re-ingest laundering loop.
-- `memdag_config` (MCP client wiring), `bootstrap.py` (one-command install), `memdag_chats` (chat import).
+- `memsom_cli` — unified CLI (35 subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
+- `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, ~18 tools), all diagnostics to stderr.
+- `memsom_obsidian` — vault integration: `sync_vault` (notes → nodes, `[[wikilinks]]` → `rel_edges`), `export_note`, `watch_vault`. A note's frontmatter `memsom-channel` can only **lower** integrity (`min(default, declared)`) — closing the write→re-ingest laundering loop.
+- `memsom_config` (MCP client wiring), `bootstrap.py` (one-command install), `memsom_chats` (chat import).
 
 ## End-to-end: `ask "X" --retrieve --graph --clearance public`
 

@@ -1,6 +1,6 @@
 {
   "name": "staleness_min",
-  "note": "Tiny built-in staleness set. Validates the staleness harness end-to-end against real memdag WITHOUT the LongMemEval download. Each item seeds a v1 fact under a stable source_ref, an answer is derived, then (for 'updated' items) the SAME source is re-ingested with a v2 fact on the SAME channel (a legitimate update, NOT external poison) -> the derived answer goes stale. 'control' items get no update and must stay fresh (precision). These prove the pipe; the headline number is the LongMemEval knowledge-update run.",
+  "note": "Tiny built-in staleness set. Validates the staleness harness end-to-end against real memsom WITHOUT the LongMemEval download. Each item seeds a v1 fact under a stable source_ref, an answer is derived, then (for 'updated' items) the SAME source is re-ingested with a v2 fact on the SAME channel (a legitimate update, NOT external poison) -> the derived answer goes stale. 'control' items get no update and must stay fresh (precision). These prove the pipe; the headline number is the LongMemEval knowledge-update run.",
   "items": [
     {
       "id": "st-001",

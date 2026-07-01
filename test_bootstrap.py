@@ -36,18 +36,18 @@ class TestExePath(unittest.TestCase):
     # is os_name-driven, which is exactly the cross-OS behaviour we care about).
     def test_records_absolute_exe_path(self):
         win = bootstrap.resolve_exe_path("venv", "~/.memdag", os_name="Windows")
-        self.assertEqual(win.name, "memdag-mcp.exe")
+        self.assertEqual(win.name, "memsom-mcp.exe")
         self.assertIn("Scripts", win.parts)
         mac = bootstrap.resolve_exe_path("venv", "~/.memdag", os_name="Darwin")
-        self.assertEqual(mac.name, "memdag-mcp")
+        self.assertEqual(mac.name, "memsom-mcp")
         self.assertIn("bin", mac.parts)
         self.assertTrue(mac.is_absolute())  # expanduser -> absolute on any host
 
     def test_pipx_path(self):
         p = bootstrap.resolve_exe_path("pipx", "~/.memdag", os_name="Linux", home="/home/u")
-        self.assertEqual(p.name, "memdag-mcp")
+        self.assertEqual(p.name, "memsom-mcp")
         self.assertEqual(p.parts[-2], "bin")
-        for part in ("pipx", "venvs", "memdag"):
+        for part in ("pipx", "venvs", "memsom"):
             self.assertIn(part, p.parts)
 
 
@@ -87,8 +87,8 @@ class TestWireFailureAborts(unittest.TestCase):
     '=== done ===' — i.e. an unconfigured client is never reported as success."""
 
     def test_nonzero_wire_aborts_and_no_done(self):
-        with mock.patch.object(bootstrap, "install_memdag",
-                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+        with mock.patch.object(bootstrap, "install_memsom",
+                               return_value=("venv", Path("/abs/memsom-mcp"), Path("/abs/memsom"))), \
              mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
              mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
              mock.patch.object(bootstrap.subprocess, "run",
@@ -102,8 +102,8 @@ class TestWireFailureAborts(unittest.TestCase):
 
     def test_zero_wire_completes(self):
         # Control: a clean (rc 0) wire reaches '=== done ===' and returns 0.
-        with mock.patch.object(bootstrap, "install_memdag",
-                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+        with mock.patch.object(bootstrap, "install_memsom",
+                               return_value=("venv", Path("/abs/memsom-mcp"), Path("/abs/memsom"))), \
              mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
              mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
              mock.patch.object(bootstrap.subprocess, "run",
@@ -122,8 +122,8 @@ class TestMemoryLoopStepSoftFails(unittest.TestCase):
 
     def test_wire_claude_failure_warns_but_completes(self):
         # call order: subprocess.run #1 = wire-config (ok), #2 = wire-claude (fails)
-        with mock.patch.object(bootstrap, "install_memdag",
-                               return_value=("venv", Path("/abs/memdag-mcp"), Path("/abs/memdag"))), \
+        with mock.patch.object(bootstrap, "install_memsom",
+                               return_value=("venv", Path("/abs/memsom-mcp"), Path("/abs/memsom"))), \
              mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}), \
              mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db"), \
              mock.patch.object(bootstrap.subprocess, "run",

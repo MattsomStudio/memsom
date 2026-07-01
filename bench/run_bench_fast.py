@@ -1,17 +1,17 @@
 """run_bench_fast — same benchmark as run_bench.py, ~30x faster.
 
-run_bench.py spawns a fresh Python interpreter for EVERY memdag command (init,
+run_bench.py spawns a fresh Python interpreter for EVERY memsom command (init,
 each add, reindex, ask). On Windows that cold-start dominates: ~30 spawns/item.
 
-This driver imports memdag_cli ONCE and calls `memdag_cli.main(argv)` in-process
+This driver imports memsom_cli ONCE and calls `memsom_cli.main(argv)` in-process
 in a loop. Identical code paths, identical stdout contract, identical parser —
 the interpreter + import cost is paid once for the whole run instead of per
 command. Measures exactly what run_bench.py measures; only the plumbing differs.
 
-Must run ON the box where memdag lives (it imports memdag_cli).
+Must run ON the box where memsom lives (it imports memsom_cli).
 
 Usage:
-  python run_bench_fast.py --repo C:\\Users\\you\\memdag ^
+  python run_bench_fast.py --repo C:\\Users\\you\\memsom ^
     --run-root C:\\Users\\you\\bench_runs_fast ^
     --dataset C:\\Users\\you\\lme_data\\longmemeval_oracle.json --rate 0.5 ^
     --out C:\\Users\\you\\bench_runs_fast\\lme_result.json
@@ -34,14 +34,14 @@ from poison import select_poisoned
 from score import score_item, aggregate, ItemScore
 from runner import parse_ask
 
-# memdag_cli is imported lazily in main() once --repo is known.
-memdag_cli = None
+# memsom_cli is imported lazily in main() once --repo is known.
+memsom_cli = None
 
 
 def _call(argv: list[str]) -> str:
-    """Invoke a memdag CLI command in-process, capturing stdout+stderr.
+    """Invoke a memsom CLI command in-process, capturing stdout+stderr.
 
-    memdag refusal paths sys.exit(1) AFTER printing the message, so we swallow
+    memsom refusal paths sys.exit(1) AFTER printing the message, so we swallow
     SystemExit and keep the captured text for the parser. Any other exception is
     recorded in the captured text so a single bad item degrades to a refusal
     rather than killing the whole run.
@@ -49,7 +49,7 @@ def _call(argv: list[str]) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            memdag_cli.main(argv)
+            memsom_cli.main(argv)
         except SystemExit:
             pass
         except Exception as e:  # noqa: BLE001 - we WANT to contain per-item blowups
@@ -96,8 +96,8 @@ def run_arm(items, poison_ids, run_root: Path, arm: str, topk, clearance, verbos
 
 
 def main() -> int:
-    global memdag_cli
-    ap = argparse.ArgumentParser(description="memdag integrity benchmark (fast, in-process)")
+    global memsom_cli
+    ap = argparse.ArgumentParser(description="memsom integrity benchmark (fast, in-process)")
     ap.add_argument("--repo", required=True)
     ap.add_argument("--run-root", required=True)
     ap.add_argument("--dataset", default=None)
@@ -110,8 +110,8 @@ def main() -> int:
     args = ap.parse_args()
 
     sys.path.insert(0, args.repo)
-    import memdag_cli as _cli  # noqa: E402
-    memdag_cli = _cli
+    import memsom_cli as _cli  # noqa: E402
+    memsom_cli = _cli
 
     if args.dataset:
         items, report = from_longmemeval(args.dataset, max_items=args.max_items)
@@ -143,7 +143,7 @@ def main() -> int:
     agg_clean, agg_pois = aggregate(clean), aggregate(pois)
     n_runs = len(clean) + len(pois)
 
-    print("\n================ memdag integrity benchmark (fast) ================")
+    print("\n================ memsom integrity benchmark (fast) ================")
     print(f"substrate : {substrate}")
     print(f"items     : {len(items)}   poison rate: {args.rate}   poisoned: {len(poison_ids)}")
     print(f"time      : {elapsed:.0f}s for {n_runs} item-runs ({elapsed/max(1,n_runs):.2f}s/run)")

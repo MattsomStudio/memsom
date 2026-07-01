@@ -5,7 +5,7 @@ Fairness choices:
   DELETE), so we let it do that (`infer=True`) -- that's the real Mem0, and also
   its real cost + attack surface.
 - For ANSWERING we compose deterministically (concat retrieved memories), exactly
-  like memdag/rag, so the comparison isn't muddied by who has the better answer-
+  like memsom/rag, so the comparison isn't muddied by who has the better answer-
   writer. The variable under test is "does the poison memory survive into what's
   retrieved", not prose quality.
 - Provenance: Mem0 has none. We stash the origin channel in each memory's metadata

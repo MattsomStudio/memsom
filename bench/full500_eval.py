@@ -1,5 +1,5 @@
 """full500_eval — the COMPLETE benchmark (all 500 LongMemEval questions, ALL types,
-not the poison-restricted 192 subset), with memdag's REAL shipped baseline
+not the poison-restricted 192 subset), with memsom's REAL shipped baseline
 (BM25 + nomic-dense equal RRF) + an m3 cross-encoder rerank. No BGE service needed
 (nomic via Ollama, up). Harder question types (multi-session, temporal) are where a
 reranker pays off, so this is the honest place a >=+0.1 gain could legitimately live.
@@ -13,9 +13,9 @@ from collections import defaultdict
 from pathlib import Path
 import numpy as np
 
-BENCH = r"C:\Users\you\memdag\bench"; REPO = r"C:\Users\you\memdag"
+BENCH = r"C:\Users\you\memsom\bench"; REPO = r"C:\Users\you\memsom"
 sys.path.insert(0, BENCH); sys.path.insert(0, REPO)
-from memdag_retrieve import tokenize                       # noqa: E402
+from memsom_retrieve import tokenize                       # noqa: E402
 
 RRF_C = 60; K1 = 1.2; B = 0.75
 NOMIC_URL = "http://localhost:11434/api/embed"; NOMIC_MODEL = "nomic-embed-text"
@@ -166,7 +166,7 @@ def main():
         qv = qcache[hashlib.sha1(q.encode()).hexdigest()]
         s_nom = cos_all(qv, nom_doc)
         s_bm = bm25_q(q, postings, doclen, avgdl, idf, N)
-        base = rrf_term(s_bm) + rrf_term(s_nom)            # memdag shipped
+        base = rrf_term(s_bm) + rrf_term(s_nom)            # memsom shipped
         order = np.argsort(-base).tolist()
         bh = 1.0 if order[0] in gold else 0.0
         base_h1 += bh
@@ -181,10 +181,10 @@ def main():
 
     n = len(items)
     print("\n" + "=" * 70)
-    print(f"  FULL-500 (all types) — memdag BM25+nomic  vs  + m3 cross-encoder  (top-{args.topk})")
+    print(f"  FULL-500 (all types) — memsom BM25+nomic  vs  + m3 cross-encoder  (top-{args.topk})")
     print(f"  n={n}  corpus={N}  hit@1")
     print("=" * 70)
-    print(f"  memdag baseline (BM25+nomic RRF) = {base_h1/n:.4f}")
+    print(f"  memsom baseline (BM25+nomic RRF) = {base_h1/n:.4f}")
     print(f"  + cross-encoder rerank           = {cross_h1/n:.4f}")
     print(f"  GAIN = {(cross_h1-base_h1)/n:+.4f}   (target >= +0.1: {'MET' if (cross_h1-base_h1)/n>=0.1 else 'no'})")
     print(f"  added latency/query: mean={np.mean(ms):.0f}ms")

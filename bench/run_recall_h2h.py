@@ -1,11 +1,11 @@
 """run_recall_h2h — nomic vs BGE-M3 retrieval head-to-head for the recall system.
 
-Mirrors the memdag bench's principle (one substrate, same judge, fair-both-ways,
+Mirrors the memsom bench's principle (one substrate, same judge, fair-both-ways,
 report losses) but the metric is RETRIEVAL DISCRIMINATION, which is the actual
 variable between the old backend (nomic, dense-only) and the new one (BGE-M3,
 dense+sparse+colbert triple fusion).
 
-Why a shared haystack: the memdag per-item harness gives each item only its own
+Why a shared haystack: the memsom per-item harness gives each item only its own
 evidence, so top-k >= evidence -> retrieval is trivial and two embedders look
 identical. Here we POOL every LongMemEval evidence turn into one corpus; each
 question must surface ITS answer-bearing evidence above all the distractors. That
@@ -19,7 +19,7 @@ Three arms, identical items / queries / top-k / judge:
 Retrieval metrics (deterministic, no LLM): hit@1, hit@5, MRR, recall@k over each
 item's answer-bearing evidence. Optional --judge adds LLM-judged answer utility
 (synthesize from top-k + qwen2.5 judge) on the first --judge-n items, matching the
-memdag utility metric.
+memsom utility metric.
 
 Run on the PC (nomic Ollama + BGE service + LongMemEval all local there):
   python run_recall_h2h.py --dataset C:\\Users\\you\\lme_data\\longmemeval_oracle.json \\

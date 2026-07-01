@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import memdag_chats
+import memsom_chats
 
 
 def write_jsonl(path, records):
@@ -33,7 +33,7 @@ class TestParseClaudeCode(unittest.TestCase):
             {"type": "assistant", "message": {"role": "assistant",
                                               "content": [{"type": "text", "text": "hi back"}]}},
         ])
-        recs = memdag_chats.parse_file("claude-code", self.path)
+        recs = memsom_chats.parse_file("claude-code", self.path)
         self.assertEqual([r["role"] for r in recs], ["user", "assistant"])
         self.assertEqual([r["text"] for r in recs], ["hello there", "hi back"])
 
@@ -41,7 +41,7 @@ class TestParseClaudeCode(unittest.TestCase):
         write_jsonl(self.path, [
             {"type": "user", "message": {"role": "user", "content": "a plain string message"}},
         ])
-        recs = memdag_chats.parse_file("claude-code", self.path)
+        recs = memsom_chats.parse_file("claude-code", self.path)
         self.assertEqual(recs[0]["text"], "a plain string message")
 
     def test_content_block_list_form(self):
@@ -53,7 +53,7 @@ class TestParseClaudeCode(unittest.TestCase):
                 {"type": "text", "text": "second part"},
             ]}},
         ])
-        recs = memdag_chats.parse_file("claude-code", self.path)
+        recs = memsom_chats.parse_file("claude-code", self.path)
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["text"], "first part\nsecond part")
 
@@ -61,7 +61,7 @@ class TestParseClaudeCode(unittest.TestCase):
         write_jsonl(self.path, [
             {"type": "user", "message": {"role": "user", "content": "x"}},
         ])
-        recs = memdag_chats.parse_file("claude-code", self.path)
+        recs = memsom_chats.parse_file("claude-code", self.path)
         self.assertTrue(recs[0]["source_ref"].endswith("#L1"))
 
 

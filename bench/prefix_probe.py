@@ -4,7 +4,7 @@ Faithful 1:1 with the bench: imports dataset.from_longmemeval so the items are
 byte-identical to the head-to-head run. The ONLY variable is whether we send
 nomic-embed-text its intended task prefixes:
 
-  RAW  (what memdag_retrieve._call_ollama_embed does today): prompt = text
+  RAW  (what memsom_retrieve._call_ollama_embed does today): prompt = text
   PFX  (what bench/adapters/rag_adapter does):
          documents -> "search_document: " + text
          query     -> "search_query: "    + text
@@ -13,7 +13,7 @@ Recall@k is saturated on this substrate (<=7 docs, topk=8) so we measure RANK:
   clean arm  (evidence only): does the ANSWER-BEARING turn rank above context?
   poison arm (evidence+poison): does true evidence outrank the poison?
 
-No LLM synth, no judge -- pure retrieval geometry. Same Ollama endpoint memdag
+No LLM synth, no judge -- pure retrieval geometry. Same Ollama endpoint memsom
 and rag both use. Run from the bench dir so `import dataset` resolves.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ import urllib.request
 
 import dataset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import memdag_retrieve as mr  # exact tokenize + BM25 constants + RRF
+import memsom_retrieve as mr  # exact tokenize + BM25 constants + RRF
 
 EMBED_URL = os.environ.get("MEMDAG_EMBED_URL") or "http://localhost:11434/api/embeddings"
 EMBED_MODEL = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"
@@ -73,9 +73,9 @@ def vec_rank(qvec, doc_vecs):
 
 
 def bm25_rank(query, doc_texts):
-    """memdag's exact BM25 (mr.tokenize, mr.K1, mr.B) over a per-item corpus.
+    """memsom's exact BM25 (mr.tokenize, mr.K1, mr.B) over a per-item corpus.
 
-    Returns [(idx, score)] desc. Mirrors memdag_retrieve.bm25 math on a small
+    Returns [(idx, score)] desc. Mirrors memsom_retrieve.bm25 math on a small
     in-memory corpus instead of the sqlite postings table.
     """
     qterms = set(mr.tokenize(query))

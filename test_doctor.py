@@ -12,8 +12,8 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-import memdag
-import memdag_doctor
+import memsom
+import memsom_doctor
 
 
 class TestDoctor(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestDoctor(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "memdag.db"
         os.environ["MEMDAG_DB"] = str(self.db)
-        memdag.get_connection().close()  # create the DB so node-count path runs
+        memsom.get_connection().close()  # create the DB so node-count path runs
 
     def tearDown(self):
         os.environ.pop("MEMDAG_DB", None)
@@ -31,7 +31,7 @@ class TestDoctor(unittest.TestCase):
     def _run(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            memdag_doctor.cmd_doctor(Namespace(json=False))
+            memsom_doctor.cmd_doctor(Namespace(json=False))
         return out.getvalue()
 
     def test_doctor_reports_env_and_selfcheck(self):
@@ -39,7 +39,7 @@ class TestDoctor(unittest.TestCase):
         os.environ["MEMDAG_EMBED_URL"] = "http://127.0.0.1:1/api/embeddings"
         text = self._run()
         # environment facts doctor adds
-        for marker in ("memdag version", "OS", "Python", "DB path", str(self.db)):
+        for marker in ("memsom version", "OS", "Python", "DB path", str(self.db)):
             self.assertIn(marker, text)
         # the wrapped selfcheck section is present
         self.assertIn("selfcheck", text)

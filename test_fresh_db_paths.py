@@ -2,7 +2,7 @@
 """Fresh-DB regression: every MCP-exposed tool must migrate the tables it touches.
 
 The MCP server holds no persistent connection — each tool call routes through
-memdag_mcp._call_tool -> memdag_cli.main -> a CLI handler that opens its own
+memsom_mcp._call_tool -> memsom_cli.main -> a CLI handler that opens its own
 connection. A brand-new friend's DB has only the core schema (nodes/edges) until
 a handler runs the relevant module migrate(). This test drives the real dispatch
 path against a never-migrated DB and asserts no 'no such table' / OperationalError.
@@ -18,8 +18,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import memdag
-import memdag_mcp
+import memsom
+import memsom_mcp
 
 
 class FreshDbTools(unittest.TestCase):
@@ -40,7 +40,7 @@ class FreshDbTools(unittest.TestCase):
 
     def _assert_no_missing_table(self, name, args):
         self._fresh_db()
-        text, _is_error = memdag_mcp._call_tool(name, args)
+        text, _is_error = memsom_mcp._call_tool(name, args)
         low = text.lower()
         self.assertNotIn("no such table", low,
                          f"tool {name!r} hit a missing table on a fresh DB:\n{text}")
@@ -75,7 +75,7 @@ class JournalMode(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_record_journal_mode(self):
-        conn = memdag.get_connection()
+        conn = memsom.get_connection()
         try:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         finally:

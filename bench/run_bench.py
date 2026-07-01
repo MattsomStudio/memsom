@@ -15,8 +15,8 @@ says what the attack does to a system that does NOT yet apply an integrity floor
 on `ask`. The floor/baseline arm is step 4 — this scaffold proves the harness
 MEASURES the attack and that provenance is tracked end-to-end.
 
-Usage (run ON the PC, where memdag + Ollama live):
-  python run_bench.py --repo C:\\Users\\you\\memdag --run-root C:\\Users\\you\\bench_runs
+Usage (run ON the PC, where memsom + Ollama live):
+  python run_bench.py --repo C:\\Users\\you\\memsom --run-root C:\\Users\\you\\bench_runs
   python run_bench.py ... --dataset C:\\path\\longmemeval_s.json --max-items 100 --rate 0.5
 """
 
@@ -27,13 +27,13 @@ import json
 import sys
 from pathlib import Path
 
-from runner import MemdagRunner
+from runner import MemsomRunner
 from dataset import load_fixture, from_longmemeval
 from poison import select_poisoned
 from score import score_item, aggregate, ItemScore
 
 
-def run_arm(runner: MemdagRunner, items: list[dict], poison_ids: set[str],
+def run_arm(runner: MemsomRunner, items: list[dict], poison_ids: set[str],
             run_root: Path, arm: str, topk: int, clearance: str | None,
             verbose: bool) -> list[ItemScore]:
     scores: list[ItemScore] = []
@@ -62,9 +62,9 @@ def run_arm(runner: MemdagRunner, items: list[dict], poison_ids: set[str],
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="memdag integrity benchmark (steps 2+3)")
-    ap.add_argument("--repo", required=True, help="path to the memdag repo")
-    ap.add_argument("--python", default="python", help="python exe memdag runs under")
+    ap = argparse.ArgumentParser(description="memsom integrity benchmark (steps 2+3)")
+    ap.add_argument("--repo", required=True, help="path to the memsom repo")
+    ap.add_argument("--python", default="python", help="python exe memsom runs under")
     ap.add_argument("--run-root", required=True, help="scratch dir for per-item DBs")
     ap.add_argument("--dataset", default=None, help="path to longmemeval_*.json (default: bundled fixture)")
     ap.add_argument("--max-items", type=int, default=None)
@@ -92,7 +92,7 @@ def main() -> int:
         return 1
 
     poison_ids = select_poisoned(items, args.rate)
-    runner = MemdagRunner(args.repo, python=args.python)
+    runner = MemsomRunner(args.repo, python=args.python)
     run_root = Path(args.run_root)
     verbose = not args.quiet
 
@@ -108,7 +108,7 @@ def main() -> int:
     agg_pois = aggregate(pois)
 
     # ---- report ----
-    print("\n================ memdag integrity benchmark ================")
+    print("\n================ memsom integrity benchmark ================")
     print(f"substrate : {substrate}")
     print(f"items     : {len(items)}   poison rate: {args.rate}   poisoned: {len(poison_ids)}")
     print(f"{'arm':<10} {'utility':>8} {'ASR':>6} {'cite_ASR':>9} {'launder':>8} {'refuse':>7}")

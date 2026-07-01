@@ -3,8 +3,8 @@
 Same synthesizer + judge as the head-to-head (judge.synthesize / judge_correct).
 Three payloads per clean item, content held as identical as possible:
 
-  A  md_frag   : memdag's actual sentence-fragment citations (what the harness fed)
-  B  md_joined : the SAME memdag content, regrouped by [mem:N] into whole nodes
+  A  md_frag   : memsom's actual sentence-fragment citations (what the harness fed)
+  B  md_joined : the SAME memsom content, regrouped by [mem:N] into whole nodes
   C  rag       : RAG's whole-turn citations (reference)
 
 A vs B isolates the split itself with zero content difference. Saves every
@@ -20,11 +20,11 @@ import tempfile
 from collections import defaultdict
 
 import dataset
-from adapters.memdag_adapter import MemdagAdapter
+from adapters.memsom_adapter import MemsomAdapter
 from adapters.rag_adapter import RagAdapter
 from judge import synthesize, judge_correct
 
-REPO = r"C:\Users\you\memdag"
+REPO = r"C:\Users\you\memsom"
 PATH = r"C:\Users\you\lme_data\longmemeval_oracle.json"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 60
 OUT = sys.argv[2] if len(sys.argv) > 2 else r"C:\Users\you\h2h\synth_ab.json"
@@ -32,7 +32,7 @@ JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "qwen2.5:7b-instruct")
 JUDGE_URL = "http://localhost:11434/api/chat"
 
 items, _ = dataset.from_longmemeval(PATH, max_items=N, max_evidence=3)
-md = MemdagAdapter(REPO)
+md = MemsomAdapter(REPO)
 rag = RagAdapter()
 ARMS = ("md_frag", "md_joined", "md_fullnode", "rag")
 results = []
@@ -52,12 +52,12 @@ for n, it in enumerate(items, 1):
         bynode[c.node_id].append(c.text)
     md_joined = [" ".join(v) for v in bynode.values()]
 
-    # md_fullnode: the FULL content of memdag's retrieved nodes (bypasses the
+    # md_fullnode: the FULL content of memsom's retrieved nodes (bypasses the
     # lossy compose render). retrieve() returns (id, content, channel, label, ref).
-    import memdag, memdag_retrieve  # lazy: MemdagAdapter put repo on sys.path
-    _conn = memdag.get_connection()  # uses MEMDAG_DB set by md.reset
+    import memsom, memsom_retrieve  # lazy: MemsomAdapter put repo on sys.path
+    _conn = memsom.get_connection()  # uses MEMDAG_DB set by md.reset
     try:
-        _rows = memdag_retrieve.retrieve(_conn, it["question"], k=8)
+        _rows = memsom_retrieve.retrieve(_conn, it["question"], k=8)
         md_fullnode = [r[1] for r in _rows]
     finally:
         _conn.close()

@@ -1,6 +1,6 @@
 """rag adapter — vanilla vector RAG, the 'no defense at all' sanity floor.
 
-nomic embeddings (same Ollama endpoint memdag uses) into an in-memory store,
+nomic embeddings (same Ollama endpoint memsom uses) into an in-memory store,
 cosine top-k, deterministic concatenation as the 'answer'. There is NO provenance
 and NO integrity label -- so poison competes purely on similarity, and whatever
 lands in top-k shapes the answer. This is the reference point: it shows where a
@@ -24,7 +24,7 @@ _EMBED_MODEL = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"
 
 
 def _embed(text: str, is_query: bool) -> list:
-    # nomic's intended task prefixes; matches how memdag embeds, so RAG is a fair
+    # nomic's intended task prefixes; matches how memsom embeds, so RAG is a fair
     # retriever rather than a strawman.
     prefix = "search_query: " if is_query else "search_document: "
     body = json.dumps({"model": _EMBED_MODEL, "prompt": prefix + text}).encode("utf-8")

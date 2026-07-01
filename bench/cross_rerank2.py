@@ -15,10 +15,10 @@ from collections import defaultdict
 from pathlib import Path
 import numpy as np
 
-BENCH = r"C:\Users\you\memdag\bench"; REPO = r"C:\Users\you\memdag"
+BENCH = r"C:\Users\you\memsom\bench"; REPO = r"C:\Users\you\memsom"
 sys.path.insert(0, BENCH); sys.path.insert(0, REPO)
 from dataset import from_longmemeval                       # noqa: E402
-from memdag_retrieve import tokenize                       # noqa: E402
+from memsom_retrieve import tokenize                       # noqa: E402
 
 RRF_C = 60; K1 = 1.2; B = 0.75
 SCORE_K = 50                       # how many baseline candidates we cross-encode (once)

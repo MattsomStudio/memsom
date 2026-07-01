@@ -6,7 +6,7 @@ on-call changed) — not an external poison. The harness seeds v1, derives an
 answer, applies the update, then measures two families:
 
   attribution  — does the system know the derived answer now depends on a
-                 CHANGED source? (memdag: exact via cascade; others: n/a)
+                 CHANGED source? (memsom: exact via cascade; others: n/a)
   serving      — after the update, does the re-asked answer reflect v2 (fresh),
                  v1 (stale), and is staleness flagged?
 

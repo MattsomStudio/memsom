@@ -1,14 +1,14 @@
 """run_headtohead — run ONE memory system through the poison protocol.
 
 Same clean+poisoned arms and same scorer as run_bench_par, but the system under
-test is pluggable via --system. memdag/rag parallelize across a process pool;
+test is pluggable via --system. memsom/rag parallelize across a process pool;
 LLM/service-bound systems (mem0/zep) should run --workers 1. Writes a per-system
 result JSON; compare.py stitches them into the head-to-head table.
 
 Usage:
-  python run_headtohead.py --system memdag --repo C:\\Users\\you\\memdag ^
-    --run-root C:\\Users\\you\\h2h\\memdag --dataset ...oracle.json ^
-    --rate 0.5 --gated --workers 6 --out ...\\memdag.json
+  python run_headtohead.py --system memsom --repo C:\\Users\\you\\memsom ^
+    --run-root C:\\Users\\you\\h2h\\memsom --dataset ...oracle.json ^
+    --rate 0.5 --gated --workers 6 --out ...\\memsom.json
   python run_headtohead.py --system rag  --run-root ...\\rag  --dataset ... --rate 0.5 --workers 6 --out ...
 """
 
@@ -36,9 +36,9 @@ _HAS_PROV = False
 
 
 def make_adapter(system: str, repo: str, config: dict):
-    if system == "memdag":
-        from adapters.memdag_adapter import MemdagAdapter
-        return MemdagAdapter(repo, no_embed=config.get("no_embed", False))
+    if system == "memsom":
+        from adapters.memsom_adapter import MemsomAdapter
+        return MemsomAdapter(repo, no_embed=config.get("no_embed", False))
     if system == "rag":
         from adapters.rag_adapter import RagAdapter
         return RagAdapter()
@@ -103,17 +103,17 @@ def _to_scores(dicts):
 def main() -> int:
     ap = argparse.ArgumentParser(description="poison head-to-head, one system")
     ap.add_argument("--system", required=True,
-                    choices=["memdag", "rag", "mem0", "superlocal", "zep"])
-    ap.add_argument("--repo", default="", help="memdag repo (memdag system only)")
+                    choices=["memsom", "rag", "mem0", "superlocal", "zep"])
+    ap.add_argument("--repo", default="", help="memsom repo (memsom system only)")
     ap.add_argument("--run-root", required=True)
     ap.add_argument("--dataset", default=None)
     ap.add_argument("--max-items", type=int, default=None)
     ap.add_argument("--max-evidence", type=int, default=3)
     ap.add_argument("--rate", type=float, default=0.5)
     ap.add_argument("--topk", type=int, default=8)
-    ap.add_argument("--gated", action="store_true", help="apply memdag check-action gate")
+    ap.add_argument("--gated", action="store_true", help="apply memsom check-action gate")
     ap.add_argument("--no-embed", action="store_true",
-                    help="memdag-bm25 ablation: force embedder offline (BM25-only)")
+                    help="memsom-bm25 ablation: force embedder offline (BM25-only)")
     ap.add_argument("--mem0-llm", default="ollama", choices=["ollama", "openai"],
                     help="mem0 extraction backend: ollama (local qwen, handicapped) or openai (gpt-4o-mini, at-best)")
     ap.add_argument("--judge", action="store_true",
@@ -131,8 +131,8 @@ def main() -> int:
     if args.mem0_llm == "openai":
         config["llm_provider"] = "openai"  # reads OPENAI_API_KEY from env
     # label distinguishes ablation/at-best variants in the table.
-    if args.system == "memdag" and args.no_embed:
-        system_label = "memdag-bm25"
+    if args.system == "memsom" and args.no_embed:
+        system_label = "memsom-bm25"
     elif args.system == "mem0" and args.mem0_llm == "openai":
         system_label = "mem0-best"
     else:
@@ -185,7 +185,7 @@ def main() -> int:
     clean = _to_scores([d for d in results if d["arm"] == "clean"])
     pois = _to_scores([d for d in results if d["arm"] == "poisoned"])
     agg_clean, agg_pois = aggregate(clean), aggregate(pois)
-    has_prov = args.system == "memdag"
+    has_prov = args.system == "memsom"
 
     print(f"\n========== head-to-head: {system_label} ==========")
     print(f"substrate : {substrate}")

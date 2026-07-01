@@ -1,9 +1,9 @@
-# memdag packaging — flat layout, deliberately.
+# memsom packaging — flat layout, deliberately.
 #
-# The repo is a flat set of memdag_*.py modules at the root and memdag.py is
-# imported as `import memdag` by everything (frozen core + 404-test suite).
-# DO NOT restructure into a memdag/ package: that breaks the frozen
-# `import memdag` contract.  Instead the wheel ships each module as a
+# The repo is a flat set of memsom_*.py modules at the root and memsom.py is
+# imported as `import memsom` by everything (frozen core + 404-test suite).
+# DO NOT restructure into a memsom/ package: that breaks the frozen
+# `import memsom` contract.  Instead the wheel ships each module as a
 # top-level module (the hatchling equivalent of setuptools py-modules).
 
 [build-system]
@@ -11,7 +11,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "memdag"  # working name
+name = "memsom"  # working name
 version = "0.1.0"
 description = "Derivation-DAG memory store for AI agents: provenance edges, channel-stamped Biba integrity labels, revoke-cascade, taint tracking. Stdlib-only."
 readme = "README.md"
@@ -28,80 +28,80 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Security",
 ]
-# ZERO runtime dependencies — memdag is stdlib-only.  The optional Ollama
+# ZERO runtime dependencies — memsom is stdlib-only.  The optional Ollama
 # integration is reached over urllib at runtime and is NOT a pip dependency.
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/MattsomStudio/memdag"
+Repository = "https://github.com/MattsomStudio/memsom"
 
 [project.scripts]
-memdag = "memdag_cli:main"
-memdag-mcp = "memdag_mcp:main"
-memdag-broker = "memdag_broker:main"
+memsom = "memsom_cli:main"
+memsom-mcp = "memsom_mcp:main"
+memsom-broker = "memsom_broker:main"
 
 # ---------------------------------------------------------------------------
-# Wheel: every memdag*.py runtime module as a flat top-level module.
+# Wheel: every memsom*.py runtime module as a flat top-level module.
 # Tests (test_*.py), _build/, _weights/, *.db, audit_poc, demo scripts are
 # all excluded by construction (only-include is an allowlist).
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.wheel]
 only-include = [
-    "memdag.py",
-    "memdag_anticipatory.py",
-    "memdag_audit.py",
-    "memdag_blame.py",
-    "memdag_bridge_import.py",
-    "memdag_bridge_render.py",
-    "memdag_bridge_sync.py",
-    "memdag_broker.py",
-    "memdag_capgate.py",
-    "memdag_chats.py",
-    "memdag_claude.py",
-    "memdag_cli.py",
-    "memdag_compact.py",
-    "memdag_config.py",
-    "memdag_confid.py",
-    "memdag_corroborate.py",
-    "memdag_dashboard.py",
-    "memdag_digest.py",
-    "memdag_distill.py",
-    "memdag_doctor.py",
-    "memdag_embed.py",
-    "memdag_federation.py",
-    "memdag_forget.py",
-    "memdag_gate.py",
-    "memdag_heal.py",
-    "memdag_hook.py",
-    "memdag_ingest.py",
-    "memdag_llm.py",
-    "memdag_mcp.py",
-    "memdag_obsidian.py",
-    "memdag_policy.py",
-    "memdag_profile.py",
-    "memdag_quarantine.py",
-    "memdag_recompute.py",
-    "memdag_redact.py",
-    "memdag_rederive.py",
-    "memdag_reflex.py",
-    "memdag_relate.py",
-    "memdag_retrieve.py",
-    "memdag_schema.py",
-    "memdag_session.py",
-    "memdag_stale.py",
-    "memdag_tombstone.py",
-    "memdag_trust.py",
-    "memdag_verify_stale.py",
-    "memdag_wire_claude.py",
+    "memsom.py",
+    "memsom_anticipatory.py",
+    "memsom_audit.py",
+    "memsom_blame.py",
+    "memsom_bridge_import.py",
+    "memsom_bridge_render.py",
+    "memsom_bridge_sync.py",
+    "memsom_broker.py",
+    "memsom_capgate.py",
+    "memsom_chats.py",
+    "memsom_claude.py",
+    "memsom_cli.py",
+    "memsom_compact.py",
+    "memsom_config.py",
+    "memsom_confid.py",
+    "memsom_corroborate.py",
+    "memsom_dashboard.py",
+    "memsom_digest.py",
+    "memsom_distill.py",
+    "memsom_doctor.py",
+    "memsom_embed.py",
+    "memsom_federation.py",
+    "memsom_forget.py",
+    "memsom_gate.py",
+    "memsom_heal.py",
+    "memsom_hook.py",
+    "memsom_ingest.py",
+    "memsom_llm.py",
+    "memsom_mcp.py",
+    "memsom_obsidian.py",
+    "memsom_policy.py",
+    "memsom_profile.py",
+    "memsom_quarantine.py",
+    "memsom_recompute.py",
+    "memsom_redact.py",
+    "memsom_rederive.py",
+    "memsom_reflex.py",
+    "memsom_relate.py",
+    "memsom_retrieve.py",
+    "memsom_schema.py",
+    "memsom_session.py",
+    "memsom_stale.py",
+    "memsom_tombstone.py",
+    "memsom_trust.py",
+    "memsom_verify_stale.py",
+    "memsom_wire_claude.py",
 ]
 
-# Data file: memdag.py resolves external_fallback.txt next to itself
+# Data file: memsom.py resolves external_fallback.txt next to itself
 # (HOME / "external_fallback.txt"), so it must land in site-packages root
-# beside memdag.py for `memdag seed --offline` to work after a wheel install.
+# beside memsom.py for `memsom seed --offline` to work after a wheel install.
 [tool.hatch.build.targets.wheel.force-include]
 "external_fallback.txt" = "external_fallback.txt"
 # Bundled Claude Code memory loop (skills + CLAUDE.md template) so a standalone
-# `pip install` + `memdag wire-claude` finds them without a repo clone. The CLI
+# `pip install` + `memsom wire-claude` finds them without a repo clone. The CLI
 # resolves them relative to the installed package (site-packages/claude/...).
 "claude" = "claude"
 
@@ -111,52 +111,52 @@ only-include = [
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.sdist]
 only-include = [
-    "memdag.py",
-    "memdag_anticipatory.py",
-    "memdag_audit.py",
-    "memdag_blame.py",
-    "memdag_bridge_import.py",
-    "memdag_bridge_render.py",
-    "memdag_bridge_sync.py",
-    "memdag_broker.py",
-    "memdag_capgate.py",
-    "memdag_chats.py",
-    "memdag_claude.py",
-    "memdag_cli.py",
-    "memdag_compact.py",
-    "memdag_config.py",
-    "memdag_confid.py",
-    "memdag_corroborate.py",
-    "memdag_dashboard.py",
-    "memdag_digest.py",
-    "memdag_distill.py",
-    "memdag_doctor.py",
-    "memdag_embed.py",
-    "memdag_federation.py",
-    "memdag_forget.py",
-    "memdag_gate.py",
-    "memdag_heal.py",
-    "memdag_hook.py",
-    "memdag_ingest.py",
-    "memdag_llm.py",
-    "memdag_mcp.py",
-    "memdag_obsidian.py",
-    "memdag_policy.py",
-    "memdag_profile.py",
-    "memdag_quarantine.py",
-    "memdag_recompute.py",
-    "memdag_redact.py",
-    "memdag_rederive.py",
-    "memdag_reflex.py",
-    "memdag_relate.py",
-    "memdag_retrieve.py",
-    "memdag_schema.py",
-    "memdag_session.py",
-    "memdag_stale.py",
-    "memdag_tombstone.py",
-    "memdag_trust.py",
-    "memdag_verify_stale.py",
-    "memdag_wire_claude.py",
+    "memsom.py",
+    "memsom_anticipatory.py",
+    "memsom_audit.py",
+    "memsom_blame.py",
+    "memsom_bridge_import.py",
+    "memsom_bridge_render.py",
+    "memsom_bridge_sync.py",
+    "memsom_broker.py",
+    "memsom_capgate.py",
+    "memsom_chats.py",
+    "memsom_claude.py",
+    "memsom_cli.py",
+    "memsom_compact.py",
+    "memsom_config.py",
+    "memsom_confid.py",
+    "memsom_corroborate.py",
+    "memsom_dashboard.py",
+    "memsom_digest.py",
+    "memsom_distill.py",
+    "memsom_doctor.py",
+    "memsom_embed.py",
+    "memsom_federation.py",
+    "memsom_forget.py",
+    "memsom_gate.py",
+    "memsom_heal.py",
+    "memsom_hook.py",
+    "memsom_ingest.py",
+    "memsom_llm.py",
+    "memsom_mcp.py",
+    "memsom_obsidian.py",
+    "memsom_policy.py",
+    "memsom_profile.py",
+    "memsom_quarantine.py",
+    "memsom_recompute.py",
+    "memsom_redact.py",
+    "memsom_rederive.py",
+    "memsom_reflex.py",
+    "memsom_relate.py",
+    "memsom_retrieve.py",
+    "memsom_schema.py",
+    "memsom_session.py",
+    "memsom_stale.py",
+    "memsom_tombstone.py",
+    "memsom_trust.py",
+    "memsom_verify_stale.py",
+    "memsom_wire_claude.py",
     "external_fallback.txt",
     "claude",
 ]

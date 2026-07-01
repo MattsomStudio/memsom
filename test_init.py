@@ -12,14 +12,14 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-import memdag
-import memdag_cli
+import memsom
+import memsom_cli
 
 
 class TestInit(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.data_dir = Path(self.tmp.name) / "dot-memdag"
+        self.data_dir = Path(self.tmp.name) / "dot-memsom"
 
     def tearDown(self):
         os.environ.pop("MEMDAG_DB", None)
@@ -28,7 +28,7 @@ class TestInit(unittest.TestCase):
     def _run_init(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            memdag_cli.cmd_init(Namespace(data_dir=str(self.data_dir)))
+            memsom_cli.cmd_init(Namespace(data_dir=str(self.data_dir)))
         return out.getvalue()
 
     def test_init_creates_migrated_db(self):
@@ -38,7 +38,7 @@ class TestInit(unittest.TestCase):
         self.assertTrue(self.data_dir.is_dir())
         self.assertTrue(db.is_file())
         # (b) a MODULE table exists -> migrate_all ran, not just core schema
-        conn = memdag.get_connection(str(db))
+        conn = memsom.get_connection(str(db))
         try:
             row = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'"
@@ -53,14 +53,14 @@ class TestInit(unittest.TestCase):
         self._run_init()
         # seed a node so we can prove a second init doesn't clobber data
         db = self.data_dir / "memdag.db"
-        conn = memdag.get_connection(str(db))
+        conn = memsom.get_connection(str(db))
         with conn:
-            memdag.insert_node(conn, "a kept node", "user", memdag.RANK["user"])
+            memsom.insert_node(conn, "a kept node", "user", memsom.RANK["user"])
         before = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         conn.close()
         # second init must not error and must not drop the node
         self._run_init()
-        conn = memdag.get_connection(str(db))
+        conn = memsom.get_connection(str(db))
         after = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         conn.close()
         self.assertEqual(before, after, "init clobbered existing nodes")

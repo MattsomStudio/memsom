@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import memdag_config
+import memsom_config
 
 
 class TestPaths(unittest.TestCase):
@@ -21,17 +21,17 @@ class TestPaths(unittest.TestCase):
         self.home = Path("/home/u")
 
     def test_codex_path(self):
-        self.assertEqual(memdag_config.client_config_path("codex", home=self.home),
+        self.assertEqual(memsom_config.client_config_path("codex", home=self.home),
                          self.home / ".codex" / "config.toml")
 
     def test_claude_code_path(self):
-        self.assertEqual(memdag_config.client_config_path("claude-code", home=self.home),
+        self.assertEqual(memsom_config.client_config_path("claude-code", home=self.home),
                          self.home / ".claude.json")
 
     def test_desktop_paths_per_os(self):
-        mac = memdag_config.client_config_path("claude-desktop", os_name="Darwin", home=self.home)
-        win = memdag_config.client_config_path("claude-desktop", os_name="Windows", home=self.home)
-        lin = memdag_config.client_config_path("claude-desktop", os_name="Linux", home=self.home)
+        mac = memsom_config.client_config_path("claude-desktop", os_name="Darwin", home=self.home)
+        win = memsom_config.client_config_path("claude-desktop", os_name="Windows", home=self.home)
+        lin = memsom_config.client_config_path("claude-desktop", os_name="Linux", home=self.home)
         self.assertEqual(mac, self.home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json")
         self.assertEqual(win, self.home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json")
         self.assertEqual(lin, self.home / ".config" / "Claude" / "claude_desktop_config.json")
@@ -52,20 +52,20 @@ class TestClaudeCodeRouting(unittest.TestCase):
             calls.append(cmd)
             return mock.Mock(returncode=0, stdout="", stderr="")
 
-        with mock.patch.object(memdag_config.shutil, "which", return_value="/usr/bin/claude"), \
-             mock.patch.object(memdag_config.subprocess, "run", side_effect=fake_run):
-            res = memdag_config.wire_claude_code("/abs/memdag-mcp", "/abs/db", home=self.home)
+        with mock.patch.object(memsom_config.shutil, "which", return_value="/usr/bin/claude"), \
+             mock.patch.object(memsom_config.subprocess, "run", side_effect=fake_run):
+            res = memsom_config.wire_claude_code("/abs/memsom-mcp", "/abs/db", home=self.home)
         self.assertEqual(res["action"], "claude-cli")
-        self.assertEqual(calls[0][:4], ["claude", "mcp", "add", "memdag"])
+        self.assertEqual(calls[0][:4], ["claude", "mcp", "add", "memsom"])
         self.assertIn("--scope", calls[0])
 
     def test_falls_back_to_json_when_cli_absent(self):
-        with mock.patch.object(memdag_config.shutil, "which", return_value=None):
-            res = memdag_config.wire_claude_code("/abs/memdag-mcp", "/abs/db", home=self.home)
+        with mock.patch.object(memsom_config.shutil, "which", return_value=None):
+            res = memsom_config.wire_claude_code("/abs/memsom-mcp", "/abs/db", home=self.home)
         self.assertEqual(res["action"], "created")
         cfg = self.home / ".claude.json"
         data = json.loads(cfg.read_text())
-        self.assertEqual(data["mcpServers"]["memdag"]["command"], "/abs/memdag-mcp")
+        self.assertEqual(data["mcpServers"]["memsom"]["command"], "/abs/memsom-mcp")
 
 
 def _args(**kw):
@@ -77,7 +77,7 @@ def _args(**kw):
 
 # A path whose apostrophe closes the single-quoted TOML literal early, so the
 # generated block fails to round-trip and wire_toml returns action="print".
-APOS_EXE = "/home/o'brien/memdag-mcp"
+APOS_EXE = "/home/o'brien/memsom-mcp"
 
 
 class TestWireTomlRefusesApostrophe(unittest.TestCase):
@@ -91,12 +91,12 @@ class TestWireTomlRefusesApostrophe(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_apostrophe_in_exe_refuses_to_write(self):
-        res = memdag_config.wire_toml(self.path, APOS_EXE, "/tmp/x.db", print_only=False)
+        res = memsom_config.wire_toml(self.path, APOS_EXE, "/tmp/x.db", print_only=False)
         self.assertEqual(res["action"], "print")
         self.assertFalse(self.path.exists())  # genuinely wrote nothing
 
     def test_apostrophe_in_db_refuses_to_write(self):
-        res = memdag_config.wire_toml(self.path, "/abs/memdag-mcp", "/tmp/o'brien.db",
+        res = memsom_config.wire_toml(self.path, "/abs/memsom-mcp", "/tmp/o'brien.db",
                                       print_only=False)
         self.assertEqual(res["action"], "print")
         self.assertFalse(self.path.exists())
@@ -112,16 +112,16 @@ class TestCmdWireConfigExitCode(unittest.TestCase):
 
     def test_real_run_print_refusal_returns_1(self):
         # Real run (print_only=False) where wiring soft-fails with action='print'.
-        with mock.patch.object(memdag_config, "wire",
+        with mock.patch.object(memsom_config, "wire",
                                return_value={"action": "print", "path": "/p", "snippet": "x"}):
-            rc = memdag_config.cmd_wire_config(_args(exe=APOS_EXE, db="/tmp/x.db"))
+            rc = memsom_config.cmd_wire_config(_args(exe=APOS_EXE, db="/tmp/x.db"))
         self.assertEqual(rc, 1)
 
     def test_print_only_run_returns_0(self):
         # print-only mode: action='print' is the EXPECTED success, not a failure.
-        with mock.patch.object(memdag_config, "wire",
+        with mock.patch.object(memsom_config, "wire",
                                return_value={"action": "print", "path": "/p", "snippet": "x"}):
-            rc = memdag_config.cmd_wire_config(_args(print_only=True, exe=APOS_EXE, db="/tmp/x.db"))
+            rc = memsom_config.cmd_wire_config(_args(print_only=True, exe=APOS_EXE, db="/tmp/x.db"))
         self.assertEqual(rc, 0)
 
     def test_real_run_print_via_real_wire_toml_returns_1(self):
@@ -129,7 +129,7 @@ class TestCmdWireConfigExitCode(unittest.TestCase):
         # apostrophe path makes wire_toml refuse -> cmd_wire_config must return 1.
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
-            rc = memdag_config.cmd_wire_config(
+            rc = memsom_config.cmd_wire_config(
                 _args(client="codex", exe=APOS_EXE, db=str(home / "x.db")))
         self.assertEqual(rc, 1)
 
@@ -140,20 +140,20 @@ class TestCmdWireConfigExitCode(unittest.TestCase):
         success = ("created", "merged", "unchanged", "claude-cli")
         failure = ("print", "malformed", "exists_differs", "some-future-action")
         for action in success:
-            with mock.patch.object(memdag_config, "wire",
+            with mock.patch.object(memsom_config, "wire",
                                    return_value={"action": action, "path": "/p"}):
-                rc = memdag_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
+                rc = memsom_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
             self.assertEqual(rc, 0, f"{action!r} should be a success (rc 0)")
         for action in failure:
-            with mock.patch.object(memdag_config, "wire",
+            with mock.patch.object(memsom_config, "wire",
                                    return_value={"action": action, "path": "/p", "snippet": "x"}):
-                rc = memdag_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
+                rc = memsom_config.cmd_wire_config(_args(exe="/abs/x", db="/abs/d"))
             self.assertEqual(rc, 1, f"{action!r} should be a failure (rc 1)")
 
 
 class TestEntryPointExitCodes(unittest.TestCase):
     """CFG-MAIN-EXITDROP-1 + dispatcher propagation: the exit code must survive
-    BOTH the standalone __main__ and the memdag_cli dispatcher entry points."""
+    BOTH the standalone __main__ and the memsom_cli dispatcher entry points."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -169,18 +169,18 @@ class TestEntryPointExitCodes(unittest.TestCase):
                               cwd=str(Path(__file__).resolve().parent))
 
     def test_standalone_main_real_run_exits_1(self):
-        # CFG-MAIN-EXITDROP-1: direct `python memdag_config.py` must not drop the code.
-        r = self._run([sys.executable, "memdag_config.py", "--client", "codex",
+        # CFG-MAIN-EXITDROP-1: direct `python memsom_config.py` must not drop the code.
+        r = self._run([sys.executable, "memsom_config.py", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db])
         self.assertEqual(r.returncode, 1, r.stderr)
 
     def test_dispatcher_real_run_exits_1(self):
-        r = self._run([sys.executable, "-m", "memdag_cli", "wire-config", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom_cli", "wire-config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db])
         self.assertEqual(r.returncode, 1, r.stderr)
 
     def test_dispatcher_print_only_exits_0(self):
-        r = self._run([sys.executable, "-m", "memdag_cli", "wire-config", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom_cli", "wire-config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db, "--print-only"])
         self.assertEqual(r.returncode, 0, r.stderr)
 

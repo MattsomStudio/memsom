@@ -10,8 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import memdag
-import memdag_chats
+import memsom
+import memsom_chats
 
 
 def write_jsonl(path, records):
@@ -23,7 +23,7 @@ class TestIngestChats(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "memdag.db"
         os.environ["MEMDAG_DB"] = str(self.db)
-        self.conn = memdag.get_connection()
+        self.conn = memsom.get_connection()
         self.transcript = Path(self.tmp.name) / "session.jsonl"
         write_jsonl(self.transcript, [
             {"type": "user", "message": {"role": "user", "content": "first message"}},
@@ -40,7 +40,7 @@ class TestIngestChats(unittest.TestCase):
         # CHATS-1: channel is stamped from the message ROLE — user turns are 'user'
         # (label 2), assistant turns are 'agent-derived' (label 1). Assistant text
         # must never be laundered into the high-trust 'user' tier.
-        summary = memdag_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
+        summary = memsom_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
         self.assertEqual(summary["messages"], 2)
         self.assertEqual(summary["new_nodes"], 2)
         rows = dict(self.conn.execute("SELECT content, channel FROM nodes").fetchall())
@@ -50,15 +50,15 @@ class TestIngestChats(unittest.TestCase):
                          "an assistant turn must be channel=agent-derived, not user")
 
     def test_ingest_dedups_on_rerun(self):
-        memdag_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
+        memsom_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
         before = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        again = memdag_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
+        again = memsom_chats.ingest_chats(self.conn, "claude-code", files=[self.transcript])
         after = self.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         self.assertEqual(before, after, "re-ingest created duplicate nodes")
         self.assertEqual(again["new_nodes"], 0)
 
     def test_dry_run_inserts_nothing(self):
-        summary = memdag_chats.ingest_chats(self.conn, "claude-code",
+        summary = memsom_chats.ingest_chats(self.conn, "claude-code",
                                             files=[self.transcript], dry_run=True)
         self.assertEqual(summary["messages"], 2)
         self.assertEqual(summary["new_nodes"], 0)

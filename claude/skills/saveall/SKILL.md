@@ -1,6 +1,6 @@
 ---
 name: saveall
-description: Sweep the current conversation for memory-worthy content (facts, preferences, project state, references) and persist each as one file in the Claude memory store, then let memdag regenerate the always-loaded MEMORY.md index. Trigger when the user says "/saveall", "save everything", "save this session", or finishes a meaty session and wants to lock in the learnings. Returns a summary of what was saved.
+description: Sweep the current conversation for memory-worthy content (facts, preferences, project state, references) and persist each as one file in the Claude memory store, then let memsom regenerate the always-loaded MEMORY.md index. Trigger when the user says "/saveall", "save everything", "save this session", or finishes a meaty session and wants to lock in the learnings. Returns a summary of what was saved.
 ---
 
 # /saveall — end-of-session memory sweep
@@ -10,9 +10,9 @@ keeping for future sessions, write each piece to the memory store as its own fil
 and report back. The goal: nothing valuable is lost to a future `/clear`, and
 nothing ephemeral pollutes long-term memory.
 
-The flat per-fact files are the **live input**. memdag re-imports them and
+The flat per-fact files are the **live input**. memsom re-imports them and
 regenerates `MEMORY.md` (the always-loaded index) on session end via the
-`memdag bridge-render` Stop hook — so you never hand-edit `MEMORY.md`; you write
+`memsom bridge-render` Stop hook — so you never hand-edit `MEMORY.md`; you write
 the per-fact files and let it regenerate.
 
 ## Step 0 — Where memory lives
@@ -94,7 +94,7 @@ stays live in the store and keeps rendering). Use the sanctioned path, which rev
 the node (auditable, cascades to anything derived from it) and removes the file:
 
 ```
-memdag tombstone <stem> --reason "why"
+memsom tombstone <stem> --reason "why"
 ```
 
 Pinned `user_`/`feedback_`/`personal_` memories are refused unless you pass `--force`.
@@ -102,11 +102,11 @@ Pinned `user_`/`feedback_`/`personal_` memories are refused unless you pass `--f
 ## Step 4 — Don't hand-edit MEMORY.md
 
 `MEMORY.md` is generated from the store. After you write the per-fact files, the
-Stop hook (`memdag bridge-render`) re-imports them and rewrites `MEMORY.md`. You may
+Stop hook (`memsom bridge-render`) re-imports them and rewrites `MEMORY.md`. You may
 run it yourself to see the result immediately:
 
 ```
-memdag bridge-render
+memsom bridge-render
 ```
 
 Keep the rendered index lean — the budget is **16,384 bytes** (it loads in full

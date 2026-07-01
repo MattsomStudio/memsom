@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in the memdag beta
+about: Report a bug in the memsom beta
 title: "[bug] "
 labels: bug
 ---
@@ -19,10 +19,10 @@ labels: bug
 ## Which client + OS
 <!-- e.g. Claude Code on macOS, Codex on Windows, Claude Desktop on Linux -->
 
-## `memdag doctor` output
-<!-- Run `memdag doctor` in a terminal and paste the full output below.
+## `memsom doctor` output
+<!-- Run `memsom doctor` in a terminal and paste the full output below.
      It captures OS, Python, Ollama status, DB path, and a server self-check. -->
 
 ```
-paste memdag doctor output here
+paste memsom doctor output here
 ```

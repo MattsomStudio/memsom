@@ -1,4 +1,4 @@
-"""Tests for memdag_wire_claude — install the Claude Code memory loop safely.
+"""Tests for memsom_wire_claude — install the Claude Code memory loop safely.
 
 Run:  python -m unittest discover -s . -p test_wire_claude.py
 """
@@ -11,9 +11,9 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-import memdag_wire_claude as wc
+import memsom_wire_claude as wc
 
-EXE = "/abs/path/memdag"
+EXE = "/abs/path/memsom"
 
 
 def _make_skills_src(root):
@@ -175,20 +175,20 @@ class TestOrchestration(unittest.TestCase):
             # CLAUDE.md seeded under the SAME home (never the real one)
             cm = home / ".claude" / "CLAUDE.md"
             self.assertTrue(cm.exists())
-            self.assertIn("memdag:managed:start", cm.read_text(encoding="utf-8"))
+            self.assertIn("memsom:managed:start", cm.read_text(encoding="utf-8"))
 
     def test_claude_md_error_carries_detail(self):
         # a claude-sync failure must capture the exception detail (so the CLI can
         # surface it instead of printing a blank "[claude.md] error -> ").
-        import memdag_claude
-        orig = memdag_claude.sync
-        memdag_claude.sync = lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied"))
+        import memsom_claude
+        orig = memsom_claude.sync
+        memsom_claude.sync = lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied"))
         try:
             with tempfile.TemporaryDirectory() as d:
                 src = _make_skills_src(Path(d))
                 out = wc.wire_claude(home=Path(d) / "home", abs_exe=EXE, skills_src=src)
         finally:
-            memdag_claude.sync = orig
+            memsom_claude.sync = orig
         self.assertEqual(out["claude_md"]["action"], "error")
         self.assertIn("PermissionError", out["claude_md"]["detail"])
 

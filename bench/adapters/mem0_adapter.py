@@ -5,7 +5,7 @@ Fairness choices:
   DELETE), so we let it do that (`infer=True`) -- that's the real Mem0, and also
   its real cost + attack surface.
 - For ANSWERING we compose deterministically (concat retrieved memories), exactly
-  like memdag/rag, so the comparison isn't muddied by who has the better answer-
+  like memsom/rag, so the comparison isn't muddied by who has the better answer-
   writer. The variable under test is "does the poison memory survive into what's
   retrieved", not prose quality.
 - Provenance: Mem0 has none. We stash the origin channel in each memory's metadata
@@ -78,8 +78,8 @@ class Mem0Adapter(MemoryAdapter):
             "embedder": {"provider": "ollama", "config": {
                 "model": self.embed_model, "ollama_base_url": self.ollama_url}},
             # QDRANT per-item (hybrid BM25+vector via fastembed) -- the 1:1 match
-            # for memdag's hybrid retrieval. FAISS is semantic-only, which would
-            # handicap mem0's recall vs memdag; qdrant keeps the comparison fair.
+            # for memsom's hybrid retrieval. FAISS is semantic-only, which would
+            # handicap mem0's recall vs memsom; qdrant keeps the comparison fair.
             # qdrant's on-disk lock means this is workers=1 ONLY (no concurrency);
             # that's the cost of retrieval parity. Same config as handicapped mem0.
             "vector_store": {"provider": "qdrant", "config": {

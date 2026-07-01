@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "memdag": {
+    "memsom": {
       "type": "stdio",
-      "command": "memdag-mcp",
+      "command": "memsom-mcp",
       "args": [],
       "env": {}
     }

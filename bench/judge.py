@@ -1,12 +1,12 @@
 """judge — LLM-judged utility, applied identically to every system.
 
-Substring evidence-recall is unfair across systems: memdag/RAG store verbatim
+Substring evidence-recall is unfair across systems: memsom/RAG store verbatim
 (matchable) while Mem0 LLM-extracts/rephrases (not matchable) -> Mem0 scored 0
 unfairly. The fix is LongMemEval's own method: ask a judge LLM whether a system's
 composed answer actually contains the correct answer, scored the SAME way for all.
 
 Self-contained (urllib -> Ollama), so it runs under both the global interpreter
-(memdag/RAG) and the venv interpreter (Mem0). Deterministic-ish: temp 0, and we
+(memsom/RAG) and the venv interpreter (Mem0). Deterministic-ish: temp 0, and we
 use a clean non-thinking model (qwen2.5) so the YES/NO parse is reliable.
 """
 

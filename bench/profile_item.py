@@ -7,7 +7,7 @@ Ollama-bound phases (reindex, ask) read high while the main run is live -- look
 at the RATIO, not the absolute, for those.
 
 Usage:
-  python profile_item.py --repo C:\\Users\\you\\memdag ^
+  python profile_item.py --repo C:\\Users\\you\\memsom ^
     --run-root C:\\Users\\you\\bench_profile ^
     --dataset C:\\Users\\you\\lme_data\\longmemeval_oracle.json --n 3
 """
@@ -25,14 +25,14 @@ from pathlib import Path
 
 from dataset import from_longmemeval
 
-memdag_cli = None
+memsom_cli = None
 
 
 def _call(argv):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         try:
-            memdag_cli.main(argv)
+            memsom_cli.main(argv)
         except SystemExit:
             pass
     return buf.getvalue()
@@ -64,7 +64,7 @@ def profile_item(item, item_dir: Path, topk=8):
 
 
 def main():
-    global memdag_cli
+    global memsom_cli
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
     ap.add_argument("--run-root", required=True)
@@ -73,8 +73,8 @@ def main():
     args = ap.parse_args()
 
     sys.path.insert(0, args.repo)
-    import memdag_cli as _cli
-    memdag_cli = _cli
+    import memsom_cli as _cli
+    memsom_cli = _cli
 
     items, _ = from_longmemeval(args.dataset, max_items=args.n)
     run_root = Path(args.run_root)

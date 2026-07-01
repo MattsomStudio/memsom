@@ -1,6 +1,6 @@
 {
   "name": "factrecall_min",
-  "note": "Tiny built-in fact-recall set. Validates the harness end-to-end against real memdag WITHOUT needing the multi-GB LongMemEval download. These numbers prove the pipe works; they are NOT the headline benchmark number. Swap in real LongMemEval via --dataset for that.",
+  "note": "Tiny built-in fact-recall set. Validates the harness end-to-end against real memsom WITHOUT needing the multi-GB LongMemEval download. These numbers prove the pipe works; they are NOT the headline benchmark number. Swap in real LongMemEval via --dataset for that.",
   "items": [
     {
       "id": "fr-001",

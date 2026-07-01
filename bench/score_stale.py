@@ -1,18 +1,18 @@
 """score_stale — staleness metrics from two AskResults (pre/post update).
 
 The headline claim is ATTRIBUTION: after a source changes, can the system tell
-you which stored answers now depend on it? memdag answers exactly (the cascade);
+you which stored answers now depend on it? memsom answers exactly (the cascade);
 a system without provenance edges cannot answer at all -> reported n/a, NEVER
 scored 0 (it isn't failing the test, it structurally cannot take it).
 
 SERVING is the honest secondary: after the update, does the re-asked answer carry
 the new value (fresh), the old value (stale), and is staleness flagged? We expect
-memdag and a decent RAG to TIE on raw fresh_serve (both retrieve the new chunk) —
-the differentiation is that only memdag can ATTRIBUTE and FLAG. Reporting that tie
+memsom and a decent RAG to TIE on raw fresh_serve (both retrieve the new chunk) —
+the differentiation is that only memsom can ATTRIBUTE and FLAG. Reporting that tie
 is the point, not a weakness to hide.
 
-  attribution_recall   updated items the system flagged as affected  (memdag ~1.0)
-  attribution_fpr      control items wrongly flagged affected         (memdag ~0.0)
+  attribution_recall   updated items the system flagged as affected  (memsom ~1.0)
+  attribution_fpr      control items wrongly flagged affected         (memsom ~0.0)
   fresh_serve_rate     post-update answer carries the v2 value
   stale_serve_rate     post-update answer carries v1 and NOT v2 (when v1 known)
   flagged_rate         post-update answer discloses staleness

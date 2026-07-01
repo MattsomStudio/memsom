@@ -5,13 +5,13 @@ description: Build and open an HTML telemetry dashboard for the Claude memory sy
 
 # /memdash — memory telemetry dashboard
 
-Generate a self-contained HTML dashboard from the memdag store's live data and open
+Generate a self-contained HTML dashboard from the memsom store's live data and open
 it in the browser. **Read-only** — it reads the `forget_*` node columns, the
 generated `MEMORY.md`, and (optionally) the episodic session archive; it never
 mutates the store. Safe anytime.
 
 ```
-memdag dashboard
+memsom dashboard
 ```
 
 On a `/memdash` invocation, **build AND open it** — run the command as above (it
@@ -51,4 +51,4 @@ writes `~/Desktop/memory-telemetry.html` and launches the browser). Flags:
 
 - `/audit` — structural integrity (orphans, dead links). Different layer: `/audit`
   checks *correctness*, `/memdash` visualizes *telemetry*.
-- `memdag bridge-render` — the Stop hook that writes the `forget_*` data this charts.
+- `memsom bridge-render` — the Stop hook that writes the `forget_*` data this charts.

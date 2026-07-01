@@ -1,4 +1,4 @@
-"""citation_diff — what does memdag.ask hand the synthesizer vs RAG?
+"""citation_diff — what does memsom.ask hand the synthesizer vs RAG?
 
 Clean arm only (no poison). Same evidence in, diff the res.citations out --
 that list is exactly what run_headtohead.synthesize() consumes.
@@ -10,10 +10,10 @@ import sys
 import tempfile
 
 import dataset
-from adapters.memdag_adapter import MemdagAdapter
+from adapters.memsom_adapter import MemsomAdapter
 from adapters.rag_adapter import RagAdapter
 
-REPO = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\you\memdag"
+REPO = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\you\memsom"
 PATH = r"C:\Users\you\lme_data\longmemeval_oracle.json"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 
@@ -32,7 +32,7 @@ def show(tag, res, evidence):
         print("      (no citations passed to synthesizer)")
 
 
-md = MemdagAdapter(REPO)
+md = MemsomAdapter(REPO)
 rag = RagAdapter()
 
 for it in items:
@@ -45,7 +45,7 @@ for it in items:
     md.reset(d)
     for e in ev:
         md.add(e["text"], e["channel"], e.get("answer_bearing", False))
-    show("memdag", md.ask(it["question"], topk=8), ev)
+    show("memsom", md.ask(it["question"], topk=8), ev)
 
     d2 = tempfile.mkdtemp(prefix="rag_")
     rag.reset(d2)

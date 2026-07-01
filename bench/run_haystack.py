@@ -1,4 +1,4 @@
-"""run_haystack — memdag on FULL LongMemEval-S haystack, Mem0's config.
+"""run_haystack — memsom on FULL LongMemEval-S haystack, Mem0's config.
 
 Per question: fresh DB, BULK-insert all haystack turns (one migrate, one txn --
 NOT the per-turn CLI add, which re-runs migrate_all 550x), embed once, retrieve
@@ -11,10 +11,10 @@ from __future__ import annotations
 import json, os, sys, tempfile, time
 
 import openai_judge
-from adapters.memdag_adapter import MemdagAdapter
+from adapters.memsom_adapter import MemsomAdapter
 
 DATA = r"C:\Users\you\lme_data\longmemeval_s_cleaned.json"
-REPO = r"C:\Users\you\memdag"
+REPO = r"C:\Users\you\memsom"
 OUT = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\you\h2h\haystack.jsonl"
 LIMIT = int(sys.argv[2]) if len(sys.argv) > 2 else None
 TOPK = int(sys.argv[3]) if len(sys.argv) > 3 else 200
@@ -28,9 +28,9 @@ if os.path.exists(OUT):
         try: done.add(json.loads(line)["id"])
         except Exception: pass
 
-md = MemdagAdapter(REPO)
-import memdag, memdag_retrieve, memdag_cli, memdag_ingest
-LABEL = memdag_ingest.authoritative_label("user")
+md = MemsomAdapter(REPO)
+import memsom, memsom_retrieve, memsom_cli, memsom_ingest
+LABEL = memsom_ingest.authoritative_label("user")
 print(f"[haystack] {len(data)} q, {len(done)} done, topk={TOPK}", flush=True)
 
 for n, e in enumerate(data, 1):
@@ -43,15 +43,15 @@ for n, e in enumerate(data, 1):
     try:
         d = tempfile.mkdtemp(prefix="hs_")
         md.reset(d)                                  # inits DB + sets MEMDAG_DB
-        conn = memdag.get_connection()
-        memdag_cli.migrate_all(conn)                 # ONCE
+        conn = memsom.get_connection()
+        memsom_cli.migrate_all(conn)                 # ONCE
         t = time.time()
         with conn:
             for txt in turns:
-                memdag.insert_node(conn, txt, "user", label=LABEL, source_ref=None)
+                memsom.insert_node(conn, txt, "user", label=LABEL, source_ref=None)
         rec["ingest_s"] = round(time.time() - t, 1)
-        t = time.time(); memdag_retrieve.index_all(conn); rec["embed_s"] = round(time.time() - t, 1)
-        t = time.time(); rows = memdag_retrieve.retrieve(conn, q, k=TOPK); rec["retr_s"] = round(time.time() - t, 1)
+        t = time.time(); memsom_retrieve.index_all(conn); rec["embed_s"] = round(time.time() - t, 1)
+        t = time.time(); rows = memsom_retrieve.retrieve(conn, q, k=TOPK); rec["retr_s"] = round(time.time() - t, 1)
         conn.close()
         mems = [r[1] for r in rows]; rec["n_retrieved"] = len(mems)
         t = time.time(); ans = openai_judge.synthesize(q, mems); rec["synth_s"] = round(time.time() - t, 1)

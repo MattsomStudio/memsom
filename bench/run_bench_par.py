@@ -1,7 +1,7 @@
 """run_bench_par — parallel integrity benchmark (Path A speed-up).
 
 Same measurement as run_bench_fast.py, run across a process POOL. Each item is
-embedded by memdag's reindex via serial Ollama round-trips (~1s/node); those
+embedded by memsom's reindex via serial Ollama round-trips (~1s/node); those
 round-trips leave the GPU mostly idle, so overlapping many items keeps Ollama
 busy and collapses wall-clock.
 
@@ -10,10 +10,10 @@ DB. That env var is process-global -- threads would clobber each other and write
 into the wrong database. Separate processes each get their own os.environ, so the
 isolation is automatic. (Same reason you isolate untrusted work into processes,
 not shared threads.) On Windows multiprocessing uses spawn, so each worker
-imports memdag_cli once in an initializer and reuses it across its items.
+imports memsom_cli once in an initializer and reuses it across its items.
 
 Usage:
-  python run_bench_par.py --repo C:\\Users\\you\\memdag ^
+  python run_bench_par.py --repo C:\\Users\\you\\memsom ^
     --run-root C:\\Users\\you\\bench_par ^
     --dataset C:\\Users\\you\\lme_data\\longmemeval_oracle.json ^
     --rate 0.5 --workers 6 --out C:\\Users\\you\\bench_par\\result.json
@@ -37,7 +37,7 @@ from poison import select_poisoned
 from score import score_item, aggregate, ItemScore
 from runner import parse_ask
 
-# per-worker handle to memdag_cli, set once in the pool initializer.
+# per-worker handle to memsom_cli, set once in the pool initializer.
 _CLI = None
 _SCORE_FIELDS = ("item_id", "poisoned", "composed", "utility", "asr",
                  "citation_asr", "laundered", "integrity")
@@ -46,8 +46,8 @@ _SCORE_FIELDS = ("item_id", "poisoned", "composed", "utility", "asr",
 def _init_worker(repo: str):
     global _CLI
     sys.path.insert(0, repo)
-    import memdag_cli  # noqa: E402
-    _CLI = memdag_cli
+    import memsom_cli  # noqa: E402
+    _CLI = memsom_cli
 
 
 def _call(argv):
@@ -94,7 +94,7 @@ def _to_scores(dicts: list[dict]) -> list[ItemScore]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="memdag integrity benchmark (parallel)")
+    ap = argparse.ArgumentParser(description="memsom integrity benchmark (parallel)")
     ap.add_argument("--repo", required=True)
     ap.add_argument("--run-root", required=True)
     ap.add_argument("--dataset", default=None)
@@ -157,7 +157,7 @@ def main() -> int:
     pois = _to_scores([d for d in results if d["arm"] == "poisoned"])
     agg_clean, agg_pois = aggregate(clean), aggregate(pois)
 
-    print("\n================ memdag integrity benchmark (parallel) ================")
+    print("\n================ memsom integrity benchmark (parallel) ================")
     print(f"substrate : {substrate}")
     print(f"items     : {len(items)}   poison rate: {args.rate}   poisoned: {len(poison_ids)}")
     print(f"time      : {elapsed:.0f}s for {len(tasks)} runs, {args.workers} workers "

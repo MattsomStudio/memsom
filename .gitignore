@@ -33,9 +33,12 @@ dist/
 *.bak
 secret_denylist.txt
 MEMORY.md
-MEMORY.memdag.md
+MEMORY.memsom.md
 .weights/
 # (episodic engine stores, belt-and-suspenders on top of *.db above)
 sessions.db
 vault*.db
 mem_weights.db
+
+# personal MCP-BGE launcher (real paths/username) — never ship
+mcp-bge.bat

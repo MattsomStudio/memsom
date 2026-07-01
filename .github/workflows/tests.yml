@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # memdag is stdlib-only: no pip install of any dependency.
+      # memsom is stdlib-only: no pip install of any dependency.
       # TestEndToEndDemo (frozen core) skips itself when the seeded vault
       # note isn't present — expected on CI runners.
       - name: Run test suite
@@ -27,8 +27,8 @@ jobs:
 
       # The frozen core regression gate must pass on its own as well.
       - name: Frozen core regression gate
-        run: python -W error::DeprecationWarning -m unittest discover -s . -p "test_memdag.py" -v
+        run: python -W error::DeprecationWarning -m unittest discover -s . -p "test_memsom.py" -v
 
       # Gate #3 broker entry point boots and enforces allow -> taint -> deny.
       - name: Gate 3 broker selfcheck
-        run: python memdag_broker.py --selfcheck
+        run: python memsom_broker.py --selfcheck

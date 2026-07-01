@@ -5,14 +5,14 @@ consumed + wall latency, averaged over K writes. Run uncontended (single process
 sequential) so latency is clean -- token counts are contention-independent anyway.
 
 The contrast this column makes concrete:
-  memdag / memdag-bm25 / RAG : 0 LLM tokens per write (deterministic / embeddings)
+  memsom / memsom-bm25 / RAG : 0 LLM tokens per write (deterministic / embeddings)
   Mem0 / Zep                 : thousands of tokens per write (per-write extraction)
-memdag-bm25 is the zero-on-both anchor (no LLM, no embedder).
+memsom-bm25 is the zero-on-both anchor (no LLM, no embedder).
 
 Usage:
-  python perf_per_write.py --system memdag --repo C:\\Users\\you\\memdag ^
-    --run-root C:\\Users\\you\\perf\\memdag --dataset ...oracle.json --k 40 --out ...
-  python perf_per_write.py --system memdag --no-embed ...   (memdag-bm25)
+  python perf_per_write.py --system memsom --repo C:\\Users\\you\\memsom ^
+    --run-root C:\\Users\\you\\perf\\memsom --dataset ...oracle.json --k 40 --out ...
+  python perf_per_write.py --system memsom --no-embed ...   (memsom-bm25)
   python perf_per_write.py --system rag ...
 """
 
@@ -49,7 +49,7 @@ def _gather_texts(dataset, k, max_evidence):
 def main() -> int:
     ap = argparse.ArgumentParser(description="per-write token/latency cost")
     ap.add_argument("--system", required=True,
-                    choices=["memdag", "rag", "mem0", "superlocal", "zep"])
+                    choices=["memsom", "rag", "mem0", "superlocal", "zep"])
     ap.add_argument("--repo", default="")
     ap.add_argument("--run-root", required=True)
     ap.add_argument("--dataset", default=None)
@@ -63,7 +63,7 @@ def main() -> int:
     config = json.loads(args.config)
     if args.no_embed:
         config["no_embed"] = True
-    label = "memdag-bm25" if (args.system == "memdag" and args.no_embed) else args.system
+    label = "memsom-bm25" if (args.system == "memsom" and args.no_embed) else args.system
 
     texts = _gather_texts(args.dataset, args.k, args.max_evidence)
     adapter = make_adapter(args.system, args.repo, config)

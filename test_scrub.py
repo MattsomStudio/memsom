@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "scripts"))
 import scrub_gate  # noqa: E402
 
-import memdag  # noqa: E402
+import memsom  # noqa: E402
 
 
 class TestScrubGate(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestScrubGate(unittest.TestCase):
         username = "Fur" + "io"
         with tempfile.TemporaryDirectory() as d:
             leak = Path(d) / "note.md"
-            leak.write_text(f"setup runs under C:/Users/{username}/memdag here\n", encoding="utf-8")
+            leak.write_text(f"setup runs under C:/Users/{username}/memsom here\n", encoding="utf-8")
             hits = scrub_gate.scan(d)
             self.assertTrue(hits, "gate failed to catch a planted username token")
             self.assertTrue(any(tok == username.lower() for _, _, tok, _ in hits))
@@ -50,8 +50,8 @@ class TestSeedNoPersonalData(unittest.TestCase):
     def test_cmd_seed_no_personal_data(self):
         # Run the (scrubbed) demo seed offline; no node content/source_ref may
         # contain any leak token.
-        memdag.cmd_seed(Namespace(reset=True, offline=True))
-        conn = memdag.get_connection()
+        memsom.cmd_seed(Namespace(reset=True, offline=True))
+        conn = memsom.get_connection()
         try:
             rows = conn.execute("SELECT content, COALESCE(source_ref,'') FROM nodes").fetchall()
         finally:

@@ -23,7 +23,7 @@ class TestDocs(unittest.TestCase):
         tpl = HERE / ".github" / "ISSUE_TEMPLATE" / "bug_report.md"
         self.assertTrue(tpl.exists(), "bug-report issue template missing")
         body = tpl.read_text(encoding="utf-8")
-        self.assertIn("memdag doctor", body)
+        self.assertIn("memsom doctor", body)
 
     def test_readme_documents_bootstrap_and_data_dir(self):
         text = (HERE / "README.md").read_text(encoding="utf-8")

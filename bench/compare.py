@@ -1,8 +1,8 @@
 """compare — stitch per-system result JSONs into the head-to-head table.
 
 Each input is a run_headtohead.py --out file. Baselines are listed first and
-memdag last, so the table reads as the punchline: everyone else's poison lands
-and can't be contained; memdag's is provably contained (laundering 0.00) and
+memsom last, so the table reads as the punchline: everyone else's poison lands
+and can't be contained; memsom's is provably contained (laundering 0.00) and
 gateable to ~0 ASR with clean utility intact.
 
 Usage:
@@ -61,7 +61,7 @@ def main():
             "lat_per_write_ms": perf.get(d["system"], {}).get("latency_per_write_ms", "n/a"),
         })
 
-    # baselines first, memdag (the punchline) last
+    # baselines first, memsom (the punchline) last
     rows.sort(key=lambda r: (r["has_prov"], r["system"]))
 
     hdr = ["system", "clean util", "pois util", "ASR", "cite_ASR",
@@ -77,9 +77,9 @@ def main():
             _fmt(r["tok_per_write"]), _fmt(r["lat_per_write_ms"]),
         ]) + " |")
     print("\nread: ASR/cite_ASR = poison reached the answer (higher = worse).")
-    print("      laundering 0.00 = integrity floor held (memdag only has the property).")
-    print("      gated ASR = poison still landing AFTER the action gate (memdag).")
-    print("      tok/write = generative-LLM tokens per memory write (memdag = 0).\n")
+    print("      laundering 0.00 = integrity floor held (memsom only has the property).")
+    print("      gated ASR = poison still landing AFTER the action gate (memsom).")
+    print("      tok/write = generative-LLM tokens per memory write (memsom = 0).\n")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the versioned migration registry in memdag_schema.
+"""Tests for the versioned migration registry in memsom_schema.
 
 Covers:
   (a) fresh DB -> migrate_all stamps CURRENT_VERSION; status CHECK enforced.
@@ -25,14 +25,14 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-import memdag
-import memdag_cli
-import memdag_schema
+import memsom
+import memsom_cli
+import memsom_schema
 
 
 def _insert(conn, content, channel="user", label=1, status="live", **extra):
     cols = ["content", "channel", "label", "source_ref", "created_at", "status"]
-    vals = [content, channel, label, None, memdag.now_iso(), status]
+    vals = [content, channel, label, None, memsom.now_iso(), status]
     for k, v in extra.items():
         cols.append(k)
         vals.append(v)
@@ -50,7 +50,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = Path(self.tmp.name) / "sub" / "test.db"
         os.environ["MEMDAG_DB"] = str(self.db)
-        self.conn = memdag.get_connection()
+        self.conn = memsom.get_connection()
 
     def tearDown(self):
         self.conn.close()
@@ -59,17 +59,17 @@ class Base(unittest.TestCase):
 
     def _add_legacy_status(self):
         """Mimic the per-module add_column path: status without the CHECK."""
-        memdag_schema.add_column(
+        memsom_schema.add_column(
             self.conn, "nodes", "status", "TEXT NOT NULL DEFAULT 'live'"
         )
 
 
 class TestFreshDb(Base):
     def test_fresh_migrate_all_stamps_version_and_enforces_check(self):
-        memdag_cli.migrate_all(self.conn)
+        memsom_cli.migrate_all(self.conn)
         v = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(v, memdag_schema.CURRENT_VERSION)
-        self.assertTrue(memdag_schema._status_check_present(self.conn))
+        self.assertEqual(v, memsom_schema.CURRENT_VERSION)
+        self.assertTrue(memsom_schema._status_check_present(self.conn))
 
         # valid statuses succeed
         _insert(self.conn, "a", status="live")
@@ -80,7 +80,7 @@ class TestFreshDb(Base):
             _insert(self.conn, "c", status="bogus")
 
     def test_fresh_preserves_channel_and_label_checks(self):
-        memdag_cli.migrate_all(self.conn)
+        memsom_cli.migrate_all(self.conn)
         with self.assertRaises(sqlite3.IntegrityError):
             _insert(self.conn, "x", channel="not-a-channel")
         with self.assertRaises(sqlite3.IntegrityError):
@@ -100,15 +100,15 @@ class TestLegacyDb(Base):
                 "INSERT INTO edges(child, parent) VALUES (?,?)", (cid, pid)
             )
 
-        self.assertFalse(memdag_schema._status_check_present(self.conn))
-        memdag_schema.run_versioned_migrations(self.conn)
+        self.assertFalse(memsom_schema._status_check_present(self.conn))
+        memsom_schema.run_versioned_migrations(self.conn)
 
         # version bumped, CHECK present
         self.assertEqual(
             self.conn.execute("PRAGMA user_version").fetchone()[0],
-            memdag_schema.CURRENT_VERSION,
+            memsom_schema.CURRENT_VERSION,
         )
-        self.assertTrue(memdag_schema._status_check_present(self.conn))
+        self.assertTrue(memsom_schema._status_check_present(self.conn))
 
         # rows intact: ids, content, status
         rows = self.conn.execute(
@@ -139,10 +139,10 @@ class TestLegacyDb(Base):
             self.conn.execute(
                 "INSERT INTO nodes(content,channel,label,source_ref,"
                 "created_at,status) VALUES('bad','user',1,NULL,?, 'archived')",
-                (memdag.now_iso(),),
+                (memsom.now_iso(),),
             )
         with self.assertRaises(ValueError) as ctx:
-            memdag_schema.run_versioned_migrations(self.conn)
+            memsom_schema.run_versioned_migrations(self.conn)
         self.assertIn("status CHECK", str(ctx.exception))
         # rebuild aborted; data untouched; version still 0
         self.assertEqual(
@@ -158,12 +158,12 @@ class TestIdempotency(Base):
         self._add_legacy_status()
         self.conn.execute("PRAGMA user_version = 0")
         _insert(self.conn, "a", status="live")
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
         v1 = self.conn.execute("PRAGMA user_version").fetchone()[0]
 
         # a row inserted between the two runs must survive (no drop/recreate)
         rid = _insert(self.conn, "between", status="live")
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
         v2 = self.conn.execute("PRAGMA user_version").fetchone()[0]
 
         self.assertEqual(v1, v2, "version must not change on second run")
@@ -174,22 +174,22 @@ class TestIdempotency(Base):
         )
 
     def test_current_db_skips_all_steps(self):
-        memdag_cli.migrate_all(self.conn)
+        memsom_cli.migrate_all(self.conn)
         # full migrate again — should be a pure no-op at CURRENT_VERSION
         before = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        memdag_cli.migrate_all(self.conn)
+        memsom_cli.migrate_all(self.conn)
         after = self.conn.execute("PRAGMA user_version").fetchone()[0]
-        self.assertEqual(before, after, memdag_schema.CURRENT_VERSION)
+        self.assertEqual(before, after, memsom_schema.CURRENT_VERSION)
 
 
 class TestColumnPreservation(Base):
     def test_extra_columns_survive_rebuild(self):
         self._add_legacy_status()
-        memdag_schema.add_column(self.conn, "nodes", "uuid", "TEXT")
-        memdag_schema.add_column(
+        memsom_schema.add_column(self.conn, "nodes", "uuid", "TEXT")
+        memsom_schema.add_column(
             self.conn, "nodes", "archived", "INTEGER NOT NULL DEFAULT 0"
         )
-        memdag_schema.add_column(
+        memsom_schema.add_column(
             self.conn, "nodes", "conf_label", "INTEGER NOT NULL DEFAULT 0"
         )
         self.conn.execute("PRAGMA user_version = 0")
@@ -198,7 +198,7 @@ class TestColumnPreservation(Base):
             uuid="u-123", archived=1, conf_label=2,
         )
 
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
 
         row = self.conn.execute(
             "SELECT uuid, archived, conf_label FROM nodes WHERE id=?",
@@ -207,7 +207,7 @@ class TestColumnPreservation(Base):
         self.assertEqual(row, ("u-123", 1, 2))
         # the columns themselves still exist in the schema
         for c in ("uuid", "archived", "conf_label", "status"):
-            self.assertTrue(memdag_schema.column_exists(self.conn, "nodes", c))
+            self.assertTrue(memsom_schema.column_exists(self.conn, "nodes", c))
 
 
 class TestEdgeIntegrity(Base):
@@ -221,7 +221,7 @@ class TestEdgeIntegrity(Base):
             self.conn.execute("INSERT INTO edges(child,parent) VALUES (?,?)", (b, a))
             self.conn.execute("INSERT INTO edges(child,parent) VALUES (?,?)", (c, b))
 
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
 
         self.assertEqual(
             self.conn.execute(
@@ -241,7 +241,7 @@ class TestEdgeIntegrity(Base):
         b = _insert(self.conn, "b")
         with self.conn:
             self.conn.execute("DELETE FROM nodes WHERE id=?", (b,))
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
         new_id = _insert(self.conn, "c")
         self.assertGreater(new_id, b)
 
@@ -249,21 +249,21 @@ class TestEdgeIntegrity(Base):
 class TestBaselineReconciler(Base):
     def test_db_with_check_and_v0_is_stamped_without_rebuild(self):
         # Bring the DB fully current so the CHECK is present.
-        memdag_cli.migrate_all(self.conn)
-        self.assertTrue(memdag_schema._status_check_present(self.conn))
+        memsom_cli.migrate_all(self.conn)
+        self.assertTrue(memsom_schema._status_check_present(self.conn))
         # Force user_version back to 0 to simulate a current-schema DB that was
         # never stamped (e.g. created before the registry existed).
         self.conn.execute("PRAGMA user_version = 0")
-        ddl_before = memdag_schema._nodes_ddl(self.conn)
+        ddl_before = memsom_schema._nodes_ddl(self.conn)
 
-        memdag_schema.run_versioned_migrations(self.conn)
+        memsom_schema.run_versioned_migrations(self.conn)
 
         # stamped to current; DDL untouched (no rebuild happened)
         self.assertEqual(
             self.conn.execute("PRAGMA user_version").fetchone()[0],
-            memdag_schema.CURRENT_VERSION,
+            memsom_schema.CURRENT_VERSION,
         )
-        self.assertEqual(memdag_schema._nodes_ddl(self.conn), ddl_before)
+        self.assertEqual(memsom_schema._nodes_ddl(self.conn), ddl_before)
 
 
 if __name__ == "__main__":
