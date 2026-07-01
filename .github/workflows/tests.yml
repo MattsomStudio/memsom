@@ -4,13 +4,33 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    # nightly full matrix (incl. Windows) at 07:00 UTC (~03:00 ET)
+    - cron: "0 7 * * *"
 
 jobs:
+  # Windows on hosted runners is I/O-bound-slow (~10 min vs ~30s elsewhere) because
+  # the suite churns hundreds of on-disk temp SQLite DBs. Skip it on plain pushes for
+  # fast feedback; run the FULL matrix on PRs, the nightly schedule, and manual runs.
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.set.outputs.os }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo 'os=["ubuntu-latest","macos-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+
   unittest:
+    needs: config
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.config.outputs.os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
