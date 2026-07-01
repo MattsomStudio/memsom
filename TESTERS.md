@@ -19,6 +19,23 @@ Report anything. A confusing error message is a bug. A step that didn't match wh
 
 ---
 
+## Upgrading from the `memdag` beta?
+
+This project was renamed **memdag → memsom** (2026-07-01). If you installed the
+earlier `memdag` beta, migrate in three steps — **your data is safe**, it lives
+in `~/.memdag/` and that path is unchanged:
+
+1. Pull + reinstall: `git pull` in your clone (it renames itself), then
+   `pip uninstall -y memdag && pip install -e .` in your venv.
+2. Re-run `memsom wire-claude` — it recognizes your old `memdag:managed` block
+   and migrates it in place (no duplicate).
+3. Restart your AI client. The MCP tools move from `mcp__memdag__*` to
+   `mcp__memsom__*` automatically.
+
+Nothing to export or re-import — same `~/.memdag/memdag.db` store, same nodes.
+
+---
+
 ## Part 1 — Install (everyone, ~10 min)
 
 ### Step 1: Clone the repo
