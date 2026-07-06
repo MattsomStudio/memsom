@@ -3,10 +3,12 @@
 Run:  python -m unittest discover -s . -p test_memsom_verify_stale.py
 """
 
+import argparse
 import os
 import tempfile
 import unittest
 import warnings
+from argparse import Namespace
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -174,6 +176,34 @@ class TestReconcile(Base):
         bi.import_all(self.conn, self.mem, dry_run=False)
         vs.recompute_verify_stale(self.conn, now=NOW)
         self.assertNotIn("project_site", self._stale_stems())  # fresh node, no flag
+
+
+# --- CLI wiring (memsom_cli / MCP shell out to `verify-stale` / `--apply`) ----
+
+class TestCLI(Base):
+    def test_register_mounts_verify_stale_with_apply_flag(self):
+        p = argparse.ArgumentParser(prog="memsom_test_parser")
+        sub = p.add_subparsers(dest="command", required=True)
+        vs.register(sub)
+        self.assertIn("verify-stale", sub.choices)
+        args = p.parse_args(["verify-stale", "--apply"])
+        self.assertTrue(args.apply)
+        self.assertIs(args.func, vs._cmd_verify_stale)
+
+    def test_register_apply_defaults_false(self):
+        p = argparse.ArgumentParser(prog="memsom_test_parser")
+        sub = p.add_subparsers(dest="command", required=True)
+        vs.register(sub)
+        args = p.parse_args(["verify-stale"])
+        self.assertFalse(args.apply)
+
+    def test_cmd_dry_run_makes_no_writes(self):
+        vs._cmd_verify_stale(Namespace(apply=False))
+        self.assertEqual(self._stale_stems(), set())
+
+    def test_cmd_apply_marks_stale(self):
+        vs._cmd_verify_stale(Namespace(apply=True))
+        self.assertEqual(self._stale_stems(), {"project_site", "project_due"})
 
 
 if __name__ == "__main__":

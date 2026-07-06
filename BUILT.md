@@ -403,3 +403,45 @@ failures** (was 404; +12 in `test_memsom_keepalive.py`).
   vs ~15s) — that's the hygiene working, not a bug. Unset (the default), the
   local sweep is fast again; CI is unaffected either way (no Ollama → instant
   connection-refused fallback).
+
+## `verify-stale` wired into the shipped CLI + MCP surface (2026-07-06)
+
+`memsom.py` / `test_memsom.py` stayed frozen. Suite: **885 passing, 0
+failures** (+5 net new — 4 in `test_memsom_verify_stale.py`, +1 net in
+`test_memsom_mcp.py`).
+
+- **No new core logic, no new schema — this is a wiring fix.**
+  `memsom_verify_stale.py` (verification-age staleness over `memory:`-sourced
+  notes, built and tested long ago — 14 tests) has had a working
+  `register(sub)` mounting CLI verb `verify-stale` the whole time, but
+  `memsom_cli.py` never imported or registered the module. It was only
+  reachable standalone or silently inside `memsom_bridge_render.py`'s
+  internal pipeline (wrapped in a bare `try/except`, failures never
+  surfaced). Closed the gap: `memsom_cli.py` now imports and registers it
+  (one line, same pattern as every other feature module); no migration
+  needed — it operates entirely on columns `memsom_stale.py` already owns.
+- **MCP tool added:** `verify_stale` (underscored per the `check_action` /
+  `ingest_text` convention for multi-word tool names), dispatching to
+  `verify-stale [--apply]`. Tool count 16 → 17.
+- **Naming note:** deliberately NOT named `consolidate` — that CLI
+  subcommand/MCP tool already exists (`memsom_quarantine.consolidate()`, the
+  taint/quarantine gate) and means something unrelated. Skill folder name
+  matches the CLI verb 1:1 (`claude/skills/verify-stale/`), same convention
+  as the `audit` skill.
+- **New skill:** `claude/skills/verify-stale/SKILL.md`, alongside the
+  existing `audit`/`memdash`/`recall`/`saveall` productized skills.
+- **Test counts:**
+
+  | Test file                      | New tests | Notes |
+  |---------------------------------|-----------|-------|
+  | tests/test_memsom_verify_stale.py | 4       | `TestCLI`: `register()` mounts `verify-stale --apply`, `--apply` defaults False, dry-run makes no writes, `--apply` marks |
+  | tests/test_memsom_mcp.py        | net +1    | tool-count assertion bumped 16→17; new `test_tools_call_verify_stale_apply_marks_and_dry_run_does_not` (real DB-effect check, not just no-crash) |
+
+- **Scope, deliberately not built:** no LLM narration layer
+  (`memsom_llm.py` is a well-isolated, proven opt-in pattern for this if
+  wanted later, but the deterministic sweep alone satisfies the gap — no new
+  LLM dependency for v1); no expansion of the scan beyond `memory:`-sourced
+  bridge notes to the whole DAG store (a natural phase-2, not needed to
+  close the wiring gap); `memsom_bridge_render.py`'s existing silent
+  try/except around its internal `verify-stale` call is untouched (separate,
+  deliberate fail-safe design).

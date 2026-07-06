@@ -6,7 +6,7 @@ Entry point: `python memsom_cli.py <subcommand>`.
 This file wires all 16 feature modules into a single argparse CLI.
 memsom.py (demo #1) is NOT touched — it stays byte-identical.
 
-Subcommands (38 total):
+Subcommands (39 total):
   Core (delegated to memsom.*):   seed ask explain revoke dump
   CLI-owned enhanced:             ask (enhanced), add, migrate
   Modules via register():
@@ -25,6 +25,7 @@ Subcommands (38 total):
     memsom_profile    -> profile
     memsom_gate       -> check-action gate-log
     memsom_corroborate -> register-root assert-claim corroborate claims-list roots-list
+    memsom_verify_stale -> verify-stale
 """
 
 import argparse
@@ -65,6 +66,7 @@ import memsom_capgate
 import memsom_broker
 import memsom_hook
 import memsom_stale
+import memsom_verify_stale
 import memsom_bridge_render
 import memsom_claude
 import memsom_wire_claude
@@ -647,6 +649,7 @@ def main(argv=None):
     memsom_broker.register(sub)
     memsom_hook.register(sub)
     memsom_stale.register(sub)
+    memsom_verify_stale.register(sub)
     memsom_bridge_render.register(sub)
     memsom_claude.register(sub)
     memsom_wire_claude.register(sub)

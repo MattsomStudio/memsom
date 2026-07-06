@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 import warnings
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
@@ -64,10 +65,10 @@ class TestHandleInProcess(Base):
         self.assertIn("name", si)
         self.assertIn("version", si)
 
-    def test_tools_list_returns_16_tools(self):
+    def test_tools_list_returns_17_tools(self):
         resp = memsom_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
-        self.assertEqual(len(tools), 16)
+        self.assertEqual(len(tools), 17)
         names = {t["name"] for t in tools}
         self.assertEqual(names, memsom_mcp.TOOL_NAMES)
 
@@ -151,6 +152,43 @@ class TestHandleInProcess(Base):
         ).fetchone()
         self.assertIsNotNone(row, "ingest_text should have stored a node")
         self.assertEqual(row[1], "endorsed")
+
+    def test_tools_call_verify_stale_apply_marks_and_dry_run_does_not(self):
+        """verify_stale threads apply through; dry-run (default) writes nothing."""
+        import memsom_obsidian
+        memsom_obsidian.migrate(self.conn)
+        with self.conn:
+            nid = memsom.insert_node(
+                self.conn,
+                "the homelab dashboard NOT deployed yet",
+                "user",
+                source_ref="memory:mcp_verify_test",
+            )
+            old = datetime.now(timezone.utc) - timedelta(days=60)
+            self.conn.execute(
+                "UPDATE nodes SET obsidian_mtime = ? WHERE id = ?",
+                (f"{int(old.timestamp() * 1e9)}:100", nid),
+            )
+
+        # Dry-run (no `apply` arg) must not mutate.
+        resp = memsom_mcp.handle({
+            "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+            "params": {"name": "verify_stale", "arguments": {}},
+        })
+        self.assertFalse(resp["result"]["isError"])
+        self.assertIn("DRY-RUN", resp["result"]["content"][0]["text"])
+        row = self.conn.execute("SELECT stale FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], 0)
+
+        # apply=True commits the mark.
+        resp = memsom_mcp.handle({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": "verify_stale", "arguments": {"apply": True}},
+        })
+        self.assertFalse(resp["result"]["isError"])
+        self.assertIn("APPLIED", resp["result"]["content"][0]["text"])
+        row = self.conn.execute("SELECT stale FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], 1)
 
     def test_tools_call_retrieve_returns_hits(self):
         """retrieve tool returns text containing a [N] citation after seeding + reindex."""

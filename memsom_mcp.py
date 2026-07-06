@@ -231,6 +231,17 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "verify_stale",
+        "description": "Flag state-bearing memory notes whose verification age has gone stale (dry-run by default).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "apply": {"type": "boolean", "description": "Apply marks/clears (default: dry-run, no writes)"},
+            },
+            "required": [],
+        },
+    },
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
@@ -357,6 +368,12 @@ def _tool_argv(name, arguments):
             argv += ["--folder", str(arguments["folder"])]
         if arguments.get("title"):
             argv += ["--title", str(arguments["title"])]
+        return argv
+
+    if name == "verify_stale":
+        argv = ["verify-stale"]
+        if arguments.get("apply"):
+            argv.append("--apply")
         return argv
 
     raise ValueError(f"unknown tool: {name!r}")
