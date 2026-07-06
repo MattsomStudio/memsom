@@ -42,3 +42,6 @@ mem_weights.db
 
 # personal MCP-BGE launcher (real paths/username) — never ship
 mcp-bge.bat
+
+# local Claude workflow orchestration scripts (machine-specific paths) -- never ship
+.claude/
