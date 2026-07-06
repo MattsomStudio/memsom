@@ -155,8 +155,8 @@ class TestHandleInProcess(Base):
 
     def test_tools_call_verify_stale_apply_marks_and_dry_run_does_not(self):
         """verify_stale threads apply through; dry-run (default) writes nothing."""
-        import memsom_obsidian
-        memsom_obsidian.migrate(self.conn)
+        import memsom_bridge_import
+        memsom_bridge_import.migrate(self.conn)
         with self.conn:
             nid = memsom.insert_node(
                 self.conn,
@@ -166,7 +166,7 @@ class TestHandleInProcess(Base):
             )
             old = datetime.now(timezone.utc) - timedelta(days=60)
             self.conn.execute(
-                "UPDATE nodes SET obsidian_mtime = ? WHERE id = ?",
+                "UPDATE nodes SET bridge_mtime = ? WHERE id = ?",
                 (f"{int(old.timestamp() * 1e9)}:100", nid),
             )
 

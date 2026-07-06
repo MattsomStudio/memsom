@@ -15,13 +15,19 @@ Design (locked in plan Phase 0):
     hand-curated grouping as the canonical baseline the digest renders against.
   - Channel = trust grade by type:  user_/personal_/feedback_ -> endorsed (pinned,
     never demote);  project_/reference_ -> user (demotable, what RS ranking sorts).
-  - Idempotent: keyed on nodes.obsidian_path (the filename) + content_hash.  A
+  - Idempotent: keyed on nodes.bridge_path (the filename) + content_hash.  A
     re-run with no file change creates nothing.  A changed file tombstones the old
     node and inserts a new one (append-only ethos).
+  - bridge_path/bridge_mtime are OWNED by this importer, not shared with
+    memsom_obsidian's obsidian_path/obsidian_mtime (real Obsidian vault notes).
+    They used to be the same columns — memsom_obsidian's vault-prune pass would
+    then revoke-cascade bridge-imported memory nodes it never wrote, because
+    nothing distinguished "my path" from "some other importer's path" sharing the
+    same field. See memsom_forget's docstring for the same lesson learned earlier.
 
 Library discipline: the import_* functions never print or sys.exit; only main()
 and the _cmd_* wrapper do I/O.  Frozen core (memsom.py) is untouched — this is a
-pure consumer of insert_node + the obsidian_path/content_hash columns.
+pure consumer of insert_node + the bridge_path/content_hash columns.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from pathlib import Path
 
 import memsom
 import memsom_ingest
-import memsom_obsidian
+import memsom_schema
 
 
 # --- channel mapping (plan Phase 0b) -----------------------------------------
@@ -53,17 +59,42 @@ DEFAULT_CHANNEL = "user"  # unknown/untyped memory -> user-grade, demotable
 def migrate(conn) -> None:
     """Idempotent: ensure the columns this importer writes exist.
 
-    obsidian_path / obsidian_mtime come from memsom_obsidian; content_hash from
-    memsom_ingest; the stale triple + source_supersedes/stale_log from memsom_stale
-    (so the verification-staleness pass + the render's stale-awareness have their
-    columns on BOTH machines via the existing bridge migrate chain).  All additive
-    nullable columns (frozen core never reads them), so this is safe to call
-    standalone or via migrate_all.
+    bridge_path / bridge_mtime are this importer's own (not shared with
+    memsom_obsidian); content_hash from memsom_ingest; the stale triple +
+    source_supersedes/stale_log from memsom_stale (so the verification-staleness
+    pass + the render's stale-awareness have their columns on BOTH machines via
+    the existing bridge migrate chain).  All additive nullable columns (frozen
+    core never reads them), so this is safe to call standalone or via
+    migrate_all.
     """
-    memsom_obsidian.migrate(conn)
+    memsom_schema.add_column(conn, "nodes", "bridge_path", "TEXT")
+    memsom_schema.add_column(conn, "nodes", "bridge_mtime", "TEXT")
     memsom_ingest.migrate(conn)
     import memsom_stale          # lazy: mirror memsom_ingest's defensive import style
     memsom_stale.migrate(conn)   # nodes.{stale,stale_at,stale_reason} + supersedes/log
+    _migrate_legacy_obsidian_columns(conn)
+
+
+def _migrate_legacy_obsidian_columns(conn) -> None:
+    """One-time, idempotent data move for DBs created before bridge_path existed.
+
+    Before this fix, bridge-imported memory nodes were stamped on the SHARED
+    obsidian_path/obsidian_mtime columns (borrowed from memsom_obsidian). Any
+    such row is moved onto bridge_path/bridge_mtime and the borrowed columns are
+    cleared, so memsom_obsidian's vault sync (scoped only by
+    "obsidian_path IS NOT NULL") never mistakes a memory-bridge node for one of
+    its own vault notes again. No-op on a DB that has never loaded memsom_obsidian
+    (no obsidian_path column yet) and no-op on rows already migrated.
+    """
+    if not memsom_schema.column_exists(conn, "nodes", "obsidian_path"):
+        return  # memsom_obsidian has never run here — nothing to reclaim
+    with conn:
+        conn.execute(
+            "UPDATE nodes SET bridge_path = obsidian_path, bridge_mtime = obsidian_mtime, "
+            "obsidian_path = NULL, obsidian_mtime = NULL "
+            "WHERE source_ref LIKE 'memory:%' AND obsidian_path IS NOT NULL "
+            "AND bridge_path IS NULL"
+        )
 
 
 # --- frontmatter parsing (light, stdlib) -------------------------------------
@@ -310,7 +341,7 @@ def _live_node_for_path(conn, rel: str):
     """Return (id, content_hash) of the live node for *rel*, or None."""
     return conn.execute(
         "SELECT id, content_hash FROM nodes "
-        "WHERE obsidian_path = ? AND tombstoned = 0 ORDER BY id DESC LIMIT 1",
+        "WHERE bridge_path = ? AND tombstoned = 0 ORDER BY id DESC LIMIT 1",
         (rel,),
     ).fetchone()
 
@@ -342,7 +373,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
     def _do():
         for path in files:
-            rel = path.name                      # obsidian_path key, e.g. user_adhd.md
+            rel = path.name                      # bridge_path key, e.g. user_adhd.md
             stem = path.stem
             raw = path.read_text(encoding="utf-8")
             fm = fm_top_level(split_frontmatter(raw)[0])
@@ -375,7 +406,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
             nid = memsom.insert_node(conn, stamped, channel, source_ref=f"memory:{stem}")
             conn.execute(
-                "UPDATE nodes SET obsidian_path = ?, obsidian_mtime = ?, content_hash = ? "
+                "UPDATE nodes SET bridge_path = ?, bridge_mtime = ?, content_hash = ? "
                 "WHERE id = ?",
                 (rel, _mtime_sig(path), new_hash, nid),
             )
@@ -383,14 +414,14 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
         # reconcile deletions: tombstone live file-backed nodes whose source
         # file has vanished. The loop above only ever touches files that EXIST,
         # so without this a deleted memory's node lingers live forever (the gap
-        # that once orphaned a deleted note's node). Literals (obsidian_path
+        # that once orphaned a deleted note's node). Literals (bridge_path
         # IS NULL) are excluded here — import_literals reconciles those against
         # the index.
         present = {p.name for p in files}
         gone = conn.execute(
-            "SELECT id, obsidian_path FROM nodes "
+            "SELECT id, bridge_path FROM nodes "
             "WHERE source_ref LIKE 'memory:%' AND source_ref NOT LIKE 'memory:literal:%' "
-            "AND tombstoned = 0 AND obsidian_path IS NOT NULL"
+            "AND tombstoned = 0 AND bridge_path IS NOT NULL"
         ).fetchall()
         for nid, opath in gone:
             if opath in present:

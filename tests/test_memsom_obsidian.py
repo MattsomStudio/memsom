@@ -16,6 +16,8 @@ warnings.simplefilter("error", DeprecationWarning)
 import memsom
 import memsom_relate
 import memsom_obsidian
+import memsom_bridge_import
+import memsom_schema
 
 
 class Base(unittest.TestCase):
@@ -288,6 +290,118 @@ class TestSync(Base):
         # File still present -> a prune pass must keep it.
         memsom_obsidian.sync_vault(self.conn, self.vault, prune=True)
         self.assertTrue(self.live_for("Steady.md"))
+
+
+# ---------------------------------------------------------------------------
+# Bridge/vault isolation (regression: bridge_path/bridge_mtime split)
+#
+# Before this fix, memsom_bridge_import borrowed memsom_obsidian's
+# obsidian_path/obsidian_mtime columns. sync_vault()'s prune pass (scoped only
+# by "obsidian_path IS NOT NULL", with no origin check) and its ingest pass
+# (looked up existing nodes by bare filename alone) would then treat ANY
+# memory-bridge node as one of its own vault notes. Caught 2026-07-06: running
+# obsidian-sync against an unrelated vault silently revoke-cascaded a
+# bridge-imported memory node because the two subsystems shared one field with
+# no discriminator — a confused-deputy shape, not a vault-specific bug.
+# ---------------------------------------------------------------------------
+
+class TestBridgeIsolation(Base):
+    def _bridge_note(self, tmpdir_path, stem, text):
+        """Write one memory-bridge-style file and import it via the real
+        bridge_import path (not a hand-rolled DB insert) so the fixture matches
+        production exactly."""
+        mem = tmpdir_path / "memory"
+        mem.mkdir(exist_ok=True)
+        (mem / f"{stem}.md").write_text(
+            f"---\nname: {stem}\ndescription: test\ntype: project\n---\n{text}\n",
+            encoding="utf-8",
+        )
+        memsom_bridge_import.migrate(self.conn)
+        memsom_bridge_import.import_all(self.conn, mem, dry_run=False)
+        return mem
+
+    def test_sync_vault_does_not_prune_unrelated_bridge_node(self):
+        # Mechanism 1: the exact bug. A bridge node sharing NOTHING with the
+        # vault (different directory, never synced by memsom_obsidian) must
+        # survive an obsidian-sync prune pass untouched.
+        self._bridge_note(self.root, "project_widget", "widget status note")
+        row = self.conn.execute(
+            "SELECT id FROM nodes WHERE source_ref = 'memory:project_widget' "
+            "AND tombstoned = 0"
+        ).fetchone()
+        self.assertIsNotNone(row, "bridge import did not create the node")
+        bridge_nid = row[0]
+
+        self.note("Unrelated.md", "a real vault note, nothing to do with the bridge")
+        memsom_obsidian.sync_vault(self.conn, self.vault)  # prune=True default
+
+        self.assertEqual(
+            memsom.get_node(self.conn, bridge_nid)["tombstoned"], 0,
+            "obsidian-sync tombstoned a memory-bridge node it does not own",
+        )
+
+    def test_sync_vault_ingest_does_not_collide_on_shared_filename(self):
+        # Mechanism 2: a vault note happens to share a filename with a bridge
+        # memory file. Ingesting the vault note must not revoke or overwrite
+        # the unrelated bridge node.
+        self._bridge_note(self.root, "project_widget", "widget status from the bridge")
+        row = self.conn.execute(
+            "SELECT id, content FROM nodes WHERE source_ref = 'memory:project_widget' "
+            "AND tombstoned = 0"
+        ).fetchone()
+        bridge_nid, bridge_content = row
+
+        self.note("project_widget.md", "an unrelated vault note, same filename by coincidence")
+        memsom_obsidian.sync_vault(self.conn, self.vault)
+
+        bridge_node = memsom.get_node(self.conn, bridge_nid)
+        self.assertEqual(bridge_node["tombstoned"], 0,
+                          "vault ingest revoked the bridge node on a filename coincidence")
+        self.assertEqual(bridge_node["content"], bridge_content,
+                          "bridge node content was overwritten by an unrelated vault note")
+        # the vault note got its OWN independent node
+        vault_ids = self.live_for("project_widget.md")
+        self.assertTrue(vault_ids)
+        self.assertNotIn(bridge_nid, vault_ids)
+
+    def test_legacy_column_migration_moves_bridge_rows_only(self):
+        # A DB created before bridge_path existed had bridge rows stamped on
+        # the shared obsidian_path/obsidian_mtime columns. Migrating must move
+        # ONLY memory:% rows onto bridge_path/bridge_mtime and clear the
+        # borrowed columns — a genuine vault-owned row must be left alone.
+        with self.conn:
+            legacy_id = memsom.insert_node(
+                self.conn, "legacy bridge content", "user",
+                source_ref="memory:project_legacy",
+            )
+            self.conn.execute(
+                "UPDATE nodes SET obsidian_path = ?, obsidian_mtime = ? WHERE id = ?",
+                ("project_legacy.md", "123456:100", legacy_id),
+            )
+
+        self.note("RealVaultNote.md", "a genuine obsidian vault note")
+        memsom_obsidian.sync_vault(self.conn, self.vault)
+        vault_id = self.live_for("RealVaultNote.md")[0]
+
+        memsom_bridge_import.migrate(self.conn)  # runs the one-time reclaim
+
+        legacy_row = self.conn.execute(
+            "SELECT bridge_path, bridge_mtime, obsidian_path, obsidian_mtime "
+            "FROM nodes WHERE id = ?", (legacy_id,)).fetchone()
+        self.assertEqual(legacy_row, ("project_legacy.md", "123456:100", None, None))
+
+        vault_row = self.conn.execute(
+            "SELECT obsidian_path, bridge_path FROM nodes WHERE id = ?", (vault_id,)
+        ).fetchone()
+        self.assertEqual(vault_row, ("RealVaultNote.md", None),
+                          "migration touched a genuine vault-owned row")
+
+        # idempotent: running it again changes nothing
+        memsom_bridge_import.migrate(self.conn)
+        legacy_row2 = self.conn.execute(
+            "SELECT bridge_path, bridge_mtime, obsidian_path, obsidian_mtime "
+            "FROM nodes WHERE id = ?", (legacy_id,)).fetchone()
+        self.assertEqual(legacy_row2, legacy_row)
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ Design:
     PROGRESS", "DUE <date>") are candidates.  The regex is the main false-positive
     tunable; it is held to the verified phrase list (precision over recall).
   - AS-OF time = `last-verified:` frontmatter if present, else the file's
-    obsidian_mtime (last-touched).  A note untouched past the threshold while still
+    bridge_mtime (last-touched).  A note untouched past the threshold while still
     asserting a transient state is, by definition, unverified.
   - REASON-NAMESPACE OWNERSHIP (the critical safety boundary): this pass only ever
     CLEARS staleness whose reason it set ("unverified since …" / "overdue …").  A
@@ -38,6 +38,7 @@ import sys
 from datetime import datetime, timezone
 
 import memsom
+import memsom_schema
 import memsom_stale
 from memsom_bridge_import import split_frontmatter, fm_top_level
 
@@ -95,16 +96,16 @@ def _parse_date(s):
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _as_of(content, obsidian_mtime):
+def _as_of(content, bridge_mtime):
     """When this note was last KNOWN-good: last-verified frontmatter wins, else the
-    file mtime (obsidian_mtime is "<ns>:<size>").  None if neither is parseable."""
+    file mtime (bridge_mtime is "<ns>:<size>").  None if neither is parseable."""
     fm = fm_top_level(split_frontmatter(content or "")[0])
     lv = _parse_date(fm.get("last-verified") or fm.get("last_verified"))
     if lv is not None:
         return lv
-    if not obsidian_mtime:
+    if not bridge_mtime:
         return None
-    head = str(obsidian_mtime).split(":", 1)[0]
+    head = str(bridge_mtime).split(":", 1)[0]
     try:
         ns = int(head)
     except ValueError:
@@ -133,7 +134,7 @@ def _owned(reason) -> bool:
     return bool(reason) and str(reason).startswith(OWNED_PREFIXES)
 
 
-def assess(content, obsidian_mtime, now, threshold_days):
+def assess(content, bridge_mtime, now, threshold_days):
     """(stale, reason) for ONE memory node.  Deterministic per (node, clock):
     a node only ever transitions fresh->stale as the clock advances (age crossing
     or a DUE date passing); it never self-heals (that needs an edit -> new node)."""
@@ -144,7 +145,7 @@ def assess(content, obsidian_mtime, now, threshold_days):
         return (True, f"overdue: {due} passed")
     if not is_state_bearing(content):             # stable fact -> never stale
         return (False, None)
-    asof = _as_of(content, obsidian_mtime)
+    asof = _as_of(content, bridge_mtime)
     if asof is None:                              # can't prove age -> don't flag
         return (False, None)
     if (now - asof).days > threshold_days:
@@ -164,6 +165,7 @@ def recompute_verify_stale(conn, *, now=None, threshold_days=None, dry_run=False
     "project_x", not "memory:project_x") for an optional forget hand-off.
     """
     memsom_stale.migrate(conn)                    # defensive (also done in bi.migrate)
+    memsom_schema.add_column(conn, "nodes", "bridge_mtime", "TEXT")  # defensive ditto
     now = now or _now()
     thr = threshold_days if threshold_days is not None else _threshold_days()
     marked, cleared, stale_stems = [], [], set()
@@ -173,7 +175,7 @@ def recompute_verify_stale(conn, *, now=None, threshold_days=None, dry_run=False
     # to the clear-if-owned branch (want stays False), so a kill-switch run clears
     # any verify flag left on one — but they are never freshly marked.
     rows = conn.execute(
-        "SELECT id, content, source_ref, obsidian_mtime, stale, stale_reason, channel "
+        "SELECT id, content, source_ref, bridge_mtime, stale, stale_reason, channel "
         "FROM nodes WHERE tombstoned = 0 AND source_ref LIKE 'memory:%' "
         "AND source_ref NOT LIKE 'memory:literal:%'"
     ).fetchall()

@@ -189,7 +189,7 @@ class TestImport(Base):
         self.assertEqual(memsom.get_node(self.conn, old)["tombstoned"], 1)
         # still exactly one LIVE node for the path
         live_for_path = self.conn.execute(
-            "SELECT COUNT(*) FROM nodes WHERE obsidian_path = ? AND tombstoned = 0",
+            "SELECT COUNT(*) FROM nodes WHERE bridge_path = ? AND tombstoned = 0",
             ("project_kali.md",)).fetchone()[0]
         self.assertEqual(live_for_path, 1)
 

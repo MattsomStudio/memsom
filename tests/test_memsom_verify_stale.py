@@ -24,7 +24,7 @@ NOW = datetime(2026, 6, 25, tzinfo=timezone.utc)
 
 
 def _ns(dt):
-    """obsidian_mtime string for a given datetime."""
+    """bridge_mtime string for a given datetime."""
     return f"{int(dt.timestamp() * 1e9)}:100"
 
 
@@ -122,7 +122,7 @@ class Base(unittest.TestCase):
         self.tmp.cleanup()
 
     def _set_mtime(self, stem, dt):
-        self.conn.execute("UPDATE nodes SET obsidian_mtime = ? WHERE source_ref = ?",
+        self.conn.execute("UPDATE nodes SET bridge_mtime = ? WHERE source_ref = ?",
                           (_ns(dt), f"memory:{stem}"))
         self.conn.commit()
 
