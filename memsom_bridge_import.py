@@ -42,6 +42,7 @@ from pathlib import Path
 import memsom
 import memsom_ingest
 import memsom_schema
+import memsom_schema
 
 
 # --- channel mapping (plan Phase 0b) -----------------------------------------
@@ -338,9 +339,15 @@ def import_all(conn, memory_dir, *, dry_run: bool = True) -> dict:
 # --- DB helpers ---------------------------------------------------------------
 
 def _live_node_for_path(conn, rel: str):
-    """Return (id, content_hash) of the live node for *rel*, or None."""
+    """Return (id, content_hash, redacted) of the live node for *rel*, or None.
+
+    *redacted* is 0 on a store predating the redact migration (column absent) — the
+    resurrection guard just doesn't fire there, which is correct (no redactions yet).
+    """
+    rcol = ("redacted" if memsom_schema.column_exists(conn, "nodes", "redacted")
+            else "0 AS redacted")
     return conn.execute(
-        "SELECT id, content_hash FROM nodes "
+        f"SELECT id, content_hash, {rcol} FROM nodes "
         "WHERE bridge_path = ? AND tombstoned = 0 ORDER BY id DESC LIMIT 1",
         (rel,),
     ).fetchone()
@@ -369,7 +376,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
     files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
     stats = {"total_files": len(files), "created": 0, "updated": 0,
-             "skipped": 0, "tombstoned": 0, "swept": 0}
+             "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0}
 
     def _do():
         for path in files:
@@ -383,6 +390,24 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             new_hash = memsom_ingest._content_hash(stamped)
 
             existing = _live_node_for_path(conn, rel)
+
+            # Resurrection guard (checked BEFORE the hash-skip so an identical
+            # resurfaced copy is caught too): the live predecessor for this path
+            # was REDACTED. Its payload was deliberately destroyed, so the file
+            # must NOT rehydrate it as a fresh, non-redacted node (the silent
+            # un-redaction that redaction-reaches-disk exists to prevent) — nor
+            # linger on disk. Refuse: leave the redacted node in place and unlink
+            # the resurfaced file, whatever its hash. path is inside memory_dir by
+            # construction (glob), so no traversal check is needed here.
+            if existing and existing[2]:
+                stats["refused_resurrect"] += 1
+                if not dry_run:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                continue
+
             if existing and existing[1] == new_hash:
                 stats["skipped"] += 1
                 continue
@@ -474,6 +499,9 @@ def _print_stats(stats, dry_run):
     print(f"  files updated  : {f['updated']} (old tombstoned: {f['tombstoned']})")
     print(f"  files skipped  : {f['skipped']} (unchanged)")
     print(f"  deleted swept  : {f['swept']} (source file gone -> node tombstoned)")
+    if f.get("refused_resurrect"):
+        print(f"  RESURRECT BLK  : {f['refused_resurrect']} (redacted node's file "
+              f"resurfaced -> refused + file unlinked)")
     print(f"  literals       : {l['total']} total | {l['created']} created | "
           f"{l['skipped']} skipped | {l['tombstoned']} tombstoned")
 

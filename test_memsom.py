@@ -216,6 +216,122 @@ class TestCompose(Base):
         self.assertEqual(old["tombstoned"], 1)
 
 
+class TestDigestRedaction(Base):
+    """A redacted node keeps tombstoned=0, so without an explicit guard the digest
+    falls back to the node's stem and leaks the sensitive filename into the
+    always-loaded MEMORY.md. render_digest must drop redacted nodes entirely."""
+
+    SECTIONED = ("---\nname: user_secret_thing\nsection: About the User\n"
+                 "description: a private fact\n---\nbody")
+
+    def _add_file_node(self):
+        with self.conn:
+            return memsom.insert_node(self.conn, self.SECTIONED, "user",
+                                      source_ref="memory:user_secret_thing")
+
+    def test_stem_renders_then_drops_on_redact(self):
+        import memsom_digest, memsom_redact
+        nid = self._add_file_node()
+        self.assertIn("user_secret_thing", memsom_digest.render_digest(self.conn))
+        memsom_redact.redact_node(self.conn, nid, "test erasure", cascade=False)
+        self.conn.commit()
+        after = memsom_digest.render_digest(self.conn)
+        self.assertNotIn("user_secret_thing", after)
+        # redaction contract preserved: liveness untouched, payload destroyed
+        row = self.conn.execute(
+            "SELECT content, redacted, tombstoned FROM nodes WHERE id=?", (nid,)
+        ).fetchone()
+        self.assertEqual(row, ("", 1, 0))
+
+
+class TestRedactReachesDisk(Base):
+    """Fix 1: redaction must reach DISK (unlink the flat memory file + vault note)
+    and the importer must REFUSE to resurrect a redacted node's resurfaced file."""
+
+    def _seed_file_node(self, mem_dir, stem, body="the secret plaintext"):
+        import memsom_bridge_import as bi
+        bi.migrate(self.conn)                       # ensure bridge_path/content_hash cols
+        p = Path(mem_dir) / f"{stem}.md"
+        p.write_text(f"---\nname: {stem}\nsection: About the User\n---\n{body}",
+                     encoding="utf-8")
+        bi.import_memory_dir(self.conn, mem_dir, dry_run=False)
+        row = self.conn.execute(
+            "SELECT id FROM nodes WHERE bridge_path=? AND tombstoned=0",
+            (f"{stem}.md",)).fetchone()
+        self.assertIsNotNone(row, "seed did not create a bridge-backed node")
+        return row[0], p
+
+    def test_redact_unlinks_flat_file(self):
+        import memsom_redact
+        md = tempfile.mkdtemp()
+        nid, p = self._seed_file_node(md, "user_secret")
+        self.assertTrue(p.exists())
+        ps = {}
+        memsom_redact.redact_node(self.conn, nid, "erase", cascade=False,
+                                  memory_dir=md, purge_stats=ps)
+        self.conn.commit()
+        self.assertFalse(p.exists())                # reached disk
+        self.assertEqual(ps["purged"], 1)
+        self.assertEqual(
+            self.conn.execute("SELECT content, redacted FROM nodes WHERE id=?",
+                              (nid,)).fetchone(), ("", 1))
+
+    def test_redact_no_resurrection_on_reimport(self):
+        import memsom_redact, memsom_bridge_import as bi
+        md = tempfile.mkdtemp()
+        nid, p = self._seed_file_node(md, "user_secret")
+        memsom_redact.redact_node(self.conn, nid, "erase", cascade=False, memory_dir=md)
+        self.conn.commit()
+        self.assertFalse(p.exists())                # redact already unlinked it
+        # Simulate the surviving-file race: the file resurfaces (edited) from another
+        # machine before the redaction record arrived.
+        p.write_text("---\nname: user_secret\nsection: About the User\n---\nEDITED",
+                     encoding="utf-8")
+        stats = bi.import_memory_dir(self.conn, md, dry_run=False)
+        self.assertEqual(stats["refused_resurrect"], 1)
+        live = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE bridge_path=? AND tombstoned=0 AND redacted=0",
+            ("user_secret.md",)).fetchone()[0]
+        self.assertEqual(live, 0)                   # no fresh plaintext node
+        self.assertFalse(p.exists())                # resurfaced file unlinked
+
+    def test_redact_unlinks_vault_note(self):
+        import memsom_redact, memsom_obsidian
+        memsom_obsidian.migrate(self.conn)          # ensure obsidian_path column
+        vault = tempfile.mkdtemp()
+        note = Path(vault) / "note.md"
+        note.write_text("secret vault content", encoding="utf-8")
+        with self.conn:
+            nid = memsom.insert_node(self.conn, "secret vault content", "user",
+                                     source_ref="obsidian:note")
+            self.conn.execute("UPDATE nodes SET obsidian_path=? WHERE id=?",
+                              ("note.md", nid))
+        ps = {}
+        memsom_redact.redact_node(self.conn, nid, "erase", cascade=False,
+                                  vault=vault, purge_stats=ps)
+        self.conn.commit()
+        self.assertFalse(note.exists())
+        self.assertEqual(ps["purged"], 1)
+
+    def test_redact_traversal_guard_refuses_escape(self):
+        import memsom_redact
+        md = tempfile.mkdtemp()
+        nid, _ = self._seed_file_node(md, "user_secret")
+        outside = Path(md).parent / "escape_target.md"
+        outside.write_text("must survive", encoding="utf-8")
+        # a crafted bridge_path that climbs out of the memory dir must be refused
+        with self.conn:
+            self.conn.execute("UPDATE nodes SET bridge_path=? WHERE id=?",
+                              ("../escape_target.md", nid))
+        ps = {}
+        memsom_redact.redact_node(self.conn, nid, "erase", cascade=False,
+                                  memory_dir=md, purge_stats=ps)
+        self.conn.commit()
+        self.assertTrue(outside.exists())           # traversal blocked, file untouched
+        self.assertEqual(ps["failed"], 1)
+        self.assertEqual(ps["purged"], 0)
+
+
 class TestUtf8(Base):
     def test_utf8_roundtrip_synthetic(self):
         text = "em-dash — arrow → check ✓ done"

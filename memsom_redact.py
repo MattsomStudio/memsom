@@ -28,8 +28,10 @@ main(argv=None)        — thin wrapper for tests
 """
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import memsom
 import memsom_schema
@@ -58,8 +60,105 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def redact_node(conn, nid, reason, cascade=True):
+def _unlink_within(root, relpath):
+    """Unlink ``root/relpath`` iff it resolves INSIDE *root*. Returns one of
+    'purged' | 'noop' | 'failed'. A path that escapes the root (crafted '../'
+    bridge_path/obsidian_path — the store treats ingested content as untrusted)
+    is 'failed', never followed. Best-effort: OS errors are 'failed', not raised."""
+    try:
+        root = Path(root).resolve()
+        target = (root / relpath).resolve()
+        if not target.is_relative_to(root):
+            return "failed"                    # traversal attempt — surfaced, not followed
+        if target.exists():
+            target.unlink()
+            return "purged"
+        return "noop"
+    except OSError:
+        return "failed"
+
+
+def _resolve_memory_dir(memory_dir):
+    if memory_dir is not None:
+        return memory_dir
+    try:
+        from memsom_bridge_import import default_memory_dir  # noqa: PLC0415
+        return default_memory_dir()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_vault(vault):
+    if vault is not None:
+        return vault
+    return os.environ.get("MEMDAG_OBSIDIAN_VAULT")
+
+
+def _purge_backing_files(conn, ids, memory_dir=None, vault=None):
+    """Unlink the on-disk source files backing *ids* — flat memory ``.md`` and any
+    Obsidian vault note — so redaction reaches disk, not just the DB.
+
+    Roots are resolved LAZILY and only when some redacted node actually carries a
+    backing-file path: a plain node (insert_node never sets bridge_path/
+    obsidian_path) resolves no root, so a bare redact_node() call — every test and
+    POC — can never touch a real file. Containment-guarded and best-effort: a
+    failed unlink is counted and reported, never fatal to the DB redaction.
+
+    Returns {'purged': int, 'failed': int}.
+    """
+    out = {"purged": 0, "failed": 0}
+    if not ids:
+        return out
+    has_bp = memsom_schema.column_exists(conn, "nodes", "bridge_path")
+    has_op = memsom_schema.column_exists(conn, "nodes", "obsidian_path")
+    if not (has_bp or has_op):
+        return out
+    bp_col = "bridge_path" if has_bp else "NULL"
+    op_col = "obsidian_path" if has_op else "NULL"
+    rows = []
+    for tid in ids:
+        r = conn.execute(
+            f"SELECT {bp_col}, {op_col} FROM nodes WHERE id=?", (tid,)
+        ).fetchone()
+        if r and (r[0] or r[1]):
+            rows.append(r)
+    if not rows:                               # nothing file-backed: resolve no root
+        return out
+
+    mem_root = None                            # resolved on first flat-file hit
+    vault_root = None                          # resolved on first vault-note hit
+    for bp, op in rows:
+        if bp:
+            if mem_root is None:
+                mem_root = _resolve_memory_dir(memory_dir) or False
+            if mem_root:
+                res = _unlink_within(mem_root, bp)
+                if res == "purged":
+                    out["purged"] += 1
+                elif res == "failed":
+                    out["failed"] += 1
+        if op:
+            if vault_root is None:
+                vault_root = _resolve_vault(vault) or False
+            if vault_root:
+                res = _unlink_within(vault_root, op)
+                if res == "purged":
+                    out["purged"] += 1
+                elif res == "failed":
+                    out["failed"] += 1
+    return out
+
+
+def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
+                purge_stats=None):
     """Destroy payload of *nid* (and optionally all descendants).
+
+    Also reaches DISK: unlinks the flat memory ``.md`` and any Obsidian vault note
+    backing a redacted node, so the plaintext can't survive on disk or resurrect on
+    the next bridge-render. Roots are resolved lazily (from *memory_dir* / *vault*
+    or the live locations) and ONLY when a redacted node actually carries a
+    backing-file path — a plain node has none, so a bare call never touches disk.
+    If *purge_stats* (a dict) is given it is filled with {'purged','failed'} counts.
 
     Returns a sorted list of node ids that were newly redacted in this call.
     Already-redacted targets are silently skipped (first redaction wins).
@@ -99,6 +198,14 @@ def redact_node(conn, nid, reason, cascade=True):
                 memsom_retrieve.deindex_node(conn, tid)
         except Exception:  # noqa: BLE001
             pass
+
+    # Reach disk: unlink the flat memory file + any vault note backing a redacted
+    # node, so the plaintext is gone from disk and can't resurrect on the next
+    # bridge-render. Best-effort, containment-guarded (see _purge_backing_files).
+    if redacted_ids:
+        stats = _purge_backing_files(conn, redacted_ids, memory_dir, vault)
+        if purge_stats is not None:
+            purge_stats.update(stats)
 
     # Record redaction EVENTS for any redacted node carrying a federation uuid,
     # so the redaction propagates as a first-class record (F-07 closeable part).
@@ -224,8 +331,14 @@ def cmd_redact(args):
             print("dry run - re-run with --yes to apply.")
             return
 
-        newly = redact_node(conn, args.id, args.reason, cascade=cascade)
-        print(f"done - {len(newly)} redacted, 0 rows deleted, all edges intact.")
+        ps = {}
+        mem_dir = getattr(args, "memory_dir", None)
+        newly = redact_node(conn, args.id, args.reason, cascade=cascade,
+                            memory_dir=mem_dir, purge_stats=ps)
+        purged, failed = ps.get("purged", 0), ps.get("failed", 0)
+        fail_note = f", {failed} unlink FAILED (see above)" if failed else ""
+        print(f"done - {len(newly)} redacted, {purged} file(s) purged from disk, "
+              f"0 rows deleted, all edges intact{fail_note}.")
     finally:
         conn.close()
 
@@ -240,6 +353,8 @@ def register(subparsers):
                    help="redact ONLY this node (opt out of cascade)")
     p.add_argument("--yes", action="store_true",
                    help="apply; without this flag the command is a dry run")
+    p.add_argument("--memory-dir", default=None,
+                   help="override the memory dir whose flat file is unlinked on redact")
     p.set_defaults(func=cmd_redact)
 
 

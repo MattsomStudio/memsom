@@ -77,13 +77,19 @@ def _rows(conn):
     has_tier = memsom_schema.column_exists(conn, "nodes", "forget_tier")
     has_rs = memsom_schema.column_exists(conn, "nodes", "forget_rs")
     has_stale = memsom_schema.column_exists(conn, "nodes", "stale")
+    has_redacted = memsom_schema.column_exists(conn, "nodes", "redacted")
     tcol = "forget_tier" if has_tier else "NULL AS forget_tier"
     rcol = "forget_rs" if has_rs else "NULL AS forget_rs"
     scol = "stale" if has_stale else "0 AS stale"
     zcol = "stale_reason" if has_stale else "NULL AS stale_reason"
+    # A redacted node keeps tombstoned=0 (redaction leaves liveness alone) but its
+    # content is '' — so without this guard _entry falls back to the *stem* and the
+    # sensitive filename renders into the always-loaded MEMORY.md until the next
+    # bridge-render tombstones it. Exclude redacted nodes from the digest source.
+    redact_clause = " AND redacted = 0" if has_redacted else ""
     return conn.execute(
         f"SELECT content, channel, source_ref, {tcol}, {rcol}, {scol}, {zcol} "
-        "FROM nodes WHERE tombstoned = 0 AND source_ref LIKE 'memory:%'"
+        f"FROM nodes WHERE tombstoned = 0 AND source_ref LIKE 'memory:%'{redact_clause}"
     ).fetchall()
 
 
