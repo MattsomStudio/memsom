@@ -48,11 +48,20 @@ def _live_node(conn, stem):
     return (row[0], row[1]) if row else (None, None)
 
 
-def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file=True):
+def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file=True,
+                     hard=False):
     """Revoke the node for *stem* and remove its flat file. Returns a result dict.
 
-    status: 'ok' | 'refused-pinned'. Never hard-deletes the DAG row — revoke
-    tombstones it (cascading to descendants) so blame/explain still walk it."""
+    status: 'ok' | 'refused-pinned' | 'refused-traversal'. Never hard-deletes the
+    DAG row — revoke tombstones it (cascading to descendants) so blame/explain
+    still walk it.
+
+    hard=True additionally ERASES the payload: after revoking, it runs
+    memsom_rederive.erase over the node's whole supersedes lineage, so the
+    content is destroyed in the DB, de-indexed, purged from disk, and shown as
+    [REDACTED] in blame — closing the leak where a soft delete or edit leaves the
+    old plaintext readable through blame. The result dict then carries 'erased'
+    (count of nodes whose payload was destroyed)."""
     stem = stem[:-3] if stem.endswith(".md") else stem
     filename = f"{stem}.md"
     mem_root = Path(mem_dir).resolve()
@@ -66,7 +75,8 @@ def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file
         return {"status": "refused-traversal", "stem": stem,
                 "node_id": None, "revoked": 0, "file_deleted": False}
     fm = {}
-    if local.exists():
+    existed_before = local.exists()      # for accurate file_deleted when hard-erase unlinks first
+    if existed_before:
         fm_lines, _b, _ = split_frontmatter(local.read_text(encoding="utf-8", errors="replace"))
         fm = fm_top_level(fm_lines)
 
@@ -81,13 +91,29 @@ def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file
         revoked = memsom.revoke_cascade(conn, node_id, reason or "tombstoned via memsom tombstone")
         conn.commit()
 
+    # hard delete: erase the payload across the whole lineage so nothing survives
+    # in the DB / on disk / in blame. Pass mem_root so the on-disk purge targets
+    # this call's memory dir (honours --memory-dir), not just the live location.
+    erased = 0
+    if hard and node_id is not None:
+        import memsom_rederive  # lazy: keeps the soft-delete path import-light
+        erased = len(memsom_rederive.erase(
+            conn, node_id, reason or "hard tombstone", memory_dir=mem_root))
+        conn.commit()
+
+    # file_deleted means THIS call removed a file. In hard mode redact_node's purge
+    # may have unlinked it first, so credit that too — but a file that was already
+    # absent before the call was not deleted by us.
     file_deleted = False
-    if delete_file and local.exists():
-        local.unlink()
-        file_deleted = True
+    if delete_file:
+        if local.exists():
+            local.unlink()
+            file_deleted = True
+        elif hard and existed_before:
+            file_deleted = True          # erase's purge removed it
 
     return {"status": "ok", "stem": stem, "node_id": node_id,
-            "revoked": revoked, "file_deleted": file_deleted}
+            "revoked": revoked, "erased": erased, "file_deleted": file_deleted}
 
 
 def list_tombstoned(conn):
@@ -114,7 +140,8 @@ def _cmd_tombstone(args):
     mem = Path(args.memory_dir) if args.memory_dir else default_memory_dir()
     conn = memsom.get_connection()
     try:
-        res = tombstone_memory(conn, mem, args.stem, reason=args.reason, force=args.force)
+        res = tombstone_memory(conn, mem, args.stem, reason=args.reason,
+                               force=args.force, hard=args.hard)
     finally:
         conn.close()
     if res["status"] == "refused-traversal":
@@ -125,9 +152,12 @@ def _cmd_tombstone(args):
         print(f"[tombstone] REFUSED: {res['stem']} is pinned (identity/feedback/personal). "
               f"Re-run with --force only if you truly mean to forget it.", file=sys.stderr)
         return 2
+    erased_note = f" | payload ERASED ({res['erased']} node(s))" if res.get("erased") else ""
     print(f"[tombstone] {res['stem']}: "
           f"node {'revoked (+'+str(res['revoked'])+' cascaded)' if res['node_id'] else 'not in store'} | "
-          f"file {'deleted' if res['file_deleted'] else 'absent'}")
+          f"file {'deleted' if res['file_deleted'] else 'absent'}{erased_note}")
+    if args.hard:
+        print("  hard delete: content destroyed in DB + disk + blame ([REDACTED]).")
     print("  MEMORY.md drops it on the next `memsom bridge-render`.")
     return 0
 
@@ -155,6 +185,9 @@ def register(sub) -> None:
     p.add_argument("--reason", default="", help="why it's being deleted (audited on the node)")
     p.add_argument("--force", action="store_true",
                    help="allow tombstoning a pinned user_/feedback_/personal_ memory")
+    p.add_argument("--hard", action="store_true",
+                   help="also ERASE the payload across the lineage (DB + disk + blame), "
+                        "not just revoke it")
     p.add_argument("--memory-dir", default=None, help="override the memory dir")
     p.set_defaults(func=_cmd_tombstone)
 

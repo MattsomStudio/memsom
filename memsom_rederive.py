@@ -245,14 +245,23 @@ def _version_chain(conn, node_id):
     return seen
 
 
-def erase(conn, node_id, reason):
+def erase(conn, node_id, reason, *, memory_dir=None, vault=None):
     """Erasure: declared-intent scrub of a secret/PII across a node's ENTIRE lineage.
 
     For *node_id* and every version in its supersedes chain, runs
     redact_node(cascade=True): destroys content of the node + all derived
     descendants (incl. archived copies, which keep their edges), de-indexes from
-    retrieval, and keeps edges so blame() still walks the shape. Idempotent —
-    redact_node is first-write-wins, so overlapping cascades are safe.
+    retrieval, unlinks the backing file(s), and keeps edges so blame() still walks
+    the shape. Idempotent — redact_node is first-write-wins, so overlapping
+    cascades are safe.
+
+    Walking the supersedes chain is what makes this the fix for the blame
+    edit-history leak: a superseded (edited-over) prior version retains its full
+    old content, and only redacting the WHOLE chain removes it from blame.
+
+    *memory_dir* / *vault* are forwarded to redact_node so the on-disk purge
+    targets the caller's roots (e.g. a --memory-dir override) instead of only the
+    live locations.
 
     This is a DISTINCT verb, not an inferred reason: normal revoke/regenerate
     preserve archived content; erase is the deliberate destructive path. MUST be
@@ -264,5 +273,6 @@ def erase(conn, node_id, reason):
     migrate(conn)                         # derivation_recipe must exist for the chain walk
     erased = set()
     for target in _version_chain(conn, node_id):
-        erased.update(memsom_redact.redact_node(conn, target, reason, cascade=True))
+        erased.update(memsom_redact.redact_node(
+            conn, target, reason, cascade=True, memory_dir=memory_dir, vault=vault))
     return sorted(erased)

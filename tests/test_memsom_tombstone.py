@@ -120,9 +120,58 @@ class TestTombstone(Base):
         self.assertEqual(res["status"], "refused-traversal")
 
 
+class TestHardTombstone(Base):
+    """--hard: the sanctioned delete path also ERASES the payload (DB + disk +
+    blame), closing the leak where a soft delete/edit leaves old plaintext
+    readable through blame. Plain tombstone must stay non-destructive to payload."""
+
+    def _nid(self, stem):
+        return self.conn.execute(
+            "SELECT id FROM nodes WHERE source_ref=? ORDER BY id DESC LIMIT 1",
+            (f"memory:{stem}",)).fetchone()[0]
+
+    def test_hard_erases_payload_db_disk_blame(self):
+        import memsom_blame
+        nid = self._nid("project_widget")
+        self.assertNotEqual(
+            self.conn.execute("SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0], "")
+        res = tomb.tombstone_memory(self.conn, self.mem, "project_widget",
+                                    reason="secret", hard=True)
+        self.assertEqual(res["status"], "ok")
+        self.assertGreaterEqual(res["erased"], 1)
+        self.assertTrue(res["file_deleted"])
+        # DB: payload destroyed, node redacted AND revoked
+        self.assertEqual(
+            self.conn.execute("SELECT content, redacted, tombstoned FROM nodes WHERE id=?",
+                              (nid,)).fetchone(), ("", 1, 1))
+        # disk: gone
+        self.assertFalse((self.mem / "project_widget.md").exists())
+        # blame: shows [REDACTED], never the old plaintext
+        entries = memsom_blame.blame(self.conn, nid)
+        self.assertTrue(any(e["line"] == "[REDACTED]" for e in entries))
+
+    def test_soft_delete_keeps_payload(self):
+        # the DEFAULT path revokes only — payload survives, and it never touches the
+        # redact machinery (the redacted column isn't even migrated in).
+        nid = self._nid("project_widget")
+        res = tomb.tombstone_memory(self.conn, self.mem, "project_widget", reason="obsolete")
+        self.assertEqual(res.get("erased", 0), 0)
+        content = self.conn.execute(
+            "SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0]
+        self.assertNotEqual(content, "")            # revoke, not erase: payload survives
+
+    def test_hard_pinned_refused_without_force(self):
+        res = tomb.tombstone_memory(self.conn, self.mem, "user_editor", hard=True)
+        self.assertEqual(res["status"], "refused-pinned")
+        nid = self._nid("user_editor")
+        self.assertNotEqual(                        # pinned payload untouched
+            self.conn.execute("SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0], "")
+
+
 class TestCLI(Base):
     def _ns(self, **kw):
-        base = dict(stem=None, reason="", force=False, memory_dir=str(self.mem))
+        base = dict(stem=None, reason="", force=False, hard=False,
+                    memory_dir=str(self.mem))
         base.update(kw)
         return Namespace(**base)
 
