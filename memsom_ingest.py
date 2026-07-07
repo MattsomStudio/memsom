@@ -355,7 +355,10 @@ def ingest_text(
         if os.environ.get("MEMDAG_CONTRADICT", "").strip().lower() in ("1", "true", "yes", "on"):
             try:
                 import memsom_contradict  # noqa: PLC0415 — lazy, opt-in
-                memsom_contradict.detect(conn, nid)
+                # observe-only unless $MEMDAG_CONTRADICT_ENFORCE — a precision
+                # regression records without ever staling the brain.
+                memsom_contradict.detect(
+                    conn, nid, enforce=memsom_contradict._enforce_default())
             except Exception:  # noqa: BLE001 — contradiction detect is best-effort
                 pass
 

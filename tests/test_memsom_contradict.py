@@ -245,7 +245,8 @@ class TestSweep(Base):
         old = self.add("waf=sucuri", source_ref="memory:acme_waf")   # lower id = older
         new = self.add("waf=cloudflare", source_ref="session:x")     # higher id = newer
         stats = memsom_contradict.sweep(
-            self.conn, backfill=True, use_nli=False, candidate_fn=self._all_others)
+            self.conn, backfill=True, use_nli=False, enforce=True,
+            candidate_fn=self._all_others)
         self.assertEqual(stats["probed"], 2)          # both nodes probed
         self.assertEqual(stats["contradictions"], 1)  # but pair converges to ONE
         self.assertEqual(self.state(old)[0], 1)       # older loses
@@ -294,11 +295,69 @@ class TestSweep(Base):
         old = self.add("Sucuri is the active WAF.", source_ref="a")
         new = self.add("Cloudflare is the active WAF.", source_ref="b")
         stats = memsom_contradict.sweep(
-            self.conn, backfill=True, candidate_fn=self._all_others,
+            self.conn, backfill=True, candidate_fn=self._all_others, enforce=True,
             nli=lambda p, h: 0.97)                     # inject the scorer
         self.assertEqual(stats["contradictions"], 1)
         self.assertEqual(self.state(old)[0], 1)
         self.assertEqual(memsom_contradict.list_contradictions(self.conn)[0]["verdict"], "nli")
+
+
+class TestObserveOnly(Base):
+    """Observe-only is the safety default: a detection is RECORDED (enforced=0) but
+    the brain is never staled. Enforcement is a deliberate opt-in."""
+
+    def test_detect_observe_records_but_does_not_stale(self):
+        old = self.add("waf=sucuri", source_ref="a")
+        new = self.add("waf=cloudflare", source_ref="b")
+        marked = memsom_contradict.detect(
+            self.conn, new, candidates=[(old, "waf=sucuri")], enforce=False)
+        self.assertEqual(marked, [(old, "structured")])   # still detected + returned
+        self.assertEqual(self.state(old)[0], 0)           # but NOT staled
+        rows = memsom_contradict.list_contradictions(self.conn)
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0]["enforced"])             # recorded as observe-only
+
+    def test_detect_enforce_stales_and_flags_enforced(self):
+        old = self.add("waf=sucuri", source_ref="a")
+        new = self.add("waf=cloudflare", source_ref="b")
+        memsom_contradict.detect(
+            self.conn, new, candidates=[(old, "waf=sucuri")], enforce=True)
+        self.assertEqual(self.state(old)[0], 1)
+        self.assertTrue(memsom_contradict.list_contradictions(self.conn)[0]["enforced"])
+
+    def test_sweep_defaults_to_observe_when_env_unset(self):
+        old = self.add("waf=sucuri", source_ref="a")
+        self.add("waf=cloudflare", source_ref="b")
+        stats = memsom_contradict.sweep(
+            self.conn, backfill=True, use_nli=False,
+            candidate_fn=lambda pid, _t: [
+                (r[0], r[1]) for r in self.conn.execute(
+                    "SELECT id, content FROM nodes WHERE id != ?", (pid,))])
+        self.assertFalse(stats["enforced"])               # observe by default
+        self.assertEqual(stats["contradictions"], 1)      # recorded
+        self.assertEqual(self.state(old)[0], 0)           # nothing staled
+
+    def test_enforce_env_flips_default(self):
+        os.environ["MEMDAG_CONTRADICT_ENFORCE"] = "1"
+        try:
+            self.assertTrue(memsom_contradict._enforce_default())
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT_ENFORCE", None)
+        self.assertFalse(memsom_contradict._enforce_default())   # default observe
+
+    def test_observed_only_filter(self):
+        a1 = self.add("waf=sucuri", source_ref="a")
+        b1 = self.add("waf=cloudflare", source_ref="b")
+        memsom_contradict.detect(self.conn, b1, candidates=[(a1, "waf=sucuri")],
+                                 enforce=False)
+        c1 = self.add("port=443", source_ref="c")
+        d1 = self.add("port=8080", source_ref="d")
+        memsom_contradict.detect(self.conn, d1, candidates=[(c1, "port=443")],
+                                 enforce=True)
+        self.assertEqual(len(memsom_contradict.list_contradictions(self.conn)), 2)
+        obs = memsom_contradict.list_contradictions(self.conn, observed_only=True)
+        self.assertEqual(len(obs), 1)
+        self.assertFalse(obs[0]["enforced"])
 
 
 if __name__ == "__main__":

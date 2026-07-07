@@ -28,10 +28,15 @@ Design guardrails:
     the corrected value. The link lives in its own `contradictions` table.
   - The stale reason is namespaced "contradicted by node N" so other passes'
     _owned()-style clear checks (e.g. verify_stale) never clear a contradiction flag.
-  - Marks the OLD node (newer wins); the new node is never staled. stale is
-    reversible + advisory, so a rare false positive costs a warning, not data.
-  - Opt-in: only runs when $MEMDAG_CONTRADICT is truthy — keeps a cold bridge-import
-    from checking every node before the detector is tuned.
+  - Marks the OLDER node (newer wins); the new node is never staled.
+  - OBSERVE-ONLY by default: the user-facing surfaces (sweep, ingest hook) RECORD a
+    contradiction to the table (enforced=0) but do NOT stale anything unless
+    $MEMDAG_CONTRADICT_ENFORCE opts in. A precision regression can therefore never
+    pollute the brain by default; enforcement is a deliberate per-run choice made
+    only after the eval gate is green. (Learned the hard way: an early enforce-by-
+    default backfill flagged 110/155 real nodes.)
+  - Opt-in: the detector only runs at all when $MEMDAG_CONTRADICT is truthy — keeps
+    a cold bridge-import from checking every node before the detector is tuned.
 
 Public API
 ----------
@@ -159,8 +164,11 @@ def migrate(conn):
     score    REAL,                                     -- NLI contradiction prob (NULL for structured)
     reason   TEXT,
     at       TEXT NOT NULL,
+    enforced INTEGER NOT NULL DEFAULT 1,               -- 1 = staled the old node; 0 = observe-only
     PRIMARY KEY (old_id, new_id)
   );""")
+    # additive for a store created before observe-only shipped (legacy rows enforced)
+    memsom_schema.add_column(conn, "contradictions", "enforced", "INTEGER NOT NULL DEFAULT 1")
     memsom_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS contradict_cursor (
     id           INTEGER PRIMARY KEY CHECK (id = 0),   -- single-row watermark
     last_node_id INTEGER NOT NULL DEFAULT 0,
@@ -174,6 +182,14 @@ def migrate(conn):
 def enabled():
     """True iff $MEMDAG_CONTRADICT opts the detector in."""
     return str(os.environ.get("MEMDAG_CONTRADICT", "")).strip().lower() in _TRUTHY
+
+
+def _enforce_default():
+    """Default enforcement for the user-facing surfaces (sweep, ingest hook).
+    OBSERVE-ONLY unless $MEMDAG_CONTRADICT_ENFORCE opts in — so a precision
+    regression records to the table without ever staling the brain. Enforcement is
+    a deliberate choice, not a default."""
+    return str(os.environ.get("MEMDAG_CONTRADICT_ENFORCE", "")).strip().lower() in _TRUTHY
 
 
 def _now():
@@ -196,8 +212,9 @@ def _structured_verdict(new_text, cand_text):
 
 
 def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
-           clearance="topsecret"):
-    """Detect live nodes that *new_id* contradicts; mark each stale + record the link.
+           clearance="topsecret", enforce=True):
+    """Detect live nodes that *new_id* contradicts; record each link, and (when
+    *enforce*) mark the older node stale.
 
     candidates: optional [(id, content), ...] to adjudicate against (injected in
     tests). When None, live topically-close candidates come from the hybrid
@@ -205,8 +222,13 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
     nli: optional fn(premise, hypothesis) -> P(contradiction) in [0,1]; used only
     where the structured tier abstains. When None, resolves to _default_nli() —
     the real NLI scorer iff the semantic tier is opted in + loadable, else None.
+    enforce: True stales the older node; False is OBSERVE-ONLY — the contradiction
+    is recorded (enforced=0) for review but nothing is staled. The user-facing
+    surfaces (sweep, ingest hook) default to observe via _enforce_default(); this
+    primitive defaults enforce=True so explicit callers get deterministic marking.
 
-    Returns a sorted list of (old_id, verdict_kind). Marks the OLD node, never new_id.
+    Returns a sorted list of (old_id, verdict_kind) for every DETECTION recorded
+    (regardless of enforce). Marks the OLD node, never new_id.
     """
     migrate(conn)
     if nli is None:
@@ -256,25 +278,28 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
                         (old_id, win_id)).fetchone():
             continue
         kind, reason, score = verdict
-        memsom_stale.mark_stale_cascade(conn, old_id, f"{REASON_PREFIX} node {win_id}")
+        if enforce:
+            memsom_stale.mark_stale_cascade(conn, old_id, f"{REASON_PREFIX} node {win_id}")
         with conn:
             conn.execute(
                 "INSERT OR IGNORE INTO contradictions"
-                "(old_id, new_id, verdict, judge, score, reason, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (old_id, win_id, kind, kind, score, reason, ts))
+                "(old_id, new_id, verdict, judge, score, reason, at, enforced) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (old_id, win_id, kind, kind, score, reason, ts, 1 if enforce else 0))
         marked.append((old_id, kind))
     return sorted(marked)
 
 
-def list_contradictions(conn):
-    """All recorded contradictions, newest first."""
+def list_contradictions(conn, *, observed_only=False):
+    """All recorded contradictions, newest first. observed_only filters to the
+    record-but-not-staled rows (enforced=0)."""
     migrate(conn)
+    where = " WHERE enforced = 0" if observed_only else ""
     rows = conn.execute(
-        "SELECT old_id, new_id, verdict, score, reason, at "
-        "FROM contradictions ORDER BY at DESC, new_id DESC").fetchall()
-    return [{"old_id": r[0], "new_id": r[1], "verdict": r[2],
-             "score": r[3], "reason": r[4], "at": r[5]} for r in rows]
+        "SELECT old_id, new_id, verdict, score, reason, at, enforced "
+        f"FROM contradictions{where} ORDER BY at DESC, new_id DESC").fetchall()
+    return [{"old_id": r[0], "new_id": r[1], "verdict": r[2], "score": r[3],
+             "reason": r[4], "at": r[5], "enforced": bool(r[6])} for r in rows]
 
 
 # --- batch sweep (bridge/flat-file coverage) ---------------------------------
@@ -347,7 +372,7 @@ def _embed_candidate_fn(conn, k):
 
 
 def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
-          backfill=False, nli=None, candidate_fn=None):
+          backfill=False, nli=None, candidate_fn=None, enforce=None):
     """Probe memory nodes added since the last sweep for cross-source contradictions.
 
     Incremental by default (id > watermark); backfill=True re-scans from 0 (one-time
@@ -359,7 +384,8 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
     chunks a large run; the deferred remainder is reported, never silently dropped,
     and the watermark only advances over what was probed so the next run resumes.
 
-    Returns {'probed','contradictions','deferred','from_id','to_id','mode'}.
+    enforce defaults to observe-only (_enforce_default); pass True to stale.
+    Returns {'probed','contradictions','deferred','from_id','to_id','mode','enforced'}.
     """
     migrate(conn)
     start = 0 if backfill else _cursor(conn)
@@ -375,6 +401,8 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
     # graceful path when the model is unavailable).
     if nli is None:
         nli = nli_score if (use_nli and nli_available()) else (lambda _p, _h: None)
+    if enforce is None:
+        enforce = _enforce_default()   # OBSERVE-only unless $MEMDAG_CONTRADICT_ENFORCE
 
     # Candidate source: injected (tests) > in-memory embedding index > retrieve.
     if candidate_fn is None:
@@ -383,13 +411,14 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
 
     stats = {"probed": 0, "contradictions": 0,
              "deferred": max(0, total - len(rows)),
-             "from_id": start, "to_id": start, "mode": mode}
+             "from_id": start, "to_id": start, "mode": mode,
+             "enforced": bool(enforce)}
     for nid, content in rows:
         if candidate_fn is not None:
-            marked = detect(conn, nid, k=k, nli=nli,
+            marked = detect(conn, nid, k=k, nli=nli, enforce=enforce,
                             candidates=candidate_fn(nid, content))
         else:
-            marked = detect(conn, nid, k=k, nli=nli, clearance=clearance)
+            marked = detect(conn, nid, k=k, nli=nli, enforce=enforce, clearance=clearance)
         stats["probed"] += 1
         stats["contradictions"] += len(marked)
         stats["to_id"] = nid
@@ -403,7 +432,7 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
 def _cmd_list(args):
     conn = memsom.get_connection()
     try:
-        rows = list_contradictions(conn)
+        rows = list_contradictions(conn, observed_only=args.observed_only)
     finally:
         conn.close()
     if not rows:
@@ -412,7 +441,8 @@ def _cmd_list(args):
     print(f"{len(rows)} contradiction(s):")
     for r in rows:
         sc = f" p={r['score']:.2f}" if r["score"] is not None else ""
-        print(f"  {r['at'] or '?':<26} old[{r['old_id']}] <- new[{r['new_id']}] "
+        state = "enforced" if r["enforced"] else "observed"
+        print(f"  {r['at'] or '?':<26} [{state}] old[{r['old_id']}] <- new[{r['new_id']}] "
               f"({r['verdict']}{sc}) {r['reason'] or ''}")
     return 0
 
@@ -421,15 +451,17 @@ def _cmd_sweep(args):
     conn = memsom.get_connection()
     try:
         stats = sweep(conn, limit=args.limit, use_nli=not args.no_nli,
-                      backfill=args.backfill)
+                      backfill=args.backfill,
+                      enforce=(True if args.enforce else None))
     finally:
         conn.close()
     tier = "structured-only" if args.no_nli else (
         "structured+NLI" if nli_available() else "structured-only (NLI unavailable)")
+    mode = "ENFORCE (staled)" if stats["enforced"] else "observe-only (recorded, not staled)"
     defer = (f", {stats['deferred']} deferred (raise/rerun --limit)"
              if stats["deferred"] else "")
     cov = "" if stats["mode"] == "embed" else " [candidates: retrieve — bridge memories not covered (no embedder)]"
-    print(f"[contradict-sweep] {tier}: probed {stats['probed']} node(s) "
+    print(f"[contradict-sweep] {tier}, {mode}: probed {stats['probed']} node(s) "
           f"(id {stats['from_id']}->{stats['to_id']}), "
           f"{stats['contradictions']} contradiction(s){defer}.{cov}")
     return 0
@@ -438,6 +470,8 @@ def _cmd_sweep(args):
 def register(subparsers):
     p = subparsers.add_parser("contradictions-list",
                               help="list recorded cross-source contradictions")
+    p.add_argument("--observed-only", action="store_true",
+                   help="show only observe-mode rows (recorded, not staled)")
     p.set_defaults(func=_cmd_list)
 
     s = subparsers.add_parser(
@@ -450,6 +484,8 @@ def register(subparsers):
                    help="structured tier only — skip loading the NLI model")
     s.add_argument("--backfill", action="store_true",
                    help="re-scan from the beginning (one-time full pass)")
+    s.add_argument("--enforce", action="store_true",
+                   help="mark contradictions stale (default: observe-only — record, don't stale)")
     s.set_defaults(func=_cmd_sweep)
 
 
