@@ -42,13 +42,14 @@ Public API
 ----------
 migrate(conn)                                   idempotent
 enabled()                              -> bool  ($MEMDAG_CONTRADICT gate)
-detect(conn, new_id, *, k, candidates, nli, nli_threshold, clearance) -> list[(old_id, verdict)]
+detect(conn, new_id, *, k, candidates, adjudicate, clearance, enforce) -> list[(old_id, verdict)]
 list_contradictions(conn)              -> list[dict]
 register(subparsers) / main(argv)               CLI: contradictions-list
 """
 
 import argparse
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -154,6 +155,159 @@ def _default_nli():
     return nli_score
 
 
+# --- anchored per-sentence adjudication (the precision path) ------------------
+# Whole-note NLI over-fires: "not entailed" reads as "contradiction" on long,
+# loosely-related notes (110/155 false positives on the real brain). The fix:
+# compare the single most-similar SENTENCE pair across the two notes, and only if
+# that pair clears an ANCHOR (they are demonstrably about the same thing) run NLI
+# on it. Different-IP / different-topic pairs never clear the anchor, and when they
+# do the entity is inside the sentence so NLI can disambiguate. The structured tier
+# (extract_claim) is deliberately gone from contradiction — its type-scoped subjects
+# (every ipv4 -> subject "ipv4") were the other false-positive source; anchored NLI
+# recovers the config-drift case it was for ("listens on port 443" vs "...8080").
+
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# Boilerplate sentence lines that carry no contradictable claim — navigation, vault
+# pointers, provenance footers, and bare label/status headers. Dropped before
+# anchoring so their near-identical templates ("See [[X]]" vs "See [[Y]]") can't fire.
+_BOILERPLATE = re.compile(
+    r"""^\s*(\*{0,2}(see|full)\s              # "See [[...]]" / "Full writeup ..."
+        | \*{0,2}surfaced\s+from              # imported-chat provenance footer
+        | \*{0,2}[A-Za-z][\w \-()/,.]{0,40}:   # "State (2026-..):", "Assigned:" labels
+        | (status|state|done|built|set\s+up)\b[^:]*$  # bare status/date labels
+        )""",
+    re.IGNORECASE | re.VERBOSE)
+
+# A token that is metadata, not a claim value: date, number/price, path, url,
+# wikilink, code span. If the ONLY difference between two anchored sentences is such
+# tokens (+ stopwords), it's a timestamp/version/reference diff, not a contradiction.
+_META_TOK = re.compile(
+    r"""^(\d{4}-\d{2}(-\d{2})?      # ISO date
+        | \$?\d[\d,.]*[kKmM%]?       # number / price
+        | \[\[.*                     # wikilink target
+        | https?:.*                  # url
+        | [~./\\].*|.*[/\\].*|.*\.md  # path
+        )$""",
+    re.IGNORECASE | re.VERBOSE)
+
+_STOP = frozenset(
+    "the a an is are was were of for to in on at and or as by with from this that it "
+    "its their his her been be now so far only not yet done set up built via re".split())
+
+
+def _anchor():
+    """Minimum sentence-pair cosine for a pair to be adjudicated at all."""
+    try:
+        return float(os.environ.get("MEMDAG_CONTRADICT_ANCHOR", "0.75"))
+    except ValueError:
+        return 0.75
+
+
+def _sentences(text, *, max_sents=40, min_len=12):
+    """Candidate claim sentences: strip frontmatter + fenced code, split on
+    sentence boundaries and list lines, drop trivially short fragments. Regex-only,
+    no NLP dependency."""
+    body = text or ""
+    try:
+        from memsom_bridge_import import split_frontmatter  # noqa: PLC0415
+        _fm, body, _ = split_frontmatter(body)
+    except Exception:  # noqa: BLE001 — frontmatter parsing is best-effort
+        body = text or ""
+    body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)   # drop code fences
+    out = []
+    for line in body.splitlines():
+        line = line.strip().lstrip("#->*|").strip()
+        # strip leading emoji / bullets / symbols so "⭐ STATUS:" / "⚠️ Deploy:" are
+        # seen as the label lines they are by _BOILERPLATE.
+        line = re.sub(r"^[^\w`'\"\[(]+", "", line).strip()
+        if not line or _BOILERPLATE.match(line):
+            continue
+        for s in _SENT_SPLIT.split(line):
+            s = s.strip()
+            if len(s) >= min_len and not _BOILERPLATE.match(s):
+                out.append(s)
+        if len(out) >= max_sents:
+            break
+    return out[:max_sents]
+
+
+def _content_diff(sa, sb):
+    """The claim-bearing tokens that differ between two sentences — excluding
+    stopwords and metadata (dates/numbers/paths/urls/wikilinks). Empty => the two
+    sentences differ only in metadata, so any NLI 'contradiction' is spurious."""
+    def toks(s):
+        s = re.sub(r"[*_`#>|()\[\],:;!?]", " ", s.lower())
+        return [t.strip(".") for t in s.split() if t.strip(".")]
+    from collections import Counter  # noqa: PLC0415
+    a, b = Counter(toks(sa)), Counter(toks(sb))
+    diff = (a - b) + (b - a)
+    return [t for t in diff
+            if t not in _STOP and not _META_TOK.match(t) and any(ch.isalpha() for ch in t)]
+
+
+def _make_anchored_adjudicator(nli_fn, *, anchor=None, threshold=None):
+    """Build adjudicate(new_text, cand_text) -> (kind, reason, score) | None.
+    Embeds each note's sentences (bge, cached per run), takes the most-similar cross
+    pair, gates on the anchor, then NLIs that one pair. nli_fn(premise, hypothesis)
+    -> P(contradiction). Returns None if the embedder is unavailable."""
+    if anchor is None:
+        anchor = _anchor()
+    if threshold is None:
+        threshold = _nli_threshold()
+    try:
+        import memsom_embed  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    if not memsom_embed.bge_available():
+        return None
+    cache = {}
+
+    def _emb(text):
+        if text in cache:
+            return cache[text]
+        vecs = []
+        for s in _sentences(text):
+            enc = memsom_embed.encode_doc(s)
+            if enc and enc.get("dense") is not None:
+                v = np.asarray(enc["dense"], dtype="float32")
+                n = float(np.linalg.norm(v)) or 1.0
+                vecs.append((s, v / n))
+        cache[text] = vecs
+        return vecs
+
+    def adjudicate(new_text, cand_text):
+        A, B = _emb(new_text), _emb(cand_text)
+        if not A or not B:
+            return None
+        best_c, best_a, best_b = -1.0, None, None
+        for sa, va in A:
+            for sb, vb in B:
+                c = float(np.dot(va, vb))
+                if c > best_c:
+                    best_c, best_a, best_b = c, sa, sb
+        if best_c < anchor:                       # not about the same thing -> skip
+            return None
+        if not _content_diff(best_a, best_b):     # differ only in date/path/number ->
+            return None                           # metadata diff, not a contradiction
+        p = nli_fn(best_b, best_a)                # premise=candidate, hypothesis=new
+        if p is None or p < threshold:
+            return None
+        return ("nli", f"anchor={best_c:.2f} p={p:.2f}: {best_a!r} vs {best_b!r}",
+                float(p))
+    return adjudicate
+
+
+def _default_adjudicator():
+    """The anchored-NLI adjudicator detect() uses when a caller doesn't inject one:
+    built iff the semantic tier is opted in ($MEMDAG_CONTRADICT_NLI) and both NLI +
+    embedder are loadable; otherwise None (nothing is adjudicated)."""
+    if _default_nli() is None:                    # tier off or NLI unavailable
+        return None
+    return _make_anchored_adjudicator(nli_score)
+
+
 def migrate(conn):
     """Create the contradictions link table (+ index). Idempotent."""
     memsom_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS contradictions (
@@ -196,22 +350,7 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _structured_verdict(new_text, cand_text):
-    """Deterministic tier: same (subject, predicate) with a different value.
-
-    Returns (kind, reason, score) or None. Lazy-imports corroborate to avoid an
-    import cycle and to keep this file loadable without the corroborate stack."""
-    import memsom_corroborate  # noqa: PLC0415
-    a = memsom_corroborate.extract_claim(new_text or "")
-    b = memsom_corroborate.extract_claim(cand_text or "")
-    if not a or not b:
-        return None
-    if a[0] == b[0] and a[1] == b[1] and a[2] != b[2]:
-        return ("structured", f"{a[0]} {a[1]} {b[2]!r} contradicts {a[2]!r}", None)
-    return None
-
-
-def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
+def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
            clearance="topsecret", enforce=True):
     """Detect live nodes that *new_id* contradicts; record each link, and (when
     *enforce*) mark the older node stale.
@@ -219,9 +358,9 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
     candidates: optional [(id, content), ...] to adjudicate against (injected in
     tests). When None, live topically-close candidates come from the hybrid
     retriever (its BM25 half works with no embedder, so this degrades gracefully).
-    nli: optional fn(premise, hypothesis) -> P(contradiction) in [0,1]; used only
-    where the structured tier abstains. When None, resolves to _default_nli() —
-    the real NLI scorer iff the semantic tier is opted in + loadable, else None.
+    adjudicate: optional fn(new_text, cand_text) -> (kind, reason, score) | None.
+    When None, resolves to _default_adjudicator() — the anchored per-sentence NLI
+    adjudicator iff the semantic tier is opted in + loadable, else None (no-op).
     enforce: True stales the older node; False is OBSERVE-ONLY — the contradiction
     is recorded (enforced=0) for review but nothing is staled. The user-facing
     surfaces (sweep, ingest hook) default to observe via _enforce_default(); this
@@ -231,10 +370,10 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
     (regardless of enforce). Marks the OLD node, never new_id.
     """
     migrate(conn)
-    if nli is None:
-        nli = _default_nli()
-    if nli_threshold is None:
-        nli_threshold = _nli_threshold()
+    if adjudicate is None:
+        adjudicate = _default_adjudicator()
+    if adjudicate is None:                        # tier off / unavailable -> no-op
+        return []
     row = conn.execute(
         "SELECT content, channel FROM nodes WHERE id = ? AND tombstoned = 0",
         (new_id,)).fetchone()
@@ -258,14 +397,10 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
     for cid, ctext in candidates:
         if cid == new_id:
             continue
-        verdict = _structured_verdict(new_text, ctext)
-        if verdict is None and nli is not None:
-            try:
-                p = nli(ctext, new_text)  # premise=candidate, hypothesis=new claim
-            except Exception:  # noqa: BLE001 — a judge failure must not break ingest
-                p = None
-            if p is not None and p >= nli_threshold:
-                verdict = ("nli", f"nli p={p:.2f}", float(p))
+        try:
+            verdict = adjudicate(new_text, ctext)
+        except Exception:  # noqa: BLE001 — an adjudicator failure must not break ingest
+            verdict = None
         if verdict is None:
             continue
         # The OLDER node loses (newer fact wins), whichever way we're probing. At
@@ -371,8 +506,8 @@ def _embed_candidate_fn(conn, k):
     return candidate_fn
 
 
-def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
-          backfill=False, nli=None, candidate_fn=None, enforce=None):
+def sweep(conn, *, limit=None, k=5, clearance="topsecret",
+          backfill=False, adjudicate=None, candidate_fn=None, enforce=None):
     """Probe memory nodes added since the last sweep for cross-source contradictions.
 
     Incremental by default (id > watermark); backfill=True re-scans from 0 (one-time
@@ -396,11 +531,10 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
     if limit is not None:
         rows = rows[:limit]
 
-    # Resolve the scorer ONCE. A non-None nli suppresses detect()'s env-based default;
-    # use_nli=False forces structured-only via an always-abstain scorer (also the
-    # graceful path when the model is unavailable).
-    if nli is None:
-        nli = nli_score if (use_nli and nli_available()) else (lambda _p, _h: None)
+    # Resolve the adjudicator ONCE so the NLI + embed models load a single time for
+    # the whole run (the reason this is a batch pass, not per-Stop-hook).
+    if adjudicate is None:
+        adjudicate = _default_adjudicator()
     if enforce is None:
         enforce = _enforce_default()   # OBSERVE-only unless $MEMDAG_CONTRADICT_ENFORCE
 
@@ -415,10 +549,11 @@ def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
              "enforced": bool(enforce)}
     for nid, content in rows:
         if candidate_fn is not None:
-            marked = detect(conn, nid, k=k, nli=nli, enforce=enforce,
+            marked = detect(conn, nid, k=k, adjudicate=adjudicate, enforce=enforce,
                             candidates=candidate_fn(nid, content))
         else:
-            marked = detect(conn, nid, k=k, nli=nli, enforce=enforce, clearance=clearance)
+            marked = detect(conn, nid, k=k, adjudicate=adjudicate, enforce=enforce,
+                            clearance=clearance)
         stats["probed"] += 1
         stats["contradictions"] += len(marked)
         stats["to_id"] = nid
@@ -450,18 +585,17 @@ def _cmd_list(args):
 def _cmd_sweep(args):
     conn = memsom.get_connection()
     try:
-        stats = sweep(conn, limit=args.limit, use_nli=not args.no_nli,
-                      backfill=args.backfill,
+        stats = sweep(conn, limit=args.limit, backfill=args.backfill,
                       enforce=(True if args.enforce else None))
     finally:
         conn.close()
-    tier = "structured-only" if args.no_nli else (
-        "structured+NLI" if nli_available() else "structured-only (NLI unavailable)")
+    avail = "anchored-NLI" if (nli_available() and _default_adjudicator() is not None) \
+        else "adjudicator OFF ($MEMDAG_CONTRADICT_NLI unset or model/embedder unavailable)"
     mode = "ENFORCE (staled)" if stats["enforced"] else "observe-only (recorded, not staled)"
     defer = (f", {stats['deferred']} deferred (raise/rerun --limit)"
              if stats["deferred"] else "")
     cov = "" if stats["mode"] == "embed" else " [candidates: retrieve — bridge memories not covered (no embedder)]"
-    print(f"[contradict-sweep] {tier}, {mode}: probed {stats['probed']} node(s) "
+    print(f"[contradict-sweep] {avail}, {mode}: probed {stats['probed']} node(s) "
           f"(id {stats['from_id']}->{stats['to_id']}), "
           f"{stats['contradictions']} contradiction(s){defer}.{cov}")
     return 0
@@ -480,8 +614,6 @@ def register(subparsers):
              "(covers flat-file bridge memories the ingest hook doesn't)")
     s.add_argument("--limit", type=int, default=None,
                    help="max nodes to probe this run (chunk a large backfill)")
-    s.add_argument("--no-nli", action="store_true",
-                   help="structured tier only — skip loading the NLI model")
     s.add_argument("--backfill", action="store_true",
                    help="re-scan from the beginning (one-time full pass)")
     s.add_argument("--enforce", action="store_true",
