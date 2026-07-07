@@ -73,6 +73,7 @@ import memsom_wire_claude
 import memsom_audit
 import memsom_dashboard
 import memsom_tombstone
+import memsom_contradict
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +657,7 @@ def main(argv=None):
     memsom_audit.register(sub)
     memsom_dashboard.register(sub)
     memsom_tombstone.register(sub)
+    memsom_contradict.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

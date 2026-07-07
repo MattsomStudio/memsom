@@ -347,6 +347,18 @@ def ingest_text(
         _try_index(conn, nid)
         ids.append(nid)
 
+        # Contradiction auto-detect (opt-in via $MEMDAG_CONTRADICT). The third
+        # staleness trigger: a NEW, differently-sourced fact that contradicts a
+        # live one — which the same-source supersession block below cannot see.
+        # Env-gated BEFORE the import so the default (off) path stays cheap.
+        # Best-effort: a detector failure must never break ingest.
+        if os.environ.get("MEMDAG_CONTRADICT", "").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                import memsom_contradict  # noqa: PLC0415 — lazy, opt-in
+                memsom_contradict.detect(conn, nid)
+            except Exception:  # noqa: BLE001 — contradiction detect is best-effort
+                pass
+
         # Staleness auto-detect (single-chunk only — multi-chunk has no clean
         # chunk-to-chunk supersession alignment; those use the manual stale-cascade
         # verb). If this re-ingest replaces a prior LIVE version of the SAME source,
