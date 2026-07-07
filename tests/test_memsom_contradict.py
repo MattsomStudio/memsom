@@ -232,5 +232,74 @@ class TestNliTierWiring(Base):
             os.environ.pop("MEMDAG_CONTRADICT_NLI", None)
 
 
+class TestSweep(Base):
+    """Batch sweep — covers flat-file bridge memories the ingest hook doesn't. Uses
+    an injected candidate_fn (all other live nodes) so no embedder/model is needed;
+    the structured tier does the adjudication."""
+
+    def _all_others(self, pid, _ptext):
+        return [(r[0], r[1]) for r in self.conn.execute(
+            "SELECT id, content FROM nodes WHERE id != ? AND tombstoned = 0", (pid,))]
+
+    def test_backfill_finds_preexisting_contradiction_older_loses(self):
+        old = self.add("waf=sucuri", source_ref="memory:acme_waf")   # lower id = older
+        new = self.add("waf=cloudflare", source_ref="session:x")     # higher id = newer
+        stats = memsom_contradict.sweep(
+            self.conn, backfill=True, use_nli=False, candidate_fn=self._all_others)
+        self.assertEqual(stats["probed"], 2)          # both nodes probed
+        self.assertEqual(stats["contradictions"], 1)  # but pair converges to ONE
+        self.assertEqual(self.state(old)[0], 1)       # older loses
+        self.assertEqual(self.state(new)[0], 0)       # newer survives
+        rows = memsom_contradict.list_contradictions(self.conn)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["old_id"], rows[0]["new_id"]), (old, new))
+
+    def test_cursor_advances_and_incremental_skips(self):
+        old = self.add("waf=sucuri", source_ref="a")
+        new = self.add("waf=cloudflare", source_ref="b")
+        memsom_contradict.sweep(self.conn, backfill=True, use_nli=False,
+                                candidate_fn=self._all_others)
+        # a fresh incremental sweep with nothing new probes zero nodes
+        stats2 = memsom_contradict.sweep(self.conn, use_nli=False,
+                                         candidate_fn=self._all_others)
+        self.assertEqual(stats2["probed"], 0)
+        # add a third node; only it is probed next time
+        self.add("port=443", source_ref="c")
+        stats3 = memsom_contradict.sweep(self.conn, use_nli=False,
+                                         candidate_fn=self._all_others)
+        self.assertEqual(stats3["probed"], 1)
+
+    def test_limit_defers_and_resumes(self):
+        for i in range(4):
+            self.add(f"k{i}=v{i}", source_ref=str(i))
+        s1 = memsom_contradict.sweep(self.conn, backfill=True, use_nli=False,
+                                     limit=2, candidate_fn=self._all_others)
+        self.assertEqual(s1["probed"], 2)
+        self.assertEqual(s1["deferred"], 2)
+        s2 = memsom_contradict.sweep(self.conn, use_nli=False,
+                                     candidate_fn=self._all_others)
+        self.assertEqual(s2["probed"], 2)     # resumes from the watermark
+        self.assertEqual(s2["deferred"], 0)
+
+    def test_sweep_idempotent(self):
+        self.add("waf=sucuri", source_ref="a")
+        self.add("waf=cloudflare", source_ref="b")
+        memsom_contradict.sweep(self.conn, backfill=True, use_nli=False,
+                                candidate_fn=self._all_others)
+        memsom_contradict.sweep(self.conn, backfill=True, use_nli=False,
+                                candidate_fn=self._all_others)
+        self.assertEqual(len(memsom_contradict.list_contradictions(self.conn)), 1)
+
+    def test_sweep_nli_tier_on_prose(self):
+        old = self.add("Sucuri is the active WAF.", source_ref="a")
+        new = self.add("Cloudflare is the active WAF.", source_ref="b")
+        stats = memsom_contradict.sweep(
+            self.conn, backfill=True, candidate_fn=self._all_others,
+            nli=lambda p, h: 0.97)                     # inject the scorer
+        self.assertEqual(stats["contradictions"], 1)
+        self.assertEqual(self.state(old)[0], 1)
+        self.assertEqual(memsom_contradict.list_contradictions(self.conn)[0]["verdict"], "nli")
+
+
 if __name__ == "__main__":
     unittest.main()

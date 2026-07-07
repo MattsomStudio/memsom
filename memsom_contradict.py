@@ -161,6 +161,11 @@ def migrate(conn):
     at       TEXT NOT NULL,
     PRIMARY KEY (old_id, new_id)
   );""")
+    memsom_schema.ensure_table(conn, """CREATE TABLE IF NOT EXISTS contradict_cursor (
+    id           INTEGER PRIMARY KEY CHECK (id = 0),   -- single-row watermark
+    last_node_id INTEGER NOT NULL DEFAULT 0,
+    swept_at     TEXT
+  );""")
     with conn:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_contradictions_new "
                      "ON contradictions(new_id)")
@@ -241,18 +246,24 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
                 verdict = ("nli", f"nli p={p:.2f}", float(p))
         if verdict is None:
             continue
+        # The OLDER node loses (newer fact wins), whichever way we're probing. At
+        # ingest the probe (new_id) is newest so the candidate loses — same result.
+        # But a backfill sweep probes both nodes of a pair; keying on (older, newer)
+        # makes both directions converge to ONE record + ONE stale mark instead of
+        # cross-flagging both nodes. Node id is monotonic with insertion order.
+        old_id, win_id = (cid, new_id) if cid < new_id else (new_id, cid)
         if conn.execute("SELECT 1 FROM contradictions WHERE old_id=? AND new_id=?",
-                        (cid, new_id)).fetchone():
+                        (old_id, win_id)).fetchone():
             continue
         kind, reason, score = verdict
-        memsom_stale.mark_stale_cascade(conn, cid, f"{REASON_PREFIX} node {new_id}")
+        memsom_stale.mark_stale_cascade(conn, old_id, f"{REASON_PREFIX} node {win_id}")
         with conn:
             conn.execute(
                 "INSERT OR IGNORE INTO contradictions"
                 "(old_id, new_id, verdict, judge, score, reason, at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (cid, new_id, kind, kind, score, reason, ts))
-        marked.append((cid, kind))
+                (old_id, win_id, kind, kind, score, reason, ts))
+        marked.append((old_id, kind))
     return sorted(marked)
 
 
@@ -264,6 +275,127 @@ def list_contradictions(conn):
         "FROM contradictions ORDER BY at DESC, new_id DESC").fetchall()
     return [{"old_id": r[0], "new_id": r[1], "verdict": r[2],
              "score": r[3], "reason": r[4], "at": r[5]} for r in rows]
+
+
+# --- batch sweep (bridge/flat-file coverage) ---------------------------------
+# The ingest hook only fires on ingest_text (vault sync, MCP, external). Flat-file
+# bridge memories go through insert_node and bypass it. This sweep covers them
+# WITHOUT loading the NLI model on every Stop-hook render: it runs as an explicit
+# CLI/scheduled pass, so the model loads once for the whole run.
+
+def _cursor(conn):
+    migrate(conn)
+    r = conn.execute("SELECT last_node_id FROM contradict_cursor WHERE id=0").fetchone()
+    return r[0] if r else 0
+
+
+def _set_cursor(conn, nid):
+    with conn:
+        conn.execute(
+            "INSERT INTO contradict_cursor(id, last_node_id, swept_at) VALUES (0,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET last_node_id=excluded.last_node_id, "
+            "swept_at=excluded.swept_at",
+            (nid, _now()))
+
+
+def _embed_candidate_fn(conn, k):
+    """Build a candidate selector over live memory nodes using an IN-MEMORY embedding
+    index (bge-m3 loads once), so the sweep covers flat-file bridge memories that are
+    NOT in the persistent retrieval index (they're delivered via MEMORY.md, never
+    indexed). Returns candidate_fn(probe_id, probe_text) -> [(cid, ctext), ...] or
+    None when the embedder is unavailable (caller falls back to retrieve)."""
+    try:
+        import memsom_embed  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    if not memsom_embed.bge_available():
+        return None
+    rows = conn.execute(
+        "SELECT id, content FROM nodes WHERE tombstoned = 0 "
+        "AND channel != 'agent-derived'").fetchall()
+    ids, texts, vecs = [], [], []
+    for nid, content in rows:
+        enc = memsom_embed.encode_doc(content or "")
+        if enc and enc.get("dense") is not None:
+            ids.append(nid)
+            texts.append(content)
+            vecs.append(enc["dense"])
+    if not vecs:
+        return None
+    mat = np.asarray(vecs, dtype="float32")
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    mat = mat / norms                                   # cosine == dot on unit rows
+    pos = {nid: i for i, nid in enumerate(ids)}
+
+    def candidate_fn(pid, _ptext):
+        i = pos.get(pid)
+        if i is None:
+            return []
+        sims = mat @ mat[i]
+        out = []
+        for j in np.argsort(-sims):
+            j = int(j)
+            if ids[j] == pid:
+                continue
+            out.append((ids[j], texts[j]))
+            if len(out) >= k:
+                break
+        return out
+    return candidate_fn
+
+
+def sweep(conn, *, limit=None, use_nli=True, k=5, clearance="topsecret",
+          backfill=False, nli=None, candidate_fn=None):
+    """Probe memory nodes added since the last sweep for cross-source contradictions.
+
+    Incremental by default (id > watermark); backfill=True re-scans from 0 (one-time
+    full pass — the first run on an existing store). Candidates come from an
+    in-memory embedding index built once (so flat-file bridge memories are covered);
+    when the embedder is absent it falls back to detect()'s own retrieve (indexed
+    nodes only). Both the embed pass and the NLI model load once for the whole run,
+    so this is the right home for flat-file coverage — never per-Stop-hook. limit
+    chunks a large run; the deferred remainder is reported, never silently dropped,
+    and the watermark only advances over what was probed so the next run resumes.
+
+    Returns {'probed','contradictions','deferred','from_id','to_id','mode'}.
+    """
+    migrate(conn)
+    start = 0 if backfill else _cursor(conn)
+    rows = conn.execute(
+        "SELECT id, content FROM nodes WHERE id > ? AND tombstoned = 0 "
+        "AND channel != 'agent-derived' ORDER BY id ASC", (start,)).fetchall()
+    total = len(rows)
+    if limit is not None:
+        rows = rows[:limit]
+
+    # Resolve the scorer ONCE. A non-None nli suppresses detect()'s env-based default;
+    # use_nli=False forces structured-only via an always-abstain scorer (also the
+    # graceful path when the model is unavailable).
+    if nli is None:
+        nli = nli_score if (use_nli and nli_available()) else (lambda _p, _h: None)
+
+    # Candidate source: injected (tests) > in-memory embedding index > retrieve.
+    if candidate_fn is None:
+        candidate_fn = _embed_candidate_fn(conn, k)
+    mode = "embed" if candidate_fn is not None else "retrieve"
+
+    stats = {"probed": 0, "contradictions": 0,
+             "deferred": max(0, total - len(rows)),
+             "from_id": start, "to_id": start, "mode": mode}
+    for nid, content in rows:
+        if candidate_fn is not None:
+            marked = detect(conn, nid, k=k, nli=nli,
+                            candidates=candidate_fn(nid, content))
+        else:
+            marked = detect(conn, nid, k=k, nli=nli, clearance=clearance)
+        stats["probed"] += 1
+        stats["contradictions"] += len(marked)
+        stats["to_id"] = nid
+    if rows:
+        _set_cursor(conn, rows[-1][0])
+    return stats
 
 
 # --- CLI ---------------------------------------------------------------------
@@ -285,10 +417,40 @@ def _cmd_list(args):
     return 0
 
 
+def _cmd_sweep(args):
+    conn = memsom.get_connection()
+    try:
+        stats = sweep(conn, limit=args.limit, use_nli=not args.no_nli,
+                      backfill=args.backfill)
+    finally:
+        conn.close()
+    tier = "structured-only" if args.no_nli else (
+        "structured+NLI" if nli_available() else "structured-only (NLI unavailable)")
+    defer = (f", {stats['deferred']} deferred (raise/rerun --limit)"
+             if stats["deferred"] else "")
+    cov = "" if stats["mode"] == "embed" else " [candidates: retrieve — bridge memories not covered (no embedder)]"
+    print(f"[contradict-sweep] {tier}: probed {stats['probed']} node(s) "
+          f"(id {stats['from_id']}->{stats['to_id']}), "
+          f"{stats['contradictions']} contradiction(s){defer}.{cov}")
+    return 0
+
+
 def register(subparsers):
     p = subparsers.add_parser("contradictions-list",
                               help="list recorded cross-source contradictions")
     p.set_defaults(func=_cmd_list)
+
+    s = subparsers.add_parser(
+        "contradict-sweep",
+        help="batch-scan memories added since the last sweep for contradictions "
+             "(covers flat-file bridge memories the ingest hook doesn't)")
+    s.add_argument("--limit", type=int, default=None,
+                   help="max nodes to probe this run (chunk a large backfill)")
+    s.add_argument("--no-nli", action="store_true",
+                   help="structured tier only — skip loading the NLI model")
+    s.add_argument("--backfill", action="store_true",
+                   help="re-scan from the beginning (one-time full pass)")
+    s.set_defaults(func=_cmd_sweep)
 
 
 def main(argv=None):
