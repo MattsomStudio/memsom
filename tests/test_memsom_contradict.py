@@ -12,6 +12,7 @@ deterministic stub. The structured tier exercises the real extract_claim path.
 import os
 import tempfile
 import unittest
+import unittest.mock
 import warnings
 from pathlib import Path
 
@@ -153,6 +154,82 @@ class TestGuards(Base):
         memsom_ingest.ingest_text(self.conn, "waf=sucuri", "user", source_ref="a")
         memsom_ingest.ingest_text(self.conn, "waf=cloudflare", "user", source_ref="b")
         self.assertEqual(len(memsom_contradict.list_contradictions(self.conn)), 0)
+
+
+class TestNliTierWiring(Base):
+    """Phase 2 plumbing — no model download: the real scorer is monkeypatched, and
+    the availability probe is forced. Proves detect() resolves the default NLI
+    scorer from the env and that the ingest hook drives it end-to-end."""
+
+    def test_default_nli_off_unless_opted_in(self):
+        # detector on, but semantic tier NOT opted in -> _default_nli() is None
+        self.assertIsNone(memsom_contradict._default_nli())
+
+    def test_default_nli_none_when_unavailable(self):
+        os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
+        try:
+            with unittest.mock.patch.object(memsom_contradict, "nli_available",
+                                            return_value=False):
+                self.assertIsNone(memsom_contradict._default_nli())
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT_NLI", None)
+
+    def test_default_nli_used_when_opted_in_and_available(self):
+        os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
+        try:
+            with unittest.mock.patch.object(memsom_contradict, "nli_available",
+                                            return_value=True):
+                fn = memsom_contradict._default_nli()
+                self.assertIs(fn, memsom_contradict.nli_score)
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT_NLI", None)
+
+    def test_detect_uses_resolved_default_nli_on_prose(self):
+        old = self.add("Sucuri is the active WAF.", source_ref="a")
+        new = self.add("Cloudflare is the active WAF.", source_ref="b")
+        os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
+        try:
+            with unittest.mock.patch.object(memsom_contradict, "nli_available",
+                                            return_value=True), \
+                 unittest.mock.patch.object(memsom_contradict, "nli_score",
+                                            return_value=0.97):
+                marked = memsom_contradict.detect(
+                    self.conn, new, candidates=[(old, "Sucuri is the active WAF.")])
+            self.assertEqual(marked, [(old, "nli")])
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT_NLI", None)
+
+    def test_threshold_env_respected(self):
+        old = self.add("Sucuri is the active WAF.", source_ref="a")
+        new = self.add("Cloudflare is the active WAF.", source_ref="b")
+        os.environ["MEMDAG_CONTRADICT_NLI_THRESHOLD"] = "0.99"
+        try:
+            # score 0.90 is below the raised 0.99 bar -> not flagged
+            marked = memsom_contradict.detect(
+                self.conn, new, candidates=[(old, "Sucuri is the active WAF.")],
+                nli=lambda p, h: 0.90)
+            self.assertEqual(marked, [])
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT_NLI_THRESHOLD", None)
+
+    def test_ingest_hook_runs_nli_when_both_flags_on(self):
+        os.environ["MEMDAG_CONTRADICT"] = "1"
+        os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
+        try:
+            with unittest.mock.patch.object(memsom_contradict, "nli_available",
+                                            return_value=True), \
+                 unittest.mock.patch.object(memsom_contradict, "nli_score",
+                                            return_value=0.96):
+                memsom_ingest.ingest_text(self.conn, "Sucuri is the active WAF.",
+                                          "user", source_ref="a")
+                memsom_ingest.ingest_text(self.conn, "Cloudflare is the active WAF.",
+                                          "user", source_ref="b")
+            rows = memsom_contradict.list_contradictions(self.conn)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["verdict"], "nli")
+        finally:
+            os.environ.pop("MEMDAG_CONTRADICT", None)
+            os.environ.pop("MEMDAG_CONTRADICT_NLI", None)
 
 
 if __name__ == "__main__":

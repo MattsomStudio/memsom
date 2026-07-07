@@ -15,8 +15,12 @@ Two adjudicator tiers (pluggable):
     precise BECAUSE candidates are already topically scoped by the retrieval gate —
     two "port" claims are compared only when their nodes are close, i.e. about the
     same thing. No model, deterministic.
-  - Phase 2: NLI — pass nli=fn where fn(premise, hypothesis) -> P(contradiction);
-    used only on candidates the structured tier didn't already resolve.
+  - Phase 2 (this file): NLI — a small in-process cross-encoder scores
+    P(contradiction) on candidates the structured tier didn't resolve. Opt-in via
+    $MEMDAG_CONTRADICT_NLI (separate from the detector's own $MEMDAG_CONTRADICT so
+    the cheap structured tier can run without the model); heavy-dependency-optional,
+    degrades to structured-only when torch/transformers/weights are absent. Callers
+    may still inject nli=fn (tests do) to override the default scorer.
 
 Design guardrails:
   - NEVER reuses source_supersedes — freshen()/substitute_fresh() treat that as a
@@ -48,6 +52,101 @@ import memsom_schema
 
 REASON_PREFIX = "contradicted by"
 _TRUTHY = ("1", "true", "yes", "on")
+
+# NLI semantic tier (Phase 2) — heavy-dependency-optional, mirroring memsom_embed:
+# torch + transformers are imported LAZILY only inside the code path, so importing
+# this module stays free and memsom keeps its "no required model" property. When the
+# libs or weights are absent the tier returns None and the detector runs structured-
+# only. Contradiction detection is literally the NLI task (premise/hypothesis ->
+# entailment|neutral|CONTRADICTION), so this is a small cross-encoder, NOT an LLM.
+DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
+_NLI = None            # (tokenizer, model, contradiction_idx) process-global, lazy
+_NLI_AVAILABLE = None  # cached tri-state import probe
+_NLI_WARNED = False
+
+
+def _nli_model_name():
+    return os.environ.get("MEMDAG_CONTRADICT_NLI_MODEL") or DEFAULT_NLI_MODEL
+
+
+def _nli_threshold():
+    """Contradiction-probability cutoff. High by default (precision > recall)."""
+    try:
+        return float(os.environ.get("MEMDAG_CONTRADICT_NLI_THRESHOLD", "0.85"))
+    except ValueError:
+        return 0.85
+
+
+def nli_available():
+    """True iff torch + transformers import cleanly. Cached; never raises. Probes
+    imports ONLY — no model download / VRAM (that happens on first _load_nli())."""
+    global _NLI_AVAILABLE
+    if _NLI_AVAILABLE is None:
+        try:
+            import torch  # noqa: F401,PLC0415
+            import transformers  # noqa: F401,PLC0415
+            _NLI_AVAILABLE = True
+        except Exception:  # noqa: BLE001 — any import/DLL failure -> tier unavailable
+            _NLI_AVAILABLE = False
+    return _NLI_AVAILABLE
+
+
+def _load_nli():
+    """Lazy-load the NLI cross-encoder once. Reads config.id2label to locate the
+    'contradiction' class robustly (models differ in label order)."""
+    global _NLI
+    if _NLI is None:
+        from transformers import (AutoTokenizer,  # noqa: PLC0415
+                                  AutoModelForSequenceClassification)
+        name = _nli_model_name()
+        tok = AutoTokenizer.from_pretrained(name)
+        model = AutoModelForSequenceClassification.from_pretrained(name)
+        model.eval()
+        id2label = model.config.id2label or {}
+        contra_idx = next((int(i) for i, lab in id2label.items()
+                           if "contradiction" in str(lab).lower()), 0)
+        _NLI = (tok, model, contra_idx)
+    return _NLI
+
+
+def _warn_nli_fallback():
+    global _NLI_WARNED
+    if not _NLI_WARNED:
+        _NLI_WARNED = True
+        import sys  # noqa: PLC0415
+        print("[memsom-contradict] NLI tier requested but the model failed to load; "
+              "running structured-only. Check torch/transformers + the model name.",
+              file=sys.stderr)
+
+
+def nli_score(premise, hypothesis):
+    """P(*hypothesis* contradicts *premise*) in [0,1], or None if the tier is
+    unavailable. Truncates to the model's 512-token window."""
+    if not nli_available():
+        return None
+    try:
+        import torch  # noqa: PLC0415
+        tok, model, ci = _load_nli()
+        with torch.no_grad():
+            enc = tok(premise or "", hypothesis or "", truncation=True,
+                      max_length=512, return_tensors="pt")
+            probs = torch.softmax(model(**enc).logits[0], dim=-1)
+            return float(probs[ci])
+    except Exception:  # noqa: BLE001 — a scorer failure must never break ingest
+        _warn_nli_fallback()
+        return None
+
+
+def _default_nli():
+    """The scorer detect() uses when a caller doesn't inject one: the real NLI
+    scorer iff the semantic tier is opted in ($MEMDAG_CONTRADICT_NLI) AND loadable;
+    otherwise None (structured-only). Kept separate from $MEMDAG_CONTRADICT so a
+    user can run the cheap structured tier without the model."""
+    if str(os.environ.get("MEMDAG_CONTRADICT_NLI", "")).strip().lower() not in _TRUTHY:
+        return None
+    if not nli_available():
+        return None
+    return nli_score
 
 
 def migrate(conn):
@@ -91,7 +190,7 @@ def _structured_verdict(new_text, cand_text):
     return None
 
 
-def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=0.85,
+def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=None,
            clearance="topsecret"):
     """Detect live nodes that *new_id* contradicts; mark each stale + record the link.
 
@@ -99,11 +198,16 @@ def detect(conn, new_id, *, k=5, candidates=None, nli=None, nli_threshold=0.85,
     tests). When None, live topically-close candidates come from the hybrid
     retriever (its BM25 half works with no embedder, so this degrades gracefully).
     nli: optional fn(premise, hypothesis) -> P(contradiction) in [0,1]; used only
-    where the structured tier abstains.
+    where the structured tier abstains. When None, resolves to _default_nli() —
+    the real NLI scorer iff the semantic tier is opted in + loadable, else None.
 
     Returns a sorted list of (old_id, verdict_kind). Marks the OLD node, never new_id.
     """
     migrate(conn)
+    if nli is None:
+        nli = _default_nli()
+    if nli_threshold is None:
+        nli_threshold = _nli_threshold()
     row = conn.execute(
         "SELECT content, channel FROM nodes WHERE id = ? AND tombstoned = 0",
         (new_id,)).fetchone()
