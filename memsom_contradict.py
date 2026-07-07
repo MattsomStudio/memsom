@@ -197,11 +197,15 @@ _STOP = frozenset(
 
 
 def _anchor():
-    """Minimum sentence-pair cosine for a pair to be adjudicated at all."""
+    """Minimum sentence-pair cosine for a pair to be adjudicated at all. Default 0.80:
+    real contradictions restate the same claim with one value swapped (near-identical
+    sentences, cosine ~0.9+), while paraphrase false positives sit at 0.75-0.80. On
+    the backup brain 0.80 gives 0 false positives with recall intact. Lower it to
+    catch differently-phrased contradictions at the cost of precision."""
     try:
-        return float(os.environ.get("MEMDAG_CONTRADICT_ANCHOR", "0.75"))
+        return float(os.environ.get("MEMDAG_CONTRADICT_ANCHOR", "0.80"))
     except ValueError:
-        return 0.75
+        return 0.80
 
 
 def _sentences(text, *, max_sents=40, min_len=12):
@@ -237,7 +241,8 @@ def _content_diff(sa, sb):
     stopwords and metadata (dates/numbers/paths/urls/wikilinks). Empty => the two
     sentences differ only in metadata, so any NLI 'contradiction' is spurious."""
     def toks(s):
-        s = re.sub(r"[*_`#>|()\[\],:;!?]", " ", s.lower())
+        s = re.sub(r"`[^`]+`", " ", s)        # drop `code spans` — identifiers/paths/
+        s = re.sub(r"[*_#>|()\[\],:;!?]", " ", s.lower())   # commands aren't claim values
         return [t.strip(".") for t in s.split() if t.strip(".")]
     from collections import Counter  # noqa: PLC0415
     a, b = Counter(toks(sa)), Counter(toks(sb))
