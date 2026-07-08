@@ -296,5 +296,56 @@ class TestSweep(Base):
         self.assertEqual(lits_after, lits_before)  # file sweep never touches literals
 
 
+# --- Pass 2: [[wikilinks]] in bodies become associative rel_edges -------------
+
+class TestRelateWikilinks(Base):
+    def _wire_bodies(self):
+        # user_adhd links to two real siblings, one not-yet-written target, and
+        # itself; the code-fenced link must NOT become an edge.
+        (self.mem / "user_adhd.md").write_text(
+            "---\nname: ADHD\ntype: user\n---\n\n"
+            "Links to [[personal_sam]] and [[feedback_debug]]. "
+            "Future note [[reference_not_written_yet]]. Self [[user_adhd]].\n"
+            "```\nfenced [[project_kali]] must be ignored\n```\n",
+            encoding="utf-8")
+
+    def test_wikilinks_create_edges_and_traverse(self):
+        import memsom_relate
+        self._wire_bodies()
+        stats = bi.import_all(self.conn, self.mem, dry_run=False)["edges"]
+        self.assertEqual(stats["edges"], 2)          # sam + debug
+        self.assertEqual(stats["resolved"], 2)
+        self.assertGreaterEqual(stats["unresolved"], 1)  # the not-written target
+        self.assertEqual(stats["skipped_self"], 1)   # [[user_adhd]] self-link
+
+        src = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        sam = bi._live_node_for_path(self.conn, "personal_sam.md")[0]
+        dbg = bi._live_node_for_path(self.conn, "feedback_debug.md")[0]
+        kali = bi._live_node_for_path(self.conn, "project_kali.md")[0]
+        nbrs = {d["id"] for d in memsom_relate.neighborhood(self.conn, src, hops=1)}
+        self.assertIn(sam, nbrs)
+        self.assertIn(dbg, nbrs)
+        self.assertNotIn(kali, nbrs)                 # fenced link excluded
+
+    def test_relate_pass_is_idempotent(self):
+        self._wire_bodies()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        n1 = self.conn.execute("SELECT COUNT(*) FROM rel_edges").fetchone()[0]
+        bi.import_all(self.conn, self.mem, dry_run=False)  # re-run, no file change
+        n2 = self.conn.execute("SELECT COUNT(*) FROM rel_edges").fetchone()[0]
+        self.assertEqual(n1, n2)                      # INSERT OR IGNORE, no dupes
+
+    def test_dry_run_writes_no_edges(self):
+        self._wire_bodies()
+        stats = bi.import_all(self.conn, self.mem, dry_run=True)["edges"]
+        self.assertEqual(stats["edges"], 0)           # nothing written in dry-run
+        # rel_edges table may not even exist in a pure dry-run; count defensively.
+        try:
+            n = self.conn.execute("SELECT COUNT(*) FROM rel_edges").fetchone()[0]
+        except Exception:
+            n = 0
+        self.assertEqual(n, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

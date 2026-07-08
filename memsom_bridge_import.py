@@ -329,11 +329,100 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
     return stats
 
 
+def relate_wikilinks(conn, memory_dir, *, dry_run: bool = True) -> dict:
+    """Pass 2: materialise the ``[[wikilinks]]`` in memory-file bodies as edges.
+
+    import_memory_dir stores each file as ONE node but leaves its ``[[links]]``
+    inert in the body text.  This pass parses them and creates associative
+    ('wikilink') rel_edges between the corresponding nodes — the SAME edge kind
+    memsom_obsidian builds for vault notes — so neighborhood()/graph-rerank can
+    traverse the personal memory, not only the Obsidian vault.  Without it the
+    associative half of the graph is dark for everything imported via the bridge.
+
+    Resolution mirrors the vault path exactly: a bare ``[[stem]]`` resolves to
+    ``<stem>.md`` iff that basename is unique among the memory files, and the two
+    endpoints are the live nodes for those bridge_paths.  Links whose target file
+    does not exist yet (the "write it later" convention) resolve to nothing and
+    are counted as unresolved — a useful signal, not an error.
+
+    Idempotent: relate() is INSERT OR IGNORE, and every run re-derives all edges
+    from the current bodies against the current live nodes, so a changed file
+    whose node id rolled over gets its edges rebuilt (stale edges to the old,
+    now-tombstoned node stay inert — neighborhood's BFS skips dead nodes).
+
+    Only wikilinks are parsed (not markdown links): memory files cross-reference
+    each other by ``[[name]]`` convention, whereas a stray ``](path)`` usually
+    points into the vault, a different corpus.  The parse is code-fence-masked
+    (via memsom_obsidian._mask) so a ``[[x]]`` inside a fenced block is ignored.
+    """
+    import memsom_obsidian   # lazy: reuse its vetted link parser + resolver
+    import memsom_relate      # lazy: same defensive style as memsom_stale above
+
+    memory_dir = Path(memory_dir)
+    stats = {"edges": 0, "resolved": 0, "unresolved": 0, "skipped_self": 0}
+
+    files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
+    by_name, by_relpath = memsom_obsidian._build_resolver([p.name for p in files])
+
+    # Parse each body's wikilinks with the same masking the vault sync uses, so a
+    # [[x]] inside a code fence never becomes an edge. Dedup, preserve order.
+    note_links = {}
+    for path in files:
+        body = split_frontmatter(path.read_text(encoding="utf-8"))[1]
+        masked = memsom_obsidian._mask(body)
+        seen, targets = set(), []
+        for _bang, inner in memsom_obsidian._WIKILINK.findall(masked):
+            t = memsom_obsidian._wikilink_target(inner)
+            if t and t not in seen:
+                seen.add(t)
+                targets.append(t)
+        note_links[path.name] = targets
+
+    def _do():
+        if not dry_run:
+            memsom_relate.migrate(conn)   # ensure the rel_edges table exists
+        for src_rel, targets in note_links.items():
+            src_row = _live_node_for_path(conn, src_rel)
+            if src_row is None:
+                continue                  # file not imported (dry-run on empty DB)
+            src = src_row[0]
+            for tgt in targets:
+                tgt_rel = memsom_obsidian._resolve_target(tgt, by_name, by_relpath)
+                if tgt_rel is None:
+                    stats["unresolved"] += 1
+                    continue
+                dst_row = _live_node_for_path(conn, tgt_rel)
+                if dst_row is None:
+                    stats["unresolved"] += 1
+                    continue
+                dst = dst_row[0]
+                if dst == src:
+                    stats["skipped_self"] += 1
+                    continue
+                stats["resolved"] += 1
+                if dry_run:
+                    continue
+                try:
+                    memsom_relate.relate(conn, src, dst,
+                                         kind=memsom_obsidian.LINK_KIND)
+                    stats["edges"] += 1
+                except ValueError:
+                    pass  # a node vanished mid-run — harmless, skip the edge
+
+    _do()
+    return stats
+
+
 def import_all(conn, memory_dir, *, dry_run: bool = True) -> dict:
-    """Import both the per-file memories and the file-less literal index lines."""
+    """Import the per-file memories, the literal index lines, then wire edges.
+
+    Order matters: relate_wikilinks runs LAST so every file already has a live
+    node to point an edge at (Pass 2, exactly as memsom_obsidian sequences it).
+    """
     files = import_memory_dir(conn, memory_dir, dry_run=dry_run)
     lits = import_literals(conn, memory_dir, dry_run=dry_run)
-    return {"files": files, "literals": lits}
+    edges = relate_wikilinks(conn, memory_dir, dry_run=dry_run)
+    return {"files": files, "literals": lits, "edges": edges}
 
 
 # --- DB helpers ---------------------------------------------------------------
@@ -504,6 +593,11 @@ def _print_stats(stats, dry_run):
               f"resurfaced -> refused + file unlinked)")
     print(f"  literals       : {l['total']} total | {l['created']} created | "
           f"{l['skipped']} skipped | {l['tombstoned']} tombstoned")
+    e = stats.get("edges")
+    if e is not None:
+        verb = "would relate" if dry_run else "created"
+        print(f"  wikilink edges : {e['edges']} {verb} | {e['resolved']} resolved | "
+              f"{e['unresolved']} unresolved | {e['skipped_self']} self-links skipped")
 
 
 def _cmd_import(args):
