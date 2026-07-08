@@ -1,0 +1,4 @@
+# Derived / regenerable benchmark artifacts — not source.
+# Per-item run DBs contain corpus text; edge cache is regenerable from the linker.
+h2h/
+.linker_cache/

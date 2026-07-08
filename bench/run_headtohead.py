@@ -38,7 +38,9 @@ _HAS_PROV = False
 def make_adapter(system: str, repo: str, config: dict):
     if system == "memsom":
         from adapters.memsom_adapter import MemsomAdapter
-        return MemsomAdapter(repo, no_embed=config.get("no_embed", False))
+        return MemsomAdapter(repo, no_embed=config.get("no_embed", False),
+                             graph=config.get("graph", False),
+                             hops=config.get("hops", 2))
     if system == "rag":
         from adapters.rag_adapter import RagAdapter
         return RagAdapter()
