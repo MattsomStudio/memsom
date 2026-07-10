@@ -21,12 +21,12 @@ from unittest.mock import MagicMock, patch
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_schema
-import memsom_compact
-import memsom_quarantine
-import memsom_redact
-import memsom_federation
-import memsom_confid
+from memsom.storage import schema as memsom_schema
+from memsom.lifecycle import compact as memsom_compact
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
+from memsom.federation import federation as memsom_federation
+from memsom.integrity import confid as memsom_confid
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +362,7 @@ class TestLlmUsedWhenReachable(Base):
 
 class TestArchivedExcludedFromDefaultRetrieval(Base):
     def test_archived_excluded_from_default_retrieval(self):
-        import memsom_retrieve
+        from memsom.retrieval import retrieve as memsom_retrieve
 
         n1 = self.add(EP1, "user")
         n2 = self.add(EP2, "user")
@@ -401,7 +401,7 @@ class TestArchivedExcludedFromDefaultRetrieval(Base):
 
 class TestExplainAndBlameStillWalkArchived(Base):
     def test_explain_and_blame_still_walk_archived(self):
-        import memsom_cli
+        from memsom.interface import cli as memsom_cli
 
         n1 = self.add(EP1, "user")
         n2 = self.add(EP2, "user")
@@ -438,7 +438,7 @@ class TestExplainAndBlameStillWalkArchived(Base):
 
 class TestGroupByClaim(Base):
     def test_group_by_claim(self):
-        import memsom_corroborate
+        from memsom.integrity import corroborate as memsom_corroborate
 
         memsom_corroborate.migrate(self.conn)
         memsom_corroborate.register_root(self.conn, "rootA", by="test")
@@ -649,7 +649,7 @@ class TestCompactConfHighWater(Base):
         memsom_confid.classify(self.conn, s1, 'secret')
         memsom_confid.classify(self.conn, s2, 'secret')
         memsom_compact.compact(self.conn, group_by='similarity', min_group=2, sim_threshold=0.0)
-        import memsom_retrieve
+        from memsom.retrieval import retrieve as memsom_retrieve
         hits = memsom_retrieve.retrieve(self.conn, 'mesh secret rotation key', clearance='public')
         # No public-clearance hit may carry the secret material (defense-in-depth:
         # derived nodes are excluded from the retrieve pool AND conf is now SECRET).
@@ -672,7 +672,7 @@ class TestCompactPurgesRetrievalIndex(Base):
             f"SELECT {col} FROM {table}").fetchall()}
 
     def test_archived_episodes_purged_from_index_and_not_resurrected(self):
-        import memsom_retrieve
+        from memsom.retrieval import retrieve as memsom_retrieve
 
         n1 = self.add(EP1, "user")
         n2 = self.add(EP2, "user")
@@ -700,7 +700,7 @@ class TestCompactPurgesRetrievalIndex(Base):
                              f"reindex resurrected archived [{ep}] into docstats")
 
     def test_corpus_stats_reflect_only_live_pool_after_compact(self):
-        import memsom_retrieve
+        from memsom.retrieval import retrieve as memsom_retrieve
 
         # Two near-duplicates that compact together + one unrelated live node.
         n1 = self.add(EP1, "user")
@@ -727,7 +727,7 @@ class TestCompactPurgesRetrievalIndex(Base):
         `with conn:` commits early), this test fails — a crash would then be able
         to leave a node archived-but-indexed.
         """
-        import memsom_retrieve
+        from memsom.retrieval import retrieve as memsom_retrieve
 
         n1 = self.add(EP1, "user")
         n2 = self.add(EP2, "user")

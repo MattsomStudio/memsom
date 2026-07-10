@@ -16,7 +16,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_quarantine
+from memsom.integrity import quarantine as memsom_quarantine
 
 HERE = Path(__file__).resolve().parent
 

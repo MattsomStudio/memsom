@@ -110,7 +110,7 @@ def main() -> int:
     args = ap.parse_args()
 
     sys.path.insert(0, args.repo)
-    import memsom_cli as _cli  # noqa: E402
+    from memsom.interface import cli as _cli
     memsom_cli = _cli
 
     if args.dataset:

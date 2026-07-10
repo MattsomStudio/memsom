@@ -16,9 +16,9 @@ warnings.simplefilter("error", DeprecationWarning)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import scrub_gate                       # noqa: E402
 import memsom                           # noqa: E402
-import memsom_bridge_import as bi       # noqa: E402
-import memsom_forget as forget          # noqa: E402
-import memsom_dashboard as dash         # noqa: E402
+from memsom.bridge import bridge_import as bi
+from memsom.lifecycle import forget as forget
+from memsom.interface import dashboard as dash
 
 
 FILES = {
@@ -112,7 +112,9 @@ class TestSecurity(Base):
         (self.mem / "project_pinbody.md").write_text(
             "---\nname: P\ndescription: d\ntype: project\n---\nnotes:\npin: yes please\n",
             encoding="utf-8")
-        import memsom, memsom_bridge_import as bi2, memsom_forget as f2
+        import memsom
+        from memsom.bridge import bridge_import as bi2
+        from memsom.lifecycle import forget as f2
         conn = memsom.get_connection()
         bi2.import_all(conn, self.mem, dry_run=False)
         f2.recompute_forget(conn)

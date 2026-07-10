@@ -21,9 +21,9 @@ from unittest.mock import patch
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_distill
-import memsom_quarantine
-import memsom_redact
+from memsom.distill import distill as memsom_distill
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
 
 HERE = Path(__file__).resolve().parent
 

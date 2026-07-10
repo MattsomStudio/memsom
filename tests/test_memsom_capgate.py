@@ -15,8 +15,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_capgate as C
-import memsom_policy as P
+from memsom.integrity import capgate as C
+from memsom.integrity import policy as P
 
 
 class Base(unittest.TestCase):

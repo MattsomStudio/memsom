@@ -16,8 +16,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_recompute
-import memsom_corroborate
+from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import corroborate as memsom_corroborate
 
 
 class Base(unittest.TestCase):
@@ -429,7 +429,7 @@ class TestRegisterRootIdempotentAndValidates(Base):
 
 class TestCorrConfStamp(Base):
     def test_lift_inherits_secret_conf(self):
-        import memsom_confid
+        from memsom.integrity import confid as memsom_confid
         memsom_confid.migrate(self.conn)
         memsom_corroborate.register_root(self.conn, "root-A", by="test")
         memsom_corroborate.register_root(self.conn, "root-B", by="test")

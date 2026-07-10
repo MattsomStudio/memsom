@@ -18,7 +18,7 @@ from unittest.mock import patch
 warnings.simplefilter("error", DeprecationWarning)  # 3.12 sqlite3 adapter regression = hard fail
 
 import memsom
-import memsom_schema
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):
@@ -125,7 +125,7 @@ class TestDuplicateColumnRaceIsNoop(Base):
 
 class TestReexports(Base):
     def test_reexports(self):
-        """memsom_schema.RANK and .NAME are the same objects as memsom.RANK / memsom.NAME."""
+        """memsom.storage.schema.RANK and .NAME are the same objects as memsom.RANK / memsom.NAME."""
         self.assertIs(memsom_schema.RANK, memsom.RANK)
         self.assertIs(memsom_schema.NAME, memsom.NAME)
 

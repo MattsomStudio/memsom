@@ -6,7 +6,8 @@ e = json.load(open(r"C:\Users\you\lme_data\longmemeval_s_cleaned.json", encoding
 turns = [(t.get("content") or "").strip() for s in e["haystack_sessions"] for t in s if (t.get("content") or "").strip()]
 print("turns:", len(turns))
 md = MemsomAdapter(r"C:\Users\you\memsom")
-import memsom, memsom_retrieve   # after adapter put repo on sys.path
+import memsom
+from memsom.retrieval import retrieve as memsom_retrieve
 d = tempfile.mkdtemp(prefix="prof_"); md.reset(d)
 t=time.time(); [md.add(x,"user") for x in turns]; print(f"add-loop (CLI x{len(turns)}): {time.time()-t:.1f}s")
 t=time.time(); md._call(["reindex"]); print(f"reindex(embed): {time.time()-t:.1f}s")

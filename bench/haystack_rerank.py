@@ -18,7 +18,7 @@ import numpy as np
 
 BENCH = r"C:\Users\you\memsom\bench"; REPO = r"C:\Users\you\memsom"
 sys.path.insert(0, BENCH); sys.path.insert(0, REPO)
-from memsom_retrieve import tokenize                       # noqa: E402
+from memsom.retrieval.retrieve import tokenize
 
 BGE_URL = "http://127.0.0.1:11435/embed"
 RRF_C = 60; K1 = 1.2; B = 0.75

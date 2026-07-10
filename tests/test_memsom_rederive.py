@@ -11,7 +11,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_rederive
+from memsom.retrieval import rederive as memsom_rederive
 
 
 class Base(unittest.TestCase):
@@ -108,7 +108,7 @@ class RegenBase(Base):
         return c, text
 
     def make_extractive(self, parent_ids, k=5):
-        import memsom_compact
+        from memsom.lifecycle import compact as memsom_compact
         rows = sorted(((i, self.conn.execute(
             "SELECT content FROM nodes WHERE id=?", (i,)).fetchone()[0]) for i in parent_ids),
             key=lambda r: r[0])
@@ -216,7 +216,7 @@ class TestRegenerateExtractive(RegenBase):
     """test 6: extractive replays at the stored k from the surviving episodes."""
 
     def test_extractive_regenerates(self):
-        import memsom_compact
+        from memsom.lifecycle import compact as memsom_compact
         a = self.add("First episode about networking and TCP handshakes in detail here.", "user")
         b = self.add("Second episode about TCP congestion control and window scaling here.", "user")
         c, c_text = self.make_extractive([a, b], k=5)

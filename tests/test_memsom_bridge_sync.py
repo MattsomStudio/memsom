@@ -12,7 +12,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_bridge_sync as sync
+from memsom.bridge import bridge_sync as sync
 
 
 class Base(unittest.TestCase):

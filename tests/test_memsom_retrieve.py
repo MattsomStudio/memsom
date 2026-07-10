@@ -19,11 +19,11 @@ from unittest.mock import patch
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_confid
-import memsom_quarantine
-import memsom_redact
-import memsom_retrieve
-import memsom_schema
+from memsom.integrity import confid as memsom_confid
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
+from memsom.retrieval import retrieve as memsom_retrieve
+from memsom.storage import schema as memsom_schema
 
 
 # ---------------------------------------------------------------------------

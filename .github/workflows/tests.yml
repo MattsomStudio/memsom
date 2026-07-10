@@ -47,11 +47,11 @@ jobs:
 
       # The frozen core regression gate must pass on its own as well.
       - name: Frozen core regression gate
-        run: python -W error::DeprecationWarning -m unittest discover -s . -p "test_memsom.py" -v
+        run: python -W error::DeprecationWarning -m unittest discover -s tests -p "test_memsom.py" -v
 
       # Gate #3 broker entry point boots and enforces allow -> taint -> deny.
       - name: Gate 3 broker selfcheck
-        run: python memsom_broker.py --selfcheck
+        run: python -m memsom.federation.broker --selfcheck
 
   # Server-side enforcement of the author-identifying-token gate across ALL git
   # history. The pre-push hook (.githooks/pre-push) is opt-in per clone and never

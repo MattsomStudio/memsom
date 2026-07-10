@@ -18,7 +18,7 @@ BENCH = r"C:\Users\you\memsom\bench"
 REPO = r"C:\Users\you\memsom"
 sys.path.insert(0, BENCH); sys.path.insert(0, REPO)
 from dataset import from_longmemeval                       # noqa: E402
-from memsom_retrieve import tokenize                       # noqa: E402  (memsom's real tokenizer)
+from memsom.retrieval.retrieve import tokenize
 
 NOMIC_URL = "http://localhost:11434/api/embed"; NOMIC_MODEL = "nomic-embed-text"
 BGE_URL = "http://127.0.0.1:11435/embed"

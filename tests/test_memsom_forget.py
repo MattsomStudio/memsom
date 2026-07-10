@@ -18,7 +18,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_forget as forget
+from memsom.lifecycle import forget as forget
 
 
 # --- locate the original mem_weights for the parity test (optional) ----------

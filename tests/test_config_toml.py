@@ -9,7 +9,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-import memsom_config
+from memsom.storage import config as memsom_config
 
 EXE = "/home/u/.memdag/venv/bin/memsom-mcp"
 DB = "/home/u/.memdag/memdag.db"

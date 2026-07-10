@@ -21,10 +21,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_mcp
+from memsom.interface import mcp as memsom_mcp
 
 HERE = Path(__file__).resolve().parent.parent
-MCP_SCRIPT = str(HERE / "memsom_mcp.py")
+MCP_MODULE = "memsom.interface.mcp"
 
 
 class Base(unittest.TestCase):
@@ -155,7 +155,7 @@ class TestHandleInProcess(Base):
 
     def test_tools_call_verify_stale_apply_marks_and_dry_run_does_not(self):
         """verify_stale threads apply through; dry-run (default) writes nothing."""
-        import memsom_bridge_import
+        from memsom.bridge import bridge_import as memsom_bridge_import
         memsom_bridge_import.migrate(self.conn)
         with self.conn:
             nid = memsom.insert_node(
@@ -192,7 +192,7 @@ class TestHandleInProcess(Base):
 
     def test_tools_call_retrieve_returns_hits(self):
         """retrieve tool returns text containing a [N] citation after seeding + reindex."""
-        import memsom_cli
+        from memsom.interface import cli as memsom_cli
         # Seed two nodes via CLI
         memsom_cli.main(["add", "Nebula uses UDP port 4242 for overlay tunnels.", "--channel", "endorsed"])
         memsom_cli.main(["add", "Configure the Nebula lighthouse static_host_map entry.", "--channel", "user"])
@@ -230,7 +230,7 @@ class TestSubprocess(Base):
 
     def test_selfcheck_exits_0_and_3_json_lines(self):
         r = subprocess.run(
-            [sys.executable, MCP_SCRIPT, "--selfcheck"],
+            [sys.executable, "-m", MCP_MODULE, "--selfcheck"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -256,7 +256,7 @@ class TestSubprocess(Base):
         stdin_data = msg1 + "\n" + msg2 + "\n"
 
         r = subprocess.run(
-            [sys.executable, MCP_SCRIPT],
+            [sys.executable, "-m", MCP_MODULE],
             input=stdin_data,
             capture_output=True,
             text=True,

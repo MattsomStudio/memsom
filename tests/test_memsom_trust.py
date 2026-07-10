@@ -18,8 +18,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_recompute
-import memsom_trust
+from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import trust as memsom_trust
 
 
 class Base(unittest.TestCase):

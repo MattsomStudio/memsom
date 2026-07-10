@@ -27,7 +27,7 @@ import urllib.request
 
 import dataset
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import memsom_retrieve as mr  # exact tokenize + BM25 constants + RRF
+from memsom.retrieval import retrieve as mr
 
 EMBED_URL = os.environ.get("MEMDAG_EMBED_URL") or "http://localhost:11434/api/embeddings"
 EMBED_MODEL = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"

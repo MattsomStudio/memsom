@@ -23,14 +23,14 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_anticipatory
-import memsom_cli
-import memsom_confid
-import memsom_quarantine
-import memsom_recompute
-import memsom_redact
-import memsom_retrieve
-import memsom_trust
+from memsom.lifecycle import anticipatory as memsom_anticipatory
+from memsom.interface import cli as memsom_cli
+from memsom.integrity import confid as memsom_confid
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import redact as memsom_redact
+from memsom.retrieval import retrieve as memsom_retrieve
+from memsom.integrity import trust as memsom_trust
 
 
 class Base(unittest.TestCase):

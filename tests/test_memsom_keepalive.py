@@ -33,10 +33,10 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-import memsom_compact
-import memsom_llm
-import memsom_retrieve
-from memsom_llm import LlmUnavailable, keep_alive, llm_compose
+from memsom.lifecycle import compact as memsom_compact
+from memsom.distill import llm as memsom_llm
+from memsom.retrieval import retrieve as memsom_retrieve
+from memsom.distill.llm import LlmUnavailable, keep_alive, llm_compose
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ class TestGenerateCarriesKeepAlive(EnvIsolation):
 
     def _body_for_llm_compose(self):
         captured = {}
-        with patch("memsom_llm.urllib.request.urlopen",
+        with patch("memsom.distill.llm.urllib.request.urlopen",
                    side_effect=_capture_urlopen(captured,
                                                 {"response": GOOD_ANSWER})):
             llm_compose(QUESTION, SOURCES)
@@ -163,7 +163,7 @@ class TestGenerateCarriesKeepAlive(EnvIsolation):
         self.assertEqual(body["keep_alive"], "10m")
 
     def test_ollama_down_fallback_unchanged(self):
-        with patch("memsom_llm.urllib.request.urlopen",
+        with patch("memsom.distill.llm.urllib.request.urlopen",
                    side_effect=urllib.error.URLError("connection refused")):
             with self.assertRaises(LlmUnavailable):
                 llm_compose(QUESTION, SOURCES)
@@ -177,7 +177,7 @@ class TestEmbeddingsCarriesKeepAlive(EnvIsolation):
 
     def _body_for_embed(self):
         captured = {}
-        with patch("memsom_retrieve.urllib.request.urlopen",
+        with patch("memsom.retrieval.retrieve.urllib.request.urlopen",
                    side_effect=_capture_urlopen(captured,
                                                 {"embedding": [0.1, 0.2]})):
             vec = memsom_retrieve._call_ollama_embed("probe text")
@@ -201,7 +201,7 @@ class TestEmbeddingsCarriesKeepAlive(EnvIsolation):
     def test_embed_failure_still_raises_for_silent_degrade(self):
         # vector_search/_vector_sims rely on _call_ollama_embed raising so
         # they can degrade to BM25-only; keep_alive must not swallow that.
-        with patch("memsom_retrieve.urllib.request.urlopen",
+        with patch("memsom.retrieval.retrieve.urllib.request.urlopen",
                    side_effect=urllib.error.URLError("connection refused")):
             with self.assertRaises(Exception):
                 memsom_retrieve._call_ollama_embed("probe text")

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 
 import memsom
-import memsom_chats
+from memsom.bridge import chats as memsom_chats
 
 
 def write_jsonl(path, records):

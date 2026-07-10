@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 import memsom
-import memsom_mcp
+from memsom.interface import mcp as memsom_mcp
 
 
 class FreshDbTools(unittest.TestCase):

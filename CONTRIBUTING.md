@@ -44,7 +44,7 @@ won't run a repo's committed hooks until you point `core.hooksPath` at them).
 
 - **Tests pass**, including deprecation-as-error: `python -W error::DeprecationWarning -m unittest discover -s . -p "test_*.py"`
 - **The frozen core gate passes**: `python -m unittest test_memsom.py`
-- **The broker self-check passes**: `python memsom_broker.py --selfcheck`
+- **The broker self-check passes**: `python -m memsom.federation.broker --selfcheck`
 - **New behavior ships with a test.** Determinism is a feature — if it isn't tested, it isn't done.
 - Keep changes provenance-clean: no vendored code without noting its source and license (CLA §7).
 

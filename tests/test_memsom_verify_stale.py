@@ -15,9 +15,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_stale
-import memsom_bridge_import as bi
-import memsom_verify_stale as vs
+from memsom.integrity import stale as memsom_stale
+from memsom.bridge import bridge_import as bi
+from memsom.integrity import verify_stale as vs
 
 
 NOW = datetime(2026, 6, 25, tzinfo=timezone.utc)

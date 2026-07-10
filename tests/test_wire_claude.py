@@ -11,7 +11,7 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-import memsom_wire_claude as wc
+from memsom.bridge import wire_claude as wc
 
 EXE = "/abs/path/memsom"
 
@@ -180,7 +180,7 @@ class TestOrchestration(unittest.TestCase):
     def test_claude_md_error_carries_detail(self):
         # a claude-sync failure must capture the exception detail (so the CLI can
         # surface it instead of printing a blank "[claude.md] error -> ").
-        import memsom_claude
+        from memsom.bridge import claude as memsom_claude
         orig = memsom_claude.sync
         memsom_claude.sync = lambda *a, **k: (_ for _ in ()).throw(PermissionError("denied"))
         try:

@@ -16,9 +16,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_broker as B
-import memsom_policy
-import memsom_session
+from memsom.federation import broker as B
+from memsom.integrity import policy as memsom_policy
+from memsom.storage import session as memsom_session
 
 
 class Base(unittest.TestCase):

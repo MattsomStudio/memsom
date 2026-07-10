@@ -16,10 +16,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_confid
-import memsom_quarantine
-import memsom_redact
-import memsom_relate
+from memsom.integrity import confid as memsom_confid
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
+from memsom.retrieval import relate as memsom_relate
 
 
 class Base(unittest.TestCase):

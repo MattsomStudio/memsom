@@ -29,7 +29,7 @@ class MemsomAdapter(MemoryAdapter):
                  prefer_fresh: bool = False, graph: bool = False, hops: int = 2):
         import sys
         sys.path.insert(0, repo)
-        import memsom_cli  # noqa: E402
+        from memsom.interface import cli as memsom_cli
         self._cli = memsom_cli
         self.repo = repo
         self._item_dir = None
@@ -102,7 +102,7 @@ class MemsomAdapter(MemoryAdapter):
         """
         import bench_linker
         import memsom
-        import memsom_relate
+        from memsom.retrieval import relate as memsom_relate
 
         pairs = bench_linker.link(self._texts)   # raises if Ollama is down (loud, by design)
         if not pairs:

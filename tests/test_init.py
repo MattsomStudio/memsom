@@ -13,7 +13,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import memsom
-import memsom_cli
+from memsom.interface import cli as memsom_cli
 
 
 class TestInit(unittest.TestCase):

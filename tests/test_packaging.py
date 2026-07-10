@@ -31,18 +31,15 @@ class TestEntryPoints(unittest.TestCase):
 
 
 class TestWheelManifest(unittest.TestCase):
-    def test_wheel_includes_every_runtime_module(self):
-        # Every memsom*.py runtime module that exists on disk must be in the wheel
-        # allowlist (the classic "added a module, forgot the allowlist" footgun).
-        only = set(_pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"])
-        on_disk = {p.name for p in HERE.glob("memsom*.py")}
-        missing = on_disk - only
-        self.assertEqual(missing, set(),
-                         f"runtime modules missing from wheel only-include: {sorted(missing)}")
+    def test_wheel_ships_the_package(self):
+        # The wheel ships the whole memsom/ package; every runtime module lives
+        # under it, so there is no per-module allowlist to keep in sync anymore.
+        wheel = _pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]
+        self.assertEqual(wheel.get("packages"), ["memsom"])
 
     def test_mcp_server_module_shipped(self):
-        only = set(_pyproject()["tool"]["hatch"]["build"]["targets"]["wheel"]["only-include"])
-        self.assertIn("memsom_mcp.py", only)
+        # mcp server module is inside the shipped package.
+        self.assertTrue((HERE / "memsom" / "interface" / "mcp.py").is_file())
 
 
 if __name__ == "__main__":

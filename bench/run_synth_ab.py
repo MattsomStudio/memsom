@@ -54,7 +54,8 @@ for n, it in enumerate(items, 1):
 
     # md_fullnode: the FULL content of memsom's retrieved nodes (bypasses the
     # lossy compose render). retrieve() returns (id, content, channel, label, ref).
-    import memsom, memsom_retrieve  # lazy: MemsomAdapter put repo on sys.path
+    import memsom
+    from memsom.retrieval import retrieve as memsom_retrieve
     _conn = memsom.get_connection()  # uses MEMDAG_DB set by md.reset
     try:
         _rows = memsom_retrieve.retrieve(_conn, it["question"], k=8)

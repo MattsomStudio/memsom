@@ -13,9 +13,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_anticipatory
-import memsom_quarantine
-import memsom_redact
+from memsom.lifecycle import anticipatory as memsom_anticipatory
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
 
 HERE = Path(__file__).resolve().parent
 
@@ -290,8 +290,8 @@ class TestObserveRows(Base):
 # Phase 2 — retrieval-backed surprise, prefetch cache, recombination, taint
 # ===========================================================================
 
-import memsom_confid
-import memsom_compact
+from memsom.integrity import confid as memsom_confid
+from memsom.lifecycle import compact as memsom_compact
 
 
 class Phase2Base(Base):

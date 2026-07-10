@@ -1,0 +1,1 @@
+"""memsom.storage subpackage."""

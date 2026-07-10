@@ -29,7 +29,10 @@ if os.path.exists(OUT):
         except Exception: pass
 
 md = MemsomAdapter(REPO)
-import memsom, memsom_retrieve, memsom_cli, memsom_ingest
+import memsom
+from memsom.retrieval import retrieve as memsom_retrieve
+from memsom.interface import cli as memsom_cli
+from memsom.interface import ingest as memsom_ingest
 LABEL = memsom_ingest.authoritative_label("user")
 print(f"[haystack] {len(data)} q, {len(done)} done, topk={TOPK}", flush=True)
 

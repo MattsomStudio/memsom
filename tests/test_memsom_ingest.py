@@ -18,8 +18,8 @@ from unittest.mock import patch, MagicMock
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_ingest
-import memsom_schema
+from memsom.interface import ingest as memsom_ingest
+from memsom.storage import schema as memsom_schema
 
 HERE = Path(__file__).resolve().parent
 
@@ -54,7 +54,7 @@ class Base(unittest.TestCase):
 
 class TestDedupSkipsTaintedNodes(Base):
     def test_dedup_does_not_reuse_redacted_node(self):
-        import memsom_redact
+        from memsom.integrity import redact as memsom_redact
         text = "A distinctive paragraph that will be ingested, redacted, then re-ingested."
         first = memsom_ingest.ingest_text(self.conn, text, "user", chunk=False)
         self.assertEqual(len(first), 1)
@@ -91,7 +91,7 @@ class TestDedupSkipsTaintedNodes(Base):
         self.assertEqual(u2, u, "same-channel identical content must still dedup")
 
     def test_dedup_does_not_reuse_quarantined_node(self):
-        import memsom_quarantine
+        from memsom.integrity import quarantine as memsom_quarantine
         text = "Another distinctive paragraph headed for quarantine before a re-ingest."
         nid = memsom_ingest.ingest_text(self.conn, text, "user", chunk=False)[0]
         memsom_quarantine.quarantine_node(self.conn, nid, "hold")
@@ -551,39 +551,26 @@ class TestChunkSplitter(unittest.TestCase):
 
 class TestRetrieveIntegration(Base):
     def test_ingest_works_without_memsom_retrieve(self):
-        """ingest_text must not crash even when memsom_retrieve is absent."""
-        import sys
-        # Temporarily make memsom_retrieve unimportable
-        original = sys.modules.get("memsom_retrieve", None)
-        sys.modules["memsom_retrieve"] = None  # causes ImportError on import
-        try:
+        """ingest_text must not crash when the retrieve module can't be imported."""
+        from unittest.mock import patch
+        # Simulate the retrieve module being absent: the lazy import path raises
+        # ImportError, which _try_index swallows.
+        with patch("memsom.retrieval.retrieve.index_node",
+                   side_effect=ImportError("no retrieve module")):
             ids = memsom_ingest.ingest_text(
                 self.conn, "Content ingested without retrieve module.", "user"
             )
-            self.assertEqual(len(ids), 1)
-        finally:
-            if original is None:
-                sys.modules.pop("memsom_retrieve", None)
-            else:
-                sys.modules["memsom_retrieve"] = original
+        self.assertEqual(len(ids), 1)
 
     def test_ingest_works_when_index_node_raises(self):
-        """ingest_text must not crash when memsom_retrieve.index_node raises."""
-        mock_retrieve = MagicMock()
-        mock_retrieve.index_node.side_effect = RuntimeError("index failed")
-        import sys
-        original = sys.modules.get("memsom_retrieve", None)
-        sys.modules["memsom_retrieve"] = mock_retrieve
-        try:
+        """ingest_text must not crash when memsom.retrieval.retrieve.index_node raises."""
+        from unittest.mock import patch
+        with patch("memsom.retrieval.retrieve.index_node",
+                   side_effect=RuntimeError("index failed")):
             ids = memsom_ingest.ingest_text(
                 self.conn, "Content ingested despite retrieve error.", "endorsed"
             )
-            self.assertEqual(len(ids), 1)
-        finally:
-            if original is None:
-                sys.modules.pop("memsom_retrieve", None)
-            else:
-                sys.modules["memsom_retrieve"] = original
+        self.assertEqual(len(ids), 1)
 
 
 # ---------------------------------------------------------------------------

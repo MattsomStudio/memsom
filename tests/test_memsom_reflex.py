@@ -14,10 +14,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_compact
-import memsom_quarantine
-import memsom_redact
-import memsom_reflex
+from memsom.lifecycle import compact as memsom_compact
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
+from memsom.lifecycle import reflex as memsom_reflex
 
 POISON = "POISON_MARKER_zq7x"
 

@@ -17,12 +17,12 @@ from unittest.mock import patch
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_confid
-import memsom_quarantine
-import memsom_redact
-import memsom_relate
-import memsom_retrieve
-import memsom_schema
+from memsom.integrity import confid as memsom_confid
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
+from memsom.retrieval import relate as memsom_relate
+from memsom.retrieval import retrieve as memsom_retrieve
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):
@@ -39,7 +39,7 @@ class Base(unittest.TestCase):
         # Pin the vector layer off -> deterministic BM25-only ranking (also the
         # supported "Ollama down" degradation path).
         self._patcher = patch(
-            "memsom_retrieve._call_ollama_embed", side_effect=Exception("offline"))
+            "memsom.retrieval.retrieve._call_ollama_embed", side_effect=Exception("offline"))
         self._patcher.start()
 
     def tearDown(self):
@@ -227,7 +227,7 @@ class TestGraceful(Base):
 
 class TestAskIntegration(Base):
     def test_ask_graph_cites_promoted_node(self):
-        import memsom_cli
+        from memsom.interface import cli as memsom_cli
         a = self.add(_A)
         self.add(_F)
         b = self.add(_B)

@@ -17,10 +17,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_confid
-import memsom_heal
-import memsom_recompute
-import memsom_schema
+from memsom.integrity import confid as memsom_confid
+from memsom.lifecycle import heal as memsom_heal
+from memsom.retrieval import recompute as memsom_recompute
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):

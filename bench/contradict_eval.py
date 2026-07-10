@@ -42,7 +42,7 @@ def main():
     os.environ["MEMDAG_CONTRADICT_NLI"] = "1"   # opt the semantic tier in
 
     import memsom
-    import memsom_contradict as C
+    from memsom.integrity import contradict as C
     conn = memsom.get_connection()
 
     print(f"anchor={C._anchor()} nli_threshold={C._nli_threshold()} "

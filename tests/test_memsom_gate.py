@@ -20,8 +20,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_gate
-import memsom_schema
+from memsom.integrity import gate as memsom_gate
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):

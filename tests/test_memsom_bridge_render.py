@@ -13,8 +13,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_digest as digest
-import memsom_bridge_render as br
+from memsom.distill import digest as digest
+from memsom.bridge import bridge_render as br
 
 
 # Generic fixtures — no author-identifying content (the scrub gate scans this file).

@@ -13,7 +13,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import memsom
-import memsom_doctor
+from memsom.lifecycle import doctor as memsom_doctor
 
 
 class TestDoctor(unittest.TestCase):

@@ -26,8 +26,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_cli
-import memsom_schema
+from memsom.interface import cli as memsom_cli
+from memsom.storage import schema as memsom_schema
 
 
 def _insert(conn, content, channel="user", label=1, status="live", **extra):

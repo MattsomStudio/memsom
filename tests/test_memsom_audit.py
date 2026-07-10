@@ -13,9 +13,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_bridge_import as bi
-import memsom_forget as forget
-import memsom_audit as audit
+from memsom.bridge import bridge_import as bi
+from memsom.lifecycle import forget as forget
+from memsom.interface import audit as audit
 
 
 FILES = {

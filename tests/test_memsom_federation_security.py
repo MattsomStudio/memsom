@@ -18,10 +18,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_federation
-import memsom_confid
-import memsom_gate
-import memsom_recompute
+from memsom.federation import federation as memsom_federation
+from memsom.integrity import confid as memsom_confid
+from memsom.integrity import gate as memsom_gate
+from memsom.retrieval import recompute as memsom_recompute
 
 
 class SecurityBase(unittest.TestCase):

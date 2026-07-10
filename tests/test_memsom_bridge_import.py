@@ -13,7 +13,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_bridge_import as bi
+from memsom.bridge import bridge_import as bi
 
 
 SAMPLE = {
@@ -73,7 +73,7 @@ class Base(unittest.TestCase):
 
 class TestStaleMigrate(Base):
     def test_migrate_adds_stale_columns_and_tables(self):
-        import memsom_schema
+        from memsom.storage import schema as memsom_schema
         for col in ("stale", "stale_at", "stale_reason"):
             self.assertTrue(memsom_schema.column_exists(self.conn, "nodes", col),
                             f"missing nodes.{col}")
@@ -310,7 +310,7 @@ class TestRelateWikilinks(Base):
             encoding="utf-8")
 
     def test_wikilinks_create_edges_and_traverse(self):
-        import memsom_relate
+        from memsom.retrieval import relate as memsom_relate
         self._wire_bodies()
         stats = bi.import_all(self.conn, self.mem, dry_run=False)["edges"]
         self.assertEqual(stats["edges"], 2)          # sam + debug

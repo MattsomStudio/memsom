@@ -19,10 +19,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_quarantine
-import memsom_confid
-import memsom_cli
-import memsom_retrieve
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import confid as memsom_confid
+from memsom.interface import cli as memsom_cli
+from memsom.retrieval import retrieve as memsom_retrieve
 
 HERE = Path(__file__).resolve().parent
 
@@ -268,9 +268,18 @@ class TestParserSubcommands(Base):
 
         sub.add_parser("migrate").set_defaults(func=lambda a: None)
 
-        import memsom_recompute, memsom_redact, memsom_quarantine, memsom_confid
-        import memsom_federation, memsom_blame, memsom_relate, memsom_anticipatory
-        import memsom_distill, memsom_heal, memsom_trust, memsom_llm
+        from memsom.retrieval import recompute as memsom_recompute
+        from memsom.integrity import redact as memsom_redact
+        from memsom.integrity import quarantine as memsom_quarantine
+        from memsom.integrity import confid as memsom_confid
+        from memsom.federation import federation as memsom_federation
+        from memsom.interface import blame as memsom_blame
+        from memsom.retrieval import relate as memsom_relate
+        from memsom.lifecycle import anticipatory as memsom_anticipatory
+        from memsom.distill import distill as memsom_distill
+        from memsom.lifecycle import heal as memsom_heal
+        from memsom.integrity import trust as memsom_trust
+        from memsom.distill import llm as memsom_llm
 
         memsom_recompute.register(sub)
         memsom_redact.register(sub)
@@ -306,7 +315,7 @@ class TestCoreDelegation(Base):
 
     def test_explain_redacted_node_shows_marker(self):
         """F-16 (AUDIT 2026-06-11): explain on a redacted node shows [REDACTED]."""
-        import memsom_redact
+        from memsom.integrity import redact as memsom_redact
         src = self.add("private_key=PEM_SECRET_ABCDEF must stay hidden", "user")
         memsom_redact.redact_node(self.conn, src, "secret leaked")
         out = self.run_cli("explain", str(src))
@@ -411,8 +420,8 @@ class TestSpineSubcommandsParse(Base):
 
     def test_spine_subcommands_parse(self):
         import argparse
-        import memsom_ingest
-        import memsom_compact
+        from memsom.interface import ingest as memsom_ingest
+        from memsom.lifecycle import compact as memsom_compact
 
         p = argparse.ArgumentParser(prog="memsom_test_spine")
         sub = p.add_subparsers(dest="command", required=True)

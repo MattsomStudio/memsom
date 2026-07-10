@@ -46,7 +46,7 @@ _SCORE_FIELDS = ("item_id", "poisoned", "composed", "utility", "asr",
 def _init_worker(repo: str):
     global _CLI
     sys.path.insert(0, repo)
-    import memsom_cli  # noqa: E402
+    from memsom.interface import cli as memsom_cli
     _CLI = memsom_cli
 
 

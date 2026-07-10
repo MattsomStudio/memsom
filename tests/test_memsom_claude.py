@@ -10,7 +10,7 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-import memsom_claude as mc
+from memsom.bridge import claude as mc
 
 HERE = Path(__file__).resolve().parent.parent
 

@@ -21,9 +21,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_ingest
-import memsom_stale
-import memsom_contradict
+from memsom.interface import ingest as memsom_ingest
+from memsom.integrity import stale as memsom_stale
+from memsom.integrity import contradict as memsom_contradict
 
 
 def flag_when(pred, score=0.99):
@@ -163,7 +163,7 @@ class TestObserveOnly(Base):
         self.assertFalse(obs[0]["enforced"])
 
     def test_reason_namespace_survives_verify_stale(self):
-        import memsom_verify_stale
+        from memsom.integrity import verify_stale as memsom_verify_stale
         old = self.add("Sucuri is the active WAF.", source_ref="memory:acme_waf")
         new = self.add("Cloudflare is the active WAF.", source_ref="b")
         memsom_contradict.detect(self.conn, new,
@@ -186,7 +186,7 @@ class TestAdjudicatorResolution(Base):
 
     def test_built_when_opted_in_and_available(self):
         os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
-        import memsom_embed
+        from memsom.retrieval import embed as memsom_embed
         with unittest.mock.patch.object(memsom_contradict, "nli_available",
                                         return_value=True), \
              unittest.mock.patch.object(memsom_embed, "bge_available",
@@ -224,7 +224,7 @@ class TestAnchoredAdjudicator(Base):
         return {"dense": [0.0, 0.0, 1.0]}
 
     def _patched(self, nli_fn, anchor=0.75, threshold=0.85):
-        import memsom_embed
+        from memsom.retrieval import embed as memsom_embed
         p1 = unittest.mock.patch.object(memsom_embed, "bge_available", return_value=True)
         p2 = unittest.mock.patch.object(memsom_embed, "encode_doc", side_effect=self._topic_vec)
         p1.start(); p2.start()

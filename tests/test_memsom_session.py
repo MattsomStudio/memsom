@@ -15,7 +15,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_session
+from memsom.storage import session as memsom_session
 
 
 class Base(unittest.TestCase):

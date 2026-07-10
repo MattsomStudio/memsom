@@ -12,10 +12,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_bridge_import as bi
-import memsom_forget as forget
-import memsom_digest as digest
-import memsom_stale
+from memsom.bridge import bridge_import as bi
+from memsom.lifecycle import forget as forget
+from memsom.distill import digest as digest
+from memsom.integrity import stale as memsom_stale
 
 
 FILES = {

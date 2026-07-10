@@ -73,7 +73,7 @@ def main():
     args = ap.parse_args()
 
     sys.path.insert(0, args.repo)
-    import memsom_cli as _cli
+    from memsom.interface import cli as _cli
     memsom_cli = _cli
 
     items, _ = from_longmemeval(args.dataset, max_items=args.n)

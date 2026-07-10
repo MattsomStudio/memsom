@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import memsom_config
+from memsom.storage import config as memsom_config
 
 
 class TestPaths(unittest.TestCase):
@@ -170,17 +170,17 @@ class TestEntryPointExitCodes(unittest.TestCase):
 
     def test_standalone_main_real_run_exits_1(self):
         # CFG-MAIN-EXITDROP-1: direct `python memsom_config.py` must not drop the code.
-        r = self._run([sys.executable, "memsom_config.py", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom.storage.config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db])
         self.assertEqual(r.returncode, 1, r.stderr)
 
     def test_dispatcher_real_run_exits_1(self):
-        r = self._run([sys.executable, "-m", "memsom_cli", "wire-config", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom.interface.cli", "wire-config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db])
         self.assertEqual(r.returncode, 1, r.stderr)
 
     def test_dispatcher_print_only_exits_0(self):
-        r = self._run([sys.executable, "-m", "memsom_cli", "wire-config", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom.interface.cli", "wire-config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db, "--print-only"])
         self.assertEqual(r.returncode, 0, r.stderr)
 

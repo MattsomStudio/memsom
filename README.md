@@ -119,7 +119,7 @@ GUI clients (Claude Desktop) don't inherit your shell `PATH`, so a bare
 
 The DB lands at `~/.memdag/memdag.db` by default; override with the `MEMDAG_DB`
 env var. Running straight from the repo without installing works too
-(`python memsom_cli.py ...`).
+(`python -m memsom.interface.cli ...`).
 
 > **VRAM hygiene knob:** by default memsom leaves Ollama's `keep_alive` alone — the
 > model stays warm per Ollama's own setting. On a shared or small-VRAM card, set
@@ -192,11 +192,11 @@ sits next to it).
 ## Quickstart
 
 memsom has two entry points:
-- `memsom.py` — the **frozen core slice** (the original explain/revoke vertical
-  slice, kept byte-identical as a regression anchor; do not touch).
-- `memsom_cli.py` — the **full surface**: every feature module plus the setup
-  commands (`init`, `ingest-chats`, `doctor`, `wire-config`). This is the `memsom`
-  console command after `pip install`.
+- `memsom/__init__.py` — the **core slice** (the original explain/revoke vertical
+  slice). Run it directly with `python -m memsom` (seed/ask/explain/revoke/dump).
+- `memsom/interface/cli.py` — the **full surface**: every feature module plus the
+  setup commands (`init`, `ingest-chats`, `doctor`, `wire-config`). This is the
+  `memsom` console command after `pip install` (or `python -m memsom.interface.cli`).
 
 ### Frozen core — the whole idea in six commands (stdlib only, no install)
 
@@ -215,16 +215,16 @@ Walkthrough script: `demo/demo.ps1`. Design notes: [ARCHITECTURE.md](ARCHITECTUR
 ### Full surface — poison, catch, revoke, redact
 
 ```bash
-python memsom_cli.py seed --reset --offline
-python memsom_cli.py add "SQLite tip: always enable WAL mode for read concurrency" --channel external --ref "blog.example"
-python memsom_cli.py ask "What is SQLite?"
-python memsom_cli.py blame 5
-python memsom_cli.py consolidate
-python memsom_cli.py quarantine-list
-python memsom_cli.py revoke 4 --reason "poisoned blog" --yes
-python memsom_cli.py ask "What is SQLite?"
-python memsom_cli.py redact 4 --reason "malicious payload" --yes
-python memsom_cli.py dump
+python -m memsom.interface.cli seed --reset --offline
+python -m memsom.interface.cli add "SQLite tip: always enable WAL mode for read concurrency" --channel external --ref "blog.example"
+python -m memsom.interface.cli ask "What is SQLite?"
+python -m memsom.interface.cli blame 5
+python -m memsom.interface.cli consolidate
+python -m memsom.interface.cli quarantine-list
+python -m memsom.interface.cli revoke 4 --reason "poisoned blog" --yes
+python -m memsom.interface.cli ask "What is SQLite?"
+python -m memsom.interface.cli redact 4 --reason "malicious payload" --yes
+python -m memsom.interface.cli dump
 ```
 
 Walkthrough script: `demo/demo2.ps1`.
@@ -233,10 +233,10 @@ Walkthrough script: `demo/demo2.ps1`.
 
 ```bash
 # Start the stdio MCP server
-python memsom_mcp.py
+python -m memsom.interface.mcp
 
 # Self-check (safe on any DB; runs 3 in-process probes, prints JSON, exits 0/1)
-python memsom_mcp.py --selfcheck
+python -m memsom.interface.mcp --selfcheck
 ```
 
 Project-scoped registration: `.mcp.json` in this directory registers the server
@@ -384,13 +384,13 @@ BM25 is **pure stdlib** — works offline with zero external services. Ollama `n
 
 ```bash
 # Build (or rebuild) the BM25 postings index
-python memsom_cli.py reindex
+python -m memsom.interface.cli reindex
 
 # Query — returns ranked (id, content, channel, label, source_ref) rows
-python memsom_cli.py retrieve "How does SQLite WAL mode work?"
+python -m memsom.interface.cli retrieve "How does SQLite WAL mode work?"
 
 # Opt-in retrieval inside ask: uses retrieve() to build the source pool
-python memsom_cli.py ask --retrieve --topk 5 "How does SQLite WAL mode work?"
+python -m memsom.interface.cli ask --retrieve --topk 5 "How does SQLite WAL mode work?"
 ```
 
 Without `--retrieve`, `ask` is **unchanged** — it uses all live sources exactly as before. Every existing test still passes.
@@ -405,10 +405,10 @@ Without `--retrieve`, `ask` is **unchanged** — it uses all live sources exactl
 - The quarantine integrity gate (`consolidate`) runs automatically after compaction.
 
 ```bash
-python memsom_cli.py compact                         # similarity grouping (Jaccard)
-python memsom_cli.py compact --group-by claim        # group by corroboration claim
-python memsom_cli.py compact --llm                   # Ollama summary (extractive fallback)
-python memsom_cli.py archived-list
+python -m memsom.interface.cli compact                         # similarity grouping (Jaccard)
+python -m memsom.interface.cli compact --group-by claim        # group by corroboration claim
+python -m memsom.interface.cli compact --llm                   # Ollama summary (extractive fallback)
+python -m memsom.interface.cli archived-list
 ```
 
 ### Two integrity/confidentiality axes

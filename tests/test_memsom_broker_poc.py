@@ -21,10 +21,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_broker as B
-import memsom_capgate
-import memsom_policy
-import memsom_session
+from memsom.federation import broker as B
+from memsom.integrity import capgate as memsom_capgate
+from memsom.integrity import policy as memsom_policy
+from memsom.storage import session as memsom_session
 
 # A minimal stdio MCP server exposing two tools:
 #   echo_fetch(text)  -> returns text          (stands in for an untrusted web fetch)

@@ -18,8 +18,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_profile
-import memsom_schema
+from memsom.interface import profile as memsom_profile
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):

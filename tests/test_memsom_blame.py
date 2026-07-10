@@ -18,9 +18,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_blame
-import memsom_quarantine
-import memsom_redact
+from memsom.interface import blame as memsom_blame
+from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
 
 
 class Base(unittest.TestCase):
@@ -206,7 +206,7 @@ class TestCliOutput(Base):
 
 class TestBlameClearanceGate(Base):
     def test_above_clearance_content_suppressed(self):
-        import memsom_confid
+        from memsom.integrity import confid as memsom_confid
         memsom_confid.migrate(self.conn)
         secret = self.add("TOPSECRET nuclear codes 0000", "endorsed")
         with self.conn:

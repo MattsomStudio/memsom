@@ -13,9 +13,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_bridge_import as bi
-import memsom_forget as forget
-import memsom_tombstone as tomb
+from memsom.bridge import bridge_import as bi
+from memsom.lifecycle import forget as forget
+from memsom.integrity import tombstone as tomb
 
 
 FILES = {
@@ -131,7 +131,7 @@ class TestHardTombstone(Base):
             (f"memory:{stem}",)).fetchone()[0]
 
     def test_hard_erases_payload_db_disk_blame(self):
-        import memsom_blame
+        from memsom.interface import blame as memsom_blame
         nid = self._nid("project_widget")
         self.assertNotEqual(
             self.conn.execute("SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0], "")

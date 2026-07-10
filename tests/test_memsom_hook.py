@@ -18,8 +18,8 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_hook as H
-import memsom_session
+from memsom.bridge import hook as H
+from memsom.storage import session as memsom_session
 
 
 class Base(unittest.TestCase):
@@ -101,7 +101,7 @@ class TestCli(Base):
     def _run(self, verb, payload):
         env = dict(os.environ)
         return subprocess.run(
-            [sys.executable, "memsom_hook.py", verb],
+            [sys.executable, "-m", "memsom.bridge.hook", verb],
             input=json.dumps(payload), capture_output=True, text=True, env=env,
             cwd=str(Path(__file__).parent.parent),
         )
@@ -126,7 +126,7 @@ class TestCli(Base):
 
     def test_malformed_stdin_fails_open(self):
         env = dict(os.environ)
-        r = subprocess.run([sys.executable, "memsom_hook.py", "hook-pre"],
+        r = subprocess.run([sys.executable, "-m", "memsom.bridge.hook", "hook-pre"],
                            input="{ not json", capture_output=True, text=True, env=env,
                            cwd=str(Path(__file__).parent.parent))
         self.assertEqual(r.returncode, 0)

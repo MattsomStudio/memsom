@@ -14,10 +14,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_schema
-import memsom_ingest
-import memsom_rederive
-import memsom_stale
+from memsom.storage import schema as memsom_schema
+from memsom.interface import ingest as memsom_ingest
+from memsom.retrieval import rederive as memsom_rederive
+from memsom.integrity import stale as memsom_stale
 
 
 class Base(unittest.TestCase):
@@ -334,7 +334,7 @@ class TestSubstituteFresh(Base):
         self.assertEqual(subs, [(a1, a3)])
 
     def test_gate_blocks_above_clearance_fresh(self):
-        import memsom_confid
+        from memsom.integrity import confid as memsom_confid
         memsom_confid.migrate(self.conn)
         a1 = self.src("the deadline is march fifteenth.", ref="s.md")
         a2 = self.src("the deadline is april twentieth.", ref="s.md")

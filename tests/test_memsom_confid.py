@@ -13,9 +13,9 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_confid
-import memsom_compact
-import memsom_retrieve
+from memsom.integrity import confid as memsom_confid
+from memsom.lifecycle import compact as memsom_compact
+from memsom.retrieval import retrieve as memsom_retrieve
 
 HERE = Path(__file__).resolve().parent
 

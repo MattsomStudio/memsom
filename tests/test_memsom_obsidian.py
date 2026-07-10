@@ -14,10 +14,10 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_relate
-import memsom_obsidian
-import memsom_bridge_import
-import memsom_schema
+from memsom.retrieval import relate as memsom_relate
+from memsom.bridge import obsidian as memsom_obsidian
+from memsom.bridge import bridge_import as memsom_bridge_import
+from memsom.storage import schema as memsom_schema
 
 
 class Base(unittest.TestCase):
@@ -536,7 +536,7 @@ class TestWatcher(Base):
 
 class TestCli(Base):
     def test_sync_via_cli(self):
-        import memsom_cli
+        from memsom.interface import cli as memsom_cli
         self.note("A.md", "alpha [[B]]")
         self.note("B.md", "beta")
         memsom_cli.main(["obsidian-sync", str(self.vault)])

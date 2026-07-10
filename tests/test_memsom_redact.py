@@ -11,7 +11,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
-import memsom_redact
+from memsom.integrity import redact as memsom_redact
 
 HERE = Path(__file__).resolve().parent
 
