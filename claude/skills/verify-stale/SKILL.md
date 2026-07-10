@@ -64,6 +64,6 @@ flag on one still clears on a run.
   Different axis entirely: audit checks the store is *sound*, this checks claims
   are *current*. No overlap.
 - `memsom stale-cascade` / `memsom freshen` — the underlying cascade primitives
-  this sweep calls into (`memsom_stale.py`): a source re-ingest fires the same
+  this sweep calls into (`memsom/integrity/stale.py`): a source re-ingest fires the same
   cascade this sweep does, just on a different trigger (content-hash change vs.
   verification age).

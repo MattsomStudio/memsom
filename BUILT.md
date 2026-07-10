@@ -8,21 +8,21 @@ adds 80+ tests across 13 modules + CLI + MCP.
 
 | Module                | File                     | Capability                                                     | Test file                     | Tests |
 |-----------------------|--------------------------|----------------------------------------------------------------|-------------------------------|-------|
-| schema helpers        | memsom_schema.py         | Idempotent ADD COLUMN / CREATE TABLE IF NOT EXISTS helpers     | test_memsom_schema.py         | 8     |
-| recompute             | memsom_recompute.py      | Multi-hop integrity label recompute; elevation fixed-points    | test_memsom_recompute.py      | 10    |
-| redact                | memsom_redact.py         | Payload destruction (content=''); rows/edges/dates survive     | test_memsom_redact.py         | 10    |
-| quarantine            | memsom_quarantine.py     | Consolidation gate; manual quarantine; promote with gate check | test_memsom_quarantine.py     | 10    |
-| confid                | memsom_confid.py         | Bell-LaPadula conf axis (MAX high-water-mark); classify        | test_memsom_confid.py         | 10    |
-| trust                 | memsom_trust.py          | Integrity lattice (meet/join); audited manual elevation        | test_memsom_trust.py          | 10    |
-| blame                 | memsom_blame.py          | Git-blame: trace any node to its root sources                  | test_memsom_blame.py          | 8     |
-| federation            | memsom_federation.py     | Cross-machine sync; first-death-wins monotonic; UUID backfill  | test_memsom_federation.py     | 10    |
-| relate                | memsom_relate.py         | Associative rel_edges; BFS neighborhood with integrity floor   | test_memsom_relate.py         | 10    |
-| anticipatory          | memsom_anticipatory.py   | Surprise-gating (Jaccard novelty); query_log; prefetch         | test_memsom_anticipatory.py   | 10    |
-| distill               | memsom_distill.py        | Provenance-filtered JSONL export; distill_plan runner stub     | test_memsom_distill.py        | 10    |
-| heal                  | memsom_heal.py           | Invariant check (5 violation kinds); rebuild-derived           | test_memsom_heal.py           | 10    |
-| llm                   | memsom_llm.py            | Opt-in Ollama LLM path; citation firewall; LlmUnavailable      | test_memsom_llm.py            | 10    |
-| **CLI**               | **memsom_cli.py**        | **Unified 38-subcommand CLI; enhanced ask**                    | **test_memsom_cli.py**        | **10**|
-| **MCP server**        | **memsom_mcp.py**        | **stdio JSON-RPC 2.0 MCP server; 12 tools; --selfcheck**       | **test_memsom_mcp.py**        | **9** |
+| schema helpers        | memsom/storage/schema.py         | Idempotent ADD COLUMN / CREATE TABLE IF NOT EXISTS helpers     | test_memsom_schema.py         | 8     |
+| recompute             | memsom/retrieval/recompute.py      | Multi-hop integrity label recompute; elevation fixed-points    | test_memsom_recompute.py      | 10    |
+| redact                | memsom/integrity/redact.py         | Payload destruction (content=''); rows/edges/dates survive     | test_memsom_redact.py         | 10    |
+| quarantine            | memsom/integrity/quarantine.py     | Consolidation gate; manual quarantine; promote with gate check | test_memsom_quarantine.py     | 10    |
+| confid                | memsom/integrity/confid.py         | Bell-LaPadula conf axis (MAX high-water-mark); classify        | test_memsom_confid.py         | 10    |
+| trust                 | memsom/integrity/trust.py          | Integrity lattice (meet/join); audited manual elevation        | test_memsom_trust.py          | 10    |
+| blame                 | memsom/interface/blame.py          | Git-blame: trace any node to its root sources                  | test_memsom_blame.py          | 8     |
+| federation            | memsom/federation/federation.py     | Cross-machine sync; first-death-wins monotonic; UUID backfill  | test_memsom_federation.py     | 10    |
+| relate                | memsom/retrieval/relate.py         | Associative rel_edges; BFS neighborhood with integrity floor   | test_memsom_relate.py         | 10    |
+| anticipatory          | memsom/lifecycle/anticipatory.py   | Surprise-gating (Jaccard novelty); query_log; prefetch         | test_memsom_anticipatory.py   | 10    |
+| distill               | memsom/distill/distill.py        | Provenance-filtered JSONL export; distill_plan runner stub     | test_memsom_distill.py        | 10    |
+| heal                  | memsom/lifecycle/heal.py           | Invariant check (5 violation kinds); rebuild-derived           | test_memsom_heal.py           | 10    |
+| llm                   | memsom/distill/llm.py            | Opt-in Ollama LLM path; citation firewall; LlmUnavailable      | test_memsom_llm.py            | 10    |
+| **CLI**               | **memsom/interface/cli.py**        | **Unified 38-subcommand CLI; enhanced ask**                    | **test_memsom_cli.py**        | **10**|
+| **MCP server**        | **memsom/interface/mcp.py**        | **stdio JSON-RPC 2.0 MCP server; 12 tools; --selfcheck**       | **test_memsom_mcp.py**        | **9** |
 
 ## Schema additions (all additive, all defaulted — demo #1 byte-identical)
 
@@ -101,9 +101,9 @@ adds 80+ tests across 13 modules + CLI + MCP.
 
 | Module                 | File                        | Test file                        | Tests |
 |------------------------|-----------------------------|----------------------------------|-------|
-| profile                | memsom_profile.py           | test_memsom_profile.py           | 13    |
-| gate                   | memsom_gate.py              | test_memsom_gate.py              | 11    |
-| corroborate            | memsom_corroborate.py       | test_memsom_corroborate.py       | 12    |
+| profile                | memsom/interface/profile.py           | test_memsom_profile.py           | 13    |
+| gate                   | memsom/integrity/gate.py              | test_memsom_gate.py              | 11    |
+| corroborate            | memsom/integrity/corroborate.py       | test_memsom_corroborate.py       | 12    |
 
 ### New tables (all additive — no nodes-table columns touched)
 
@@ -128,18 +128,18 @@ adds 80+ tests across 13 modules + CLI + MCP.
 
 | Module          | File                   | Capability                                                                                   | Test file                   | Tests |
 |-----------------|------------------------|----------------------------------------------------------------------------------------------|-----------------------------|-------|
-| ingest          | memsom_ingest.py       | Write path: channel-stamped adapters (file/dir/url/text), SHA-256 dedup, auto-chunking       | test_memsom_ingest.py       | 33    |
-| retrieve        | memsom_retrieve.py     | Hybrid BM25 (stdlib) + optional Ollama-vector (RRF fusion); degrades silently to BM25-only   | test_memsom_retrieve.py     | 35    |
-| compact         | memsom_compact.py      | Edge-preserving compaction: derive_node from episodes, archive (never delete), integrity gate| test_memsom_compact.py      | 22    |
+| ingest          | memsom/interface/ingest.py       | Write path: channel-stamped adapters (file/dir/url/text), SHA-256 dedup, auto-chunking       | test_memsom_ingest.py       | 33    |
+| retrieve        | memsom/retrieval/retrieve.py     | Hybrid BM25 (stdlib) + optional Ollama-vector (RRF fusion); degrades silently to BM25-only   | test_memsom_retrieve.py     | 35    |
+| compact         | memsom/lifecycle/compact.py      | Edge-preserving compaction: derive_node from episodes, archive (never delete), integrity gate| test_memsom_compact.py      | 22    |
 
-### CLI wiring (memsom_cli.py)
+### CLI wiring (memsom/interface/cli.py)
 
 - `migrate_all()` now runs `memsom_ingest.migrate`, `memsom_retrieve.migrate`, `memsom_compact.migrate` — guarantees `content_hash`, `postings`, and `archived` exist on every CLI path.
 - `_build_pool()` adds `AND archived = 0` — DEFAULT 0 means no behaviour change until something is actually compacted; all existing CLI tests stay green.
 - `ask` gains two opt-in flags: `--retrieve` (use ranked retrieval pool instead of all-live) and `--topk N` (default 8). Without `--retrieve`, ask is byte-identical to prior behaviour.
 - New subcommands mounted: `ingest`, `ingest-dir`, `ingest-url`, `ingest-text`, `retrieve`, `reindex`, `compact`, `archived-list`.
 
-### MCP wiring (memsom_mcp.py)
+### MCP wiring (memsom/interface/mcp.py)
 
 - Two new tools added: `retrieve` (ranked hits) and `ingest_text` (stamp + store).
 - MCP tool count: 12 → **14**.
@@ -182,10 +182,10 @@ Full suite after Spine v1: **339 tests, 0 failures**.
 ## Regression guarantee
 
 The frozen TestEndToEndDemo suite (`test_memsom.py`, 18 tests) runs against
-`memsom.py` only. It was byte-identical to the 2026-06-12 demo through the
+`memsom/__init__.py` only. It was byte-identical to the 2026-06-12 demo through the
 memdag era; the byte-identity anchor was **re-baselined at the 2026-07-01
 memdag→memsom rename** (the file was renamed and its `import` updated, nothing
-else). From that commit forward `memsom.py`/`test_memsom.py` stay byte-identical.
+else). From that commit forward `memsom/__init__.py`/`test_memsom.py` stay byte-identical.
 It MUST stay green. Command:
 
 ```powershell
@@ -205,7 +205,7 @@ python -W error::DeprecationWarning -m unittest discover -s <repo> -p "test_mems
 ## Operator-class hardening (2026-06-11)
 
 Closes the remaining operator-class findings from the adversarial audit
-(`_build/AUDIT.md`). `memsom.py` and `test_memsom.py` stayed frozen; F-14 was
+(`_build/AUDIT.md`). `memsom/__init__.py` and `test_memsom.py` stayed frozen; F-14 was
 fixed at the caller layer. Suite: **372 passing, 0 failures** (was 357).
 
 - **Bypass-2G/2H — archived-parent conf laundering (HIGH).**
@@ -257,7 +257,7 @@ fixed at the caller layer. Suite: **372 passing, 0 failures** (was 357).
 ## Anticipatory (Phase 2) — retrieval-backed coprocess (2026-06-11)
 
 Turns the `memsom_anticipatory` stub (Jaccard novelty, observe-only prefetch)
-into a real coprocess on top of the spine. `memsom.py` / `test_memsom.py`
+into a real coprocess on top of the spine. `memsom/__init__.py` / `test_memsom.py`
 stayed frozen; default `ask` (no `--anticipate`) is byte-identical. Suite:
 **394 passing, 0 failures** (was 372).
 
@@ -329,7 +329,7 @@ house response SCHEMA (Verdict / Evidence with `[mem:id|channel]` cites /
 Integrity floor / Next move, plus cite-or-refuse).  CLS framing: slow
 weights = schema, fast DAG = episodes.
 
-- **`memsom_reflex.py`** (+10 tests, suite now 404) — `export-reflex` CLI:
+- **`memsom/lifecycle/reflex.py`** (+10 tests, suite now 404) — `export-reflex` CLI:
   reflex-shaped chat pairs from UNTAINTED CONSOLIDATED memory only.
   Eligibility = the full distill gate (alive, unredacted, unquarantined,
   label floor, no live external ancestor — same CTE) AND consolidation
@@ -367,7 +367,7 @@ weights = schema, fast DAG = episodes.
 
 ## Packaging + Ollama VRAM hygiene (2026-06-11)
 
-`memsom.py` / `test_memsom.py` stayed frozen. Suite: **416 passing, 0
+`memsom/__init__.py` / `test_memsom.py` stayed frozen. Suite: **416 passing, 0
 failures** (was 404; +12 in `test_memsom_keepalive.py`).
 
 - **pip-installable, flat layout kept** (`pyproject.toml`, hatchling). The
@@ -375,7 +375,7 @@ failures** (was 404; +12 in `test_memsom_keepalive.py`).
   `only-include` — the hatchling equivalent of setuptools `py-modules`), so
   the frozen `import memsom` contract is untouched. `external_fallback.txt`
   is force-included at wheel root so `memsom seed --offline` works from
-  site-packages (`memsom.FALLBACK` resolves beside `memsom.py`). Tests,
+  site-packages (`memsom.FALLBACK` resolves beside `memsom/__init__.py`). Tests,
   `_build/`, `_weights/`, `*.db`, demo scripts are excluded from sdist and
   wheel by construction. Console entry point: `memsom = memsom_cli:main`.
   Verified in a throwaway venv: editable install, built-wheel install,
@@ -394,7 +394,7 @@ failures** (was 404; +12 in `test_memsom_keepalive.py`).
   `MEMDAG_OLLAMA_KEEP_ALIVE=0` makes the model unload from VRAM immediately
   after every call (Matt's 12GB-card config, so memsom never evicts his
   daily-driver model); any duration string (e.g. `10m`) holds it warm longer.
-  `memsom.py`'s only urlopen is the seed-article fetch (not Ollama) — frozen
+  `memsom/__init__.py`'s only urlopen is the seed-article fetch (not Ollama) — frozen
   file untouched. Graceful Ollama-down fallbacks unchanged (regression-tested).
 - **Note for Matt's machines:** set `MEMDAG_OLLAMA_KEEP_ALIVE=0` as a user env
   var on the PC and Mac to get unload-after-use locally without baking it into
@@ -406,20 +406,20 @@ failures** (was 404; +12 in `test_memsom_keepalive.py`).
 
 ## `verify-stale` wired into the shipped CLI + MCP surface (2026-07-06)
 
-`memsom.py` / `test_memsom.py` stayed frozen. Suite: **885 passing, 0
+`memsom/__init__.py` / `test_memsom.py` stayed frozen. Suite: **885 passing, 0
 failures** (+5 net new — 4 in `test_memsom_verify_stale.py`, +1 net in
 `test_memsom_mcp.py`).
 
 - **No new core logic, no new schema — this is a wiring fix.**
-  `memsom_verify_stale.py` (verification-age staleness over `memory:`-sourced
+  `memsom/integrity/verify_stale.py` (verification-age staleness over `memory:`-sourced
   notes, built and tested long ago — 14 tests) has had a working
   `register(sub)` mounting CLI verb `verify-stale` the whole time, but
-  `memsom_cli.py` never imported or registered the module. It was only
-  reachable standalone or silently inside `memsom_bridge_render.py`'s
+  `memsom/interface/cli.py` never imported or registered the module. It was only
+  reachable standalone or silently inside `memsom/bridge/bridge_render.py`'s
   internal pipeline (wrapped in a bare `try/except`, failures never
-  surfaced). Closed the gap: `memsom_cli.py` now imports and registers it
+  surfaced). Closed the gap: `memsom/interface/cli.py` now imports and registers it
   (one line, same pattern as every other feature module); no migration
-  needed — it operates entirely on columns `memsom_stale.py` already owns.
+  needed — it operates entirely on columns `memsom/integrity/stale.py` already owns.
 - **MCP tool added:** `verify_stale` (underscored per the `check_action` /
   `ingest_text` convention for multi-word tool names), dispatching to
   `verify-stale [--apply]`. Tool count 16 → 17.
@@ -438,10 +438,10 @@ failures** (+5 net new — 4 in `test_memsom_verify_stale.py`, +1 net in
   | tests/test_memsom_mcp.py        | net +1    | tool-count assertion bumped 16→17; new `test_tools_call_verify_stale_apply_marks_and_dry_run_does_not` (real DB-effect check, not just no-crash) |
 
 - **Scope, deliberately not built:** no LLM narration layer
-  (`memsom_llm.py` is a well-isolated, proven opt-in pattern for this if
+  (`memsom/distill/llm.py` is a well-isolated, proven opt-in pattern for this if
   wanted later, but the deterministic sweep alone satisfies the gap — no new
   LLM dependency for v1); no expansion of the scan beyond `memory:`-sourced
   bridge notes to the whole DAG store (a natural phase-2, not needed to
-  close the wiring gap); `memsom_bridge_render.py`'s existing silent
+  close the wiring gap); `memsom/bridge/bridge_render.py`'s existing silent
   try/except around its internal `verify-stale` call is untouched (separate,
   deliberate fail-safe design).

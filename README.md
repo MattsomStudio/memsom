@@ -201,13 +201,13 @@ memsom has two entry points:
 ### Frozen core — the whole idea in six commands (stdlib only, no install)
 
 ```bash
-python memsom.py seed            # stamp 3 sources: user fact, endorsed vault note, external article
-python memsom.py ask "What is SQLite?"
-python memsom.py explain 4       # provenance tree with channels, labels, dates
-python memsom.py revoke 3 --reason "untrusted source retracted"        # dry run: blast radius
-python memsom.py revoke 3 --reason "untrusted source retracted" --yes  # tombstone + cascade
-python memsom.py ask "What is SQLite?"                                  # new answer, label rises
-python memsom.py dump            # all nodes + all edges
+python -m memsom seed            # stamp 3 sources: user fact, endorsed vault note, external article
+python -m memsom ask "What is SQLite?"
+python -m memsom explain 4       # provenance tree with channels, labels, dates
+python -m memsom revoke 3 --reason "untrusted source retracted"        # dry run: blast radius
+python -m memsom revoke 3 --reason "untrusted source retracted" --yes  # tombstone + cascade
+python -m memsom ask "What is SQLite?"                                  # new answer, label rises
+python -m memsom dump            # all nodes + all edges
 ```
 
 Walkthrough script: `demo/demo.ps1`. Design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -285,14 +285,14 @@ machines that should mirror without re-rendering.
 
 | Subcommand       | Module             | What it does |
 |------------------|--------------------|--------------|
-| `seed`           | memsom.py (core)   | Stamp 3 initial source nodes |
-| `ask`            | memsom_cli.py      | Compose answer (+ quarantine/clearance/anticipate/llm/graph layers) |
-| `explain`        | memsom.py (core)   | Provenance tree walk for a node |
-| `revoke`         | memsom.py (core)   | Tombstone + cascade (dry-run by default) |
-| `dump`           | memsom.py (core)   | All nodes + edges |
-| `add`            | memsom_cli.py      | Inject a new source node |
-| `migrate`        | memsom_cli.py      | Run all schema migrations (idempotent) |
-| `init`           | memsom_cli.py      | Create the data dir + DB and run all migrations (idempotent) |
+| `seed`           | memsom/__init__.py (core)   | Stamp 3 initial source nodes |
+| `ask`            | memsom/interface/cli.py      | Compose answer (+ quarantine/clearance/anticipate/llm/graph layers) |
+| `explain`        | memsom/__init__.py (core)   | Provenance tree walk for a node |
+| `revoke`         | memsom/__init__.py (core)   | Tombstone + cascade (dry-run by default) |
+| `dump`           | memsom/__init__.py (core)   | All nodes + edges |
+| `add`            | memsom/interface/cli.py      | Inject a new source node |
+| `migrate`        | memsom/interface/cli.py      | Run all schema migrations (idempotent) |
+| `init`           | memsom/interface/cli.py      | Create the data dir + DB and run all migrations (idempotent) |
 | `recompute`      | memsom_recompute   | Multi-hop integrity label recompute |
 | `redact`         | memsom_redact      | Destroy payload; preserve row/edges/dates |
 | `consolidate`    | memsom_quarantine  | Gate: quarantine externally-tainted derived nodes |

@@ -23,7 +23,7 @@ Integrity flows **down** (one external source poisons everything derived from it
 
 ## Data model (SQLite)
 
-The **frozen core** owns two tables — `memsom.py` + `test_memsom.py` are kept byte-identical across every feature build (the trust anchor; baseline re-anchored at the 2026-07-01 memdag→memsom rename, which only renamed the file + its `import`):
+The **frozen core** owns two tables — `memsom/__init__.py` + `test_memsom.py` are kept byte-identical across every feature build (the trust anchor; baseline re-anchored at the 2026-07-01 memdag→memsom rename, which only renamed the file + its `import`):
 
 ```sql
 nodes(id, content, channel, label, source_ref, created_at,
@@ -47,7 +47,7 @@ RANK = endorsed:3 > user:2 > agent-derived:1 > external:0
 
 Channel is stamped by the transport/adapter, **never inferred from content**. `insert_node` stamps `label = RANK[channel]`. `derive_node` mints `agent-derived` nodes with `label = min(parent labels)` — the laundering-proof property: you cannot wash external content up to `user` by summarizing it. (In an injection benchmark, integrity held: laundering 0.00 / gated-ASR 0.00 across 96 attacks, at ~0 tokens and single-digit milliseconds per write.)
 
-## Frozen core — `memsom.py`
+## Frozen core — `memsom/__init__.py`
 
 - `insert_node(content, channel, label=None, source_ref)` — source nodes; label from channel.
 - `derive_node(content, parent_ids)` — mints `agent-derived`, `label=min(parents)`, writes provenance edges, all under `BEGIN IMMEDIATE` so a concurrent revoke can't race the liveness check.
