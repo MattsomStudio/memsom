@@ -8,7 +8,7 @@ proof: no label can reach the linker because no label is an argument.
 
 It replicates the real memory pipeline's linking step — an LLM reads the notes
 and associatively links the ones that are topically related, exactly as it adds
-[[wikilinks]] between related memories in Matthew's brain. Here it returns index
+[[wikilinks]] between related memories in the author's brain. Here it returns index
 pairs instead of writing [[wikilinks]], but the decision is made the same way
 and from the same information (text only).
 

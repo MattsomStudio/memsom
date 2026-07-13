@@ -41,6 +41,7 @@ from memsom.lifecycle import compact as memsom_compact
 from memsom.distill import distill as memsom_distill
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
+from memsom.storage import schema as memsom_schema
 
 # Minimal on purpose: for the ADAPTER the schema must live in the WEIGHTS.
 # The RAG baseline gets RAG_SYSTEM (full format spec) instead — that asymmetry
@@ -123,15 +124,18 @@ def eligible_consolidated(conn, min_integrity=1):
     floor = memsom_distill._parse_min_integrity(min_integrity)
     cids = consolidated_ids(conn)
 
+    # Taint gate from the ONE shared primitive — the hand-rolled clause here
+    # omitted archived=0 (distill had it, reflex didn't), so a summary chained
+    # off archived/quarantine-contaminated material could export into training
+    # weights. taint_filter_clauses owns every taint dimension in one place.
+    clauses, params = memsom_schema.taint_filter_clauses(conn)
     rows = conn.execute(
         "SELECT id, content, label FROM nodes"
         " WHERE channel='agent-derived'"
-        "   AND tombstoned=0"
-        "   AND redacted=0"
-        "   AND status != 'quarantined'"
+        "   AND " + " AND ".join(clauses) +
         "   AND label >= ?"
         " ORDER BY id",
-        (floor,),
+        (*params, floor),
     ).fetchall()
 
     out = []

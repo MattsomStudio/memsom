@@ -467,6 +467,24 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     stats = {"total_files": len(files), "created": 0, "updated": 0,
              "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0}
 
+    # Mass-wipe guard: importing a directory with ZERO memory files while the
+    # store holds live memory nodes would make the reconcile sweep below (and
+    # import_literals' index reconcile) tombstone EVERY one of them — the classic
+    # mispointed-dir accident (e.g. a fallback path with no *.md files). That is
+    # never a legitimate import: refuse loudly instead of silently blanking the
+    # brain. A genuinely fresh setup (empty dir AND empty store) still imports.
+    if not files:
+        live = conn.execute(
+            "SELECT COUNT(*) FROM nodes "
+            "WHERE source_ref LIKE 'memory:%' AND tombstoned = 0"
+        ).fetchone()[0]
+        if live:
+            raise ValueError(
+                f"refusing bridge import: {memory_dir} contains no memory .md "
+                f"files but the store has {live} live memory node(s) — the "
+                f"reconcile sweep would tombstone all of them. Wrong directory? "
+                f"Set MEMDAG_BRIDGE_MEMORY_DIR to the real memory dir.")
+
     def _do():
         for path in files:
             rel = path.name                      # bridge_path key, e.g. user_adhd.md
@@ -524,6 +542,21 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 "WHERE id = ?",
                 (rel, _mtime_sig(path), new_hash, nid),
             )
+            # Carry the forgetting-layer state (Bjork RS/SS model) from the
+            # superseded predecessor: a reimport is an EDIT of the same memory,
+            # not a new memory. Without this, every /saveall edit reseeded
+            # rs=1.0/ss=0.0/count=0/first_seen=now/tier=hot — wiping the note's
+            # accumulated storage strength and age each time it was touched.
+            if existing and memsom_schema.column_exists(conn, "nodes", "forget_rs"):
+                conn.execute(
+                    "UPDATE nodes SET "
+                    "(forget_rs, forget_ss, forget_count, forget_first_seen, "
+                    " forget_last_used, forget_tier) = "
+                    "(SELECT forget_rs, forget_ss, forget_count, forget_first_seen, "
+                    "        forget_last_used, forget_tier FROM nodes WHERE id = ?) "
+                    "WHERE id = ?",
+                    (existing[0], nid),
+                )
 
         # reconcile deletions: tombstone live file-backed nodes whose source
         # file has vanished. The loop above only ever touches files that EXIST,
@@ -572,7 +605,13 @@ def default_memory_dir():
     candidates = [m.parent for m in
                   (Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")]
     if not candidates:
-        return Path.home() / ".claude" / "projects"
+        # Fail LOUDLY. The old fallback returned ~/.claude/projects itself — a
+        # directory with zero .md files — which sent the importer's reconcile
+        # sweep off to tombstone every live memory node (the mass-wipe path the
+        # import guard also blocks). No plausible dir means no import.
+        raise FileNotFoundError(
+            "no Claude memory dir found (no ~/.claude/projects/*/memory/MEMORY.md); "
+            "set MEMDAG_BRIDGE_MEMORY_DIR explicitly")
     # the real brain is the memory dir with the MOST .md files; project-scoped
     # memory dirs (created by running Claude in another cwd) hold ~1 file and must
     # not be mistaken for it just because they sort first.

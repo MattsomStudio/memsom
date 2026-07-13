@@ -233,7 +233,6 @@ def neighborhood(conn, nid, hops=2, min_integrity=0, clearance=3):
                 m_label = _node_label(conn, m)
                 candidate = min(n_best, m_label)
                 if candidate > best.get(m, -1):
-                    improved = m not in best
                     best[m] = candidate
                     if m not in hop_dist:
                         hop_dist[m] = _hop + 1

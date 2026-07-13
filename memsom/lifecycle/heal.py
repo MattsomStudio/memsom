@@ -242,8 +242,6 @@ def rebuild_derived(conn):
 
         repaired = 0
         for seed_id in sorted(tombstoned_seeds):
-            # Get the reason stored on the seed node so the cascade reason is consistent
-            seed_node = memsom.get_node(conn, seed_id)
             # Re-run revoke_cascade: first-death-wins preserves existing tombstone records,
             # only wrongly-live descendants get tombstoned
             n = memsom.revoke_cascade(conn, seed_id, f"cascade from node {seed_id}")

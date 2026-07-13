@@ -1,6 +1,6 @@
 """runner — thin, deterministic wrapper around the memsom CLI for benchmarking.
 
-The whole harness talks to memsom ONLY through its CLI (memsom_cli.py). That is
+The whole harness talks to memsom ONLY through its CLI (memsom.interface.cli). That is
 deliberate: the benchmark must measure the shipping product's behaviour, not poke
 at internals that could drift. If a metric can't be derived from CLI output, it
 isn't a property the product actually exposes.
@@ -104,7 +104,9 @@ class MemsomRunner:
     def __init__(self, repo: str, python: str = "python", data_dir: str | None = None):
         self.repo = Path(repo)
         self.python = python
-        self.cli = str(self.repo / "memsom_cli.py")
+        # The flat memsom_cli.py died in the package restructure; the full-stack
+        # CLI is the memsom.interface.cli module (console script `memsom`).
+        self.cli = ["-m", "memsom.interface.cli"]
         self.data_dir: Path | None = Path(data_dir) if data_dir else None
 
     # -- lifecycle --------------------------------------------------------
@@ -158,7 +160,7 @@ class MemsomRunner:
         if pin_db:
             env["MEMDAG_DB"] = str(self.db_path)
         proc = subprocess.run(
-            [self.python, self.cli, *args],
+            [self.python, *self.cli, *args],
             cwd=str(self.repo), env=env,
             capture_output=True, text=True,
         )

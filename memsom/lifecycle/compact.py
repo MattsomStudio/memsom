@@ -149,13 +149,19 @@ def _group_by_claim(conn: sqlite3.Connection) -> list:
     if not memsom_schema.table_exists(conn, "claim_assertions"):
         return []
 
+    # Taint gate from the ONE shared primitive: the hand-rolled clause here
+    # omitted redacted=0, so a redacted node's surviving claim_assertions rows
+    # could drag it back in as a provenance parent of a fresh summary.
+    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    where = " AND ".join("n." + c for c in clauses)
     rows = conn.execute(
         "SELECT ca.claim_id, ca.node_id"
         " FROM claim_assertions ca"
         " JOIN nodes n ON n.id = ca.node_id"
-        " WHERE n.tombstoned = 0 AND n.archived = 0"
-        "   AND n.channel != 'agent-derived' AND n.status != 'quarantined'"
-        " ORDER BY ca.claim_id, ca.node_id"
+        " WHERE " + where +
+        "   AND n.channel != 'agent-derived'"
+        " ORDER BY ca.claim_id, ca.node_id",
+        params,
     ).fetchall()
 
     if not rows:
@@ -308,12 +314,23 @@ def compact(
     if group_by not in ("similarity", "claim"):
         raise ValueError(f"unknown group_by: {group_by!r}")
 
-    # Fetch live, non-archived, non-quarantined SOURCE episodes
+    # Fetch untainted SOURCE episodes. The WHERE comes from taint_filter_clauses
+    # (tombstoned/quarantined/redacted/archived — the hand-rolled version here
+    # omitted redacted=0). File-backed nodes are also scoped OUT: bridge-imported
+    # memories (bridge_path) and Obsidian vault notes (obsidian_path) are mirrors
+    # of on-disk files owned by their importers — compact archiving one would
+    # silently drop a pointer-stub memory from the digest while its source file
+    # lives on. Column-guarded: either importer may never have run on this store.
+    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    clauses.append("channel != 'agent-derived'")
+    if memsom_schema.column_exists(conn, "nodes", "bridge_path"):
+        clauses.append("bridge_path IS NULL")
+    if memsom_schema.column_exists(conn, "nodes", "obsidian_path"):
+        clauses.append("obsidian_path IS NULL")
     candidate_rows = conn.execute(
         "SELECT id, content, channel, label FROM nodes"
-        " WHERE tombstoned = 0 AND archived = 0"
-        "   AND channel != 'agent-derived' AND status != 'quarantined'"
-        " ORDER BY id"
+        " WHERE " + " AND ".join(clauses) + " ORDER BY id",
+        params,
     ).fetchall()
 
     if not candidate_rows:

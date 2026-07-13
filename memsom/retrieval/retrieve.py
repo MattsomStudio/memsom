@@ -33,7 +33,6 @@ import math
 import os
 import struct
 import sys
-import urllib.error
 import urllib.request
 import json
 import sqlite3
@@ -106,7 +105,7 @@ def tokenize(text: str) -> list:
     tokens = []
     for w in _alnum_words(text.lower()):
         if w not in memsom.STOP:
-            tokens.append(w[:6])  # same stem length as memsom.stems()
+            tokens.append(w[:memsom.STEM_WIDTH])  # same stem width as memsom.stems()
     return tokens
 
 
@@ -593,10 +592,16 @@ def retrieve(
     if not pool:
         return []
 
-    # BM25 + dense + (bge) sparse over full index, then intersect with pool.
-    bm25_all = bm25(conn, query, k=len(pool) + k)
-    vec_all = vector_search(conn, query, k=len(pool) + k)
-    sparse_all = sparse_search(conn, query, k=len(pool) + k)  # [] off the bge path
+    # BM25 + dense + (bge) sparse over the FULL index, then intersect with pool.
+    # Scan the whole index (docstats row count), not len(pool)+k: quarantined /
+    # above-clearance nodes stay indexed and can outrank pool members in raw
+    # BM25/vector — with a small pool the truncated scan could lose every pool
+    # member before the intersection. Same fix as retrieve_graph below.
+    n_idx = conn.execute("SELECT COUNT(*) FROM docstats").fetchone()[0]
+    scan_k = max(n_idx, k)
+    bm25_all = bm25(conn, query, k=scan_k)
+    vec_all = vector_search(conn, query, k=scan_k)
+    sparse_all = sparse_search(conn, query, k=scan_k)  # [] off the bge path
 
     # Filter each ranked list to pool members only (the trust intersection).
     bm25_filtered = [(nid, s) for nid, s in bm25_all if nid in pool]

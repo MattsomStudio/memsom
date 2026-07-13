@@ -51,6 +51,24 @@ SECTIONS = [
     "Feedback",
 ]
 BUDGET = 16384
+# Content floor (fail-safe): a render that keeps fewer than this fraction of the
+# PRIOR MEMORY.md's index entries is rejected — a collapse that large means the
+# store is wrong (empty/mispointed), not that the brain legitimately halved
+# between two Stop hooks. Override with $MEMDAG_DIGEST_SHRINK_FLOOR (0..1);
+# out-of-range values fall back to this default.
+SHRINK_FLOOR = 0.5
+
+
+def _shrink_floor() -> float:
+    raw = os.environ.get("MEMDAG_DIGEST_SHRINK_FLOOR")
+    if raw:
+        try:
+            v = float(raw)
+            if 0.0 < v <= 1.0:
+                return v
+        except ValueError:
+            pass
+    return SHRINK_FLOOR
 
 
 def _section_order():
@@ -75,19 +93,22 @@ def _rows(conn):
     has_tier = memsom_schema.column_exists(conn, "nodes", "forget_tier")
     has_rs = memsom_schema.column_exists(conn, "nodes", "forget_rs")
     has_stale = memsom_schema.column_exists(conn, "nodes", "stale")
-    has_redacted = memsom_schema.column_exists(conn, "nodes", "redacted")
     tcol = "forget_tier" if has_tier else "NULL AS forget_tier"
     rcol = "forget_rs" if has_rs else "NULL AS forget_rs"
     scol = "stale" if has_stale else "0 AS stale"
     zcol = "stale_reason" if has_stale else "NULL AS stale_reason"
-    # A redacted node keeps tombstoned=0 (redaction leaves liveness alone) but its
-    # content is '' — so without this guard _entry falls back to the *stem* and the
-    # sensitive filename renders into the always-loaded MEMORY.md until the next
-    # bridge-render tombstones it. Exclude redacted nodes from the digest source.
-    redact_clause = " AND redacted = 0" if has_redacted else ""
+    # Taint gate from the ONE shared primitive (tombstoned/quarantined/redacted/
+    # archived — each only when its column exists). The digest renders into the
+    # ALWAYS-LOADED MEMORY.md, so it must exclude every taint dimension: a
+    # redacted node's content is '' (its stem would leak as the fallback title),
+    # and quarantined/archived nodes are out of every other read pool — they must
+    # not resurface in the brain either.
+    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    where = " AND ".join(clauses + ["source_ref LIKE 'memory:%'"])
     return conn.execute(
         f"SELECT content, channel, source_ref, {tcol}, {rcol}, {scol}, {zcol} "
-        f"FROM nodes WHERE tombstoned = 0 AND source_ref LIKE 'memory:%'{redact_clause}"
+        f"FROM nodes WHERE {where}",
+        params,
     ).fetchall()
 
 
@@ -201,13 +222,37 @@ def render_digest(conn, *, title=None, budget=BUDGET):
         dropped.add(id(nxt))
 
 
-def validate(conn, *, budget=BUDGET, title=None):
+def _entry_counts(text):
+    """(file_entry_count, literal_entry_count) parsed from an index/digest text.
+
+    Files are deduped (a filename linked twice is one memory); literals are
+    counted per line.  Used by the content floor below — the H1 alone parses to
+    (0, 0), which is exactly the empty-render signature the floor exists to catch.
+    """
+    files, literals = set(), 0
+    for _sec, kind, payload in parse_index_entries(text or ""):
+        if kind == "file":
+            files.add(payload)
+        else:
+            literals += 1
+    return len(files), literals
+
+
+def validate(conn, *, budget=BUDGET, title=None, prior_text=None):
     """Export-boundary check: the digest must render, be non-empty, and fit budget.
 
     This is the Phase-6 cutover PRE-FLIGHT: the hook renders + validates, and only
     overwrites the real MEMORY.md when this returns [] — otherwise it leaves the
     existing good file in place (fail-safe, never fail-open).  Returns a list of
-    problem dicts ([] = safe to write)."""
+    problem dicts ([] = safe to write).
+
+    Content floor: a render of an EMPTY (or mispointed) store produces just the H1
+    — non-empty TEXT, so the byte checks alone would pass and write_live would
+    overwrite the real brain with a one-line stub.  So a render with ZERO
+    file/literal entries is always rejected, and when *prior_text* (the current
+    on-disk MEMORY.md) is supplied, a render that keeps less than the shrink
+    floor's fraction of the prior entries is rejected too — a stale-but-intact
+    brain beats a freshly-blanked one every time."""
     try:
         text = render_digest(conn, title=title, budget=budget)
     except DigestTooLarge as exc:
@@ -221,6 +266,22 @@ def validate(conn, *, budget=BUDGET, title=None):
     if size > budget:
         problems.append({"kind": "export-boundary",
                          "detail": f"digest {size} > {budget} byte budget"})
+    new_files, new_lits = _entry_counts(text)
+    new_total = new_files + new_lits
+    if new_total == 0:
+        problems.append({"kind": "export-boundary",
+                         "detail": "rendered digest has zero file/literal entries "
+                                   "(empty or mispointed store?)"})
+    if prior_text is not None:
+        prior_files, prior_lits = _entry_counts(prior_text)
+        prior_total = prior_files + prior_lits
+        floor = _shrink_floor()
+        if prior_total > 0 and new_total < prior_total * floor:
+            problems.append({
+                "kind": "export-boundary",
+                "detail": f"rendered digest keeps only {new_total}/{prior_total} "
+                          f"entries of the existing MEMORY.md (< {floor:.0%} floor) "
+                          f"— refusing to shrink the brain"})
     return problems
 
 
@@ -246,11 +307,17 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=BUDGET)
     replace) and returns (True, {"bytes", "path"}).  This is what the Phase-6 Stop
     hook calls; until that hook is wired, nothing invokes it.
     """
-    problems = validate(conn, budget=budget, title=title)
+    path = Path(memory_dir) / name
+    prior_text = None
+    if path.exists():
+        try:
+            prior_text = path.read_text(encoding="utf-8")
+        except OSError:
+            prior_text = None  # unreadable prior: still enforce the zero-entry floor
+    problems = validate(conn, budget=budget, title=title, prior_text=prior_text)
     if problems:
         return False, problems
     text = render_digest(conn, title=title, budget=budget)
-    path = Path(memory_dir) / name
     tmp = path.with_suffix(path.suffix + ".tmp")
     # write_bytes (not write_text): keep LF on Windows so on-disk size == the
     # validated budget and the file's line endings match the original MEMORY.md.

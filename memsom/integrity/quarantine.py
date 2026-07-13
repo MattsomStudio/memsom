@@ -91,11 +91,28 @@ def consolidate(conn: sqlite3.Connection) -> list:
         " ORDER BY id"
     ).fetchall()
 
+    # Corroboration lifts are exempt from this scan: a lift has live EXTERNAL
+    # ancestors BY CONSTRUCTION (they are what it corroborates) and its label is
+    # deliberately capped at agent-derived via an elevation row — the designed
+    # fixed point recompute_all honors. Quarantining it here nullified
+    # corroboration entirely, because promote() requires ZERO live external
+    # ancestors and so could never release it. Guarded on table existence: a
+    # store where corroborate/recompute has never run has nothing to exempt.
+    exempt = set()
+    if memsom_schema.table_exists(conn, "corroborations"):
+        exempt.update(r[0] for r in conn.execute(
+            "SELECT node_id FROM corroborations"))
+    if memsom_schema.table_exists(conn, "elevations"):
+        exempt.update(r[0] for r in conn.execute(
+            "SELECT node FROM elevations"))
+
     quarantined = []
     now = memsom.now_iso()
 
     with conn:
         for nid, label in candidates:
+            if nid in exempt:
+                continue
             cause = None
             if label == 0:
                 cause = "integrity=EXTERNAL"

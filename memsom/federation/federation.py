@@ -498,8 +498,16 @@ def import_changeset(conn, changeset):
                     # for source channels; derived labels will be recomputed below.
                     channel = inc_channel if inc_channel in memsom.RANK else "external"
                     if channel == "agent-derived":
-                        # Label from node dict; recompute_all re-floors it in step (e).
-                        label = node.get("label", 0)
+                        # Label from node dict, CLAMPED to the 0..3 lattice exactly
+                        # like conf_label above: a trusted origin's out-of-range
+                        # value (e.g. 7, or a string) would otherwise hit the
+                        # CHECK(label BETWEEN 0 AND 3) constraint and roll back the
+                        # ENTIRE changeset — a one-node DoS on the whole import.
+                        # recompute_all re-floors it in step (e) regardless.
+                        try:
+                            label = min(3, max(0, int(node.get("label", 0))))
+                        except (ValueError, TypeError):
+                            label = 0
                     else:
                         # Source channel: derive label from channel, never from node.label
                         label = memsom.RANK[channel]

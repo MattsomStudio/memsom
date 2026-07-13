@@ -49,6 +49,16 @@ SERVER_NAME = "memsom-broker"
 SERVER_VERSION = "0.1.0"
 PROTOCOL_VERSION = "2024-11-05"
 
+# memsom's own tools that are safe to dispatch on ANY session floor: pure reads
+# (plus check/check_action/profile, which only render decisions or audit rows).
+# Everything else on the memsom.* surface is consequential — revoke/redact can
+# destroy payloads, ingest_text stores at a caller-chosen channel, obsidian_*
+# writes files — and must clear the capability gate first (see _handle).
+READONLY_MEMSOM_TOOLS = frozenset({
+    "ask", "explain", "blame", "profile", "retrieve", "check",
+    "neighborhood", "check_action",
+})
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -339,11 +349,31 @@ def _handle(conn, cfg, policy, upstreams, sid, msg):
         fq = params.get("name", "")
         arguments = params.get("arguments") or {}
 
-        # memsom's own tools: dispatch in-process, ungated (read/store only).
+        # memsom's own tools: dispatch in-process.  This surface is NOT
+        # "read/store only" — it exposes revoke/redact --apply --cascade,
+        # ingest_text with a caller-chosen channel (attacker text laundered to
+        # 'endorsed'), obsidian_export, verify_stale --apply.  Pure reads stay
+        # ungated; every consequential memsom.* tool must clear the same
+        # capability gate as an upstream tool, at the 'user' floor — so a
+        # session tainted by untrusted content cannot destroy payloads or
+        # launder writes through the broker's own tools.
         if fq.startswith("memsom."):
+            inner_name = fq[len("memsom."):]
+            if inner_name not in READONLY_MEMSOM_TOOLS:
+                floor = memsom_session.current_floor(conn, sid)
+                verdict = memsom_capgate.check_capability(
+                    conn, sid, floor, fq, memsom.RANK["user"])
+                if verdict["decision"] == "deny":
+                    return {"jsonrpc": "2.0", "id": msg_id,
+                            "result": _text_result(
+                                f"memsom-broker DENIED {fq}: session "
+                                f"@{verdict['floor_name']} < required "
+                                f"{verdict['required_name']}. An untrusted source "
+                                f"tainted this session; restart for a clean floor.",
+                                is_error=True)}
             inner = memsom_mcp.handle({
                 "jsonrpc": "2.0", "id": msg_id, "method": "tools/call",
-                "params": {"name": fq[len("memsom."):], "arguments": arguments}})
+                "params": {"name": inner_name, "arguments": arguments}})
             return inner
 
         up_name, _, tool = fq.partition(".")

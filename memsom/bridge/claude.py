@@ -85,21 +85,53 @@ def render_template() -> str:
     return f"{PREAMBLE.rstrip()}\n\n{render_block()}\n"
 
 
+def _find_blocks(text: str, start: str, end: str):
+    """Well-ordered, non-overlapping (i, j) spans of start..end blocks in *text*.
+
+    Returns None when the markers are malformed: an orphan START or END, an END
+    before its START (reversed), or a nested/duplicate START inside a block.
+    The old presence-only check let a lost END append a duplicate block and let
+    reversed markers swallow the user content between them."""
+    spans = []
+    pos = 0
+    while True:
+        i = text.find(start, pos)
+        j = text.find(end, pos)
+        if i == -1 and j == -1:
+            break
+        if i == -1 or j == -1 or j < i:
+            return None                      # orphan or reversed marker
+        if text.find(start, i + len(start), j) != -1:
+            return None                      # a second START before this END
+        spans.append((i, j + len(end)))
+        pos = j + len(end)
+    return spans
+
+
 def upsert(text: str, block: str):
     """Insert/refresh *block* in *text*. Returns (new_text, action).
 
     action: 'replace' (block existed, body changed), 'noop' (already current),
-    or 'append' (no block present yet)."""
+    'append' (no block present yet), or 'malformed' (markers are orphaned /
+    reversed — text returned UNCHANGED; the caller must back up and refuse)."""
     # Prefer the current markers; fall back to the legacy memdag markers so a
     # pre-rename tester's block is migrated in place, not duplicated.
-    start, end = (START, END) if (START in text and END in text) else (
-        (LEGACY_START, LEGACY_END) if (LEGACY_START in text and LEGACY_END in text)
-        else (None, None))
-    if start is not None:
-        pre = text[:text.index(start)]
-        post = text[text.index(end) + len(end):]
-        new = pre + block + post
-        return new, ("noop" if new == text else "replace")
+    for start, end in ((START, END), (LEGACY_START, LEGACY_END)):
+        if start not in text and end not in text:
+            continue
+        spans = _find_blocks(text, start, end)
+        if not spans:                        # None (malformed) — never write over it
+            return text, "malformed"
+        # Replace the FIRST block; strip any later duplicates (the historical
+        # lost-marker append bug) while keeping the user text between them.
+        first_i, first_j = spans[0]
+        out = text[:first_i] + block
+        prev = first_j
+        for i, j in spans[1:]:
+            out += text[prev:i]
+            prev = j
+        out += text[prev:]
+        return out, ("noop" if out == text else "replace")
     # no block yet: append, separated by exactly one blank line
     base = text.rstrip("\n")
     sep = "\n\n" if base else ""
@@ -134,6 +166,14 @@ def sync(path=None, *, dry_run: bool = False) -> dict:
     else:
         existing = path.read_text(encoding="utf-8")
         new_text, action = upsert(existing, block)
+        if action == "malformed":
+            # Orphan/reversed markers: refuse to touch the file (a rewrite could
+            # eat user content), but preserve the evidence for repair.
+            bak = path.with_suffix(path.suffix + ".malformed.bak")
+            if not dry_run:
+                bak.write_text(existing, encoding="utf-8")
+            return {"path": str(path), "action": "malformed", "changed": False,
+                    "backup": str(bak)}
 
     changed = action not in ("noop",)
     if changed and not dry_run:
@@ -155,6 +195,11 @@ def _cmd_claude_sync(args):
         res = sync(path=args.path, dry_run=args.dry_run)
     except Exception as exc:  # noqa: BLE001 — never break a hook chain
         print(f"[claude-sync] skipped (CLAUDE.md unchanged): {exc!r}")
+        return
+    if res["action"] == "malformed":
+        print(f"[claude-sync] REFUSED {res['path']}: managed-block markers are "
+              f"orphaned or reversed — fix them by hand (copy saved to "
+              f"{res['backup']}); file left untouched")
         return
     verb = {"seed": "seeded", "append": "appended block to",
             "replace": "refreshed block in", "noop": "already current:"}[res["action"]]

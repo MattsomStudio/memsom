@@ -122,7 +122,7 @@ downside (spurious clusters to amplify). `fixed = 0` again.
 ### 5. The missing ingredient is curation
 
 This is the deep reason and the one that reconciles the negative result with the
-graph's real value. In Matthew's personal memory the edges are curated
+graph's real value. In the author's personal memory the edges are curated
 `[[wikilinks]]` between durable, meaningful notes; a link means "these relate in a
 way that matters." In LongMemEval the edges are an LLM's one-shot guesses over
 transient conversation turns, with no curation, no reuse, no human check. The same
@@ -134,7 +134,7 @@ fail; the edges were noise, and it amplified noise.
 
 It does not mean the associative graph is worthless. It means graph re-ranking
 over a near-ceiling retriever, on uncurated conversational edges, is a net
-negative. Matthew's actual brain is the opposite regime: a dense, deliberately
+negative. The author's actual brain is the opposite regime: a dense, deliberately
 cross-linked web of durable notes where traversal was already shown to surface
 connections that keyword and vector recall miss. Different data, different edge
 quality, different result. This benchmark is simply the wrong showcase for the

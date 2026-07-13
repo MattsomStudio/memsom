@@ -18,7 +18,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import memsom
-from memsom.interface import mcp as memsom_mcp
 
 
 def _version():
@@ -63,8 +62,11 @@ def _ollama_status():
 
 def _selfcheck():
     try:
+        # encoding pinned: text=True alone decodes with the locale codec (cp1252
+        # on Windows), which crashes on the child's UTF-8 output (e.g. a ✓/⚠).
         r = subprocess.run([sys.executable, "-m", "memsom.interface.mcp", "--selfcheck"],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30,
+                           encoding="utf-8", errors="replace")
         return {"returncode": r.returncode, "output": (r.stdout + r.stderr).strip()}
     except Exception as exc:
         return {"returncode": None, "output": f"selfcheck failed to run: {exc}"}

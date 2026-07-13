@@ -13,12 +13,11 @@ memory unless ``--force`` — those are identity / operating-rule memories.
   memsom tombstone <stem> --reason "..."   # revoke the node + delete the file
   memsom tombstone-list                     # show tombstoned memory nodes
 
-Read the store via $MEMDAG_DB (defaults to ~/.memdag/memdag.db).
+Store path resolved by memsom.db_path() (MEMDAG_DB > MEMDAG_HOME > ~/.memdag).
 """
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -130,12 +129,11 @@ def list_tombstoned(conn):
 
 # --- CLI ---------------------------------------------------------------------
 
-def _default_db():
-    return str(Path.home() / ".memdag" / "memdag.db")
-
-
 def _cmd_tombstone(args):
-    os.environ.setdefault("MEMDAG_DB", _default_db())
+    # DB path resolution belongs to memsom.db_path() (MEMDAG_DB > MEMDAG_HOME >
+    # ~/.memdag), which get_connection() already uses. The old setdefault here
+    # pinned MEMDAG_DB=~/.memdag/memdag.db whenever it was unset, silently
+    # overriding a MEMDAG_HOME-relocated store.
     mem = Path(args.memory_dir) if args.memory_dir else default_memory_dir()
     conn = memsom.get_connection()
     try:
@@ -162,7 +160,6 @@ def _cmd_tombstone(args):
 
 
 def _cmd_tombstone_list(args):
-    os.environ.setdefault("MEMDAG_DB", _default_db())
     conn = memsom.get_connection()
     try:
         rows = list_tombstoned(conn)

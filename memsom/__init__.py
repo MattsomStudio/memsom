@@ -177,8 +177,14 @@ def revoke_cascade(conn, seed, reason):
 
 # ---- deterministic answer composition ----
 
+# Shared crude-stem width: prefix length used by stems() here and
+# memsom.retrieval.retrieve.tokenize() — keep them in lock-step or BM25 terms
+# and compose()-side stems stop matching each other.
+STEM_WIDTH = 6
+
+
 def stems(text):
-    return {w[:6] for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOP}
+    return {w[:STEM_WIDTH] for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOP}
 
 
 def prose_lines(content):

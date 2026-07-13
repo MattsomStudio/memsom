@@ -20,8 +20,9 @@ the others receive the rendered ``MEMORY.md`` via your sync layer — set
 import + run the forgetting pass to keep their mirror warm).
 
 Env knobs:
-  MEMDAG_DB                 store path (defaults to ~/.memdag/memdag.db — the
-                            bootstrap data dir — so a Stop hook needs no env wiring).
+  MEMDAG_DB / MEMDAG_HOME   store path, resolved by memsom.db_path()
+                            (MEMDAG_DB > MEMDAG_HOME/memdag.db > ~/.memdag/memdag.db
+                            — so a Stop hook needs no env wiring).
   MEMDAG_DIGEST_TITLE       H1 of the rendered MEMORY.md (digest default: "# Memory").
   MEMDAG_VERIFY_STALE_DAYS  verification-age threshold; <= 0 disables the pass.
   MEMDAG_BRIDGE_AUTHOR      "0" => mirror-only (no render) for non-author machines.
@@ -89,15 +90,12 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
             "stale_marked": stale_marked, "claude": claude}
 
 
-def _default_db() -> str:
-    # Friend-beta convention: bootstrap creates the DB in ~/.memdag. Default to it so
-    # a bare `memsom bridge-render` Stop hook resolves the right store with no env
-    # wiring; an explicit MEMDAG_DB always wins (set via setdefault below).
-    return str(Path.home() / ".memdag" / "memdag.db")
-
-
 def _cmd_bridge_render(args):
-    os.environ.setdefault("MEMDAG_DB", _default_db())
+    # DB path resolution belongs to memsom.db_path() (MEMDAG_DB > MEMDAG_HOME >
+    # ~/.memdag), which get_connection() already uses — so a bare Stop hook still
+    # resolves ~/.memdag/memdag.db with no env wiring. The old setdefault here
+    # pinned MEMDAG_DB=~/.memdag/memdag.db whenever it was unset, silently
+    # overriding a MEMDAG_HOME-relocated store.
     mem = Path(args.memory_dir) if args.memory_dir else bi.default_memory_dir()
     conn = memsom.get_connection()
     try:
