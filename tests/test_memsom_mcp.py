@@ -300,5 +300,235 @@ class TestRedactArgv(unittest.TestCase):
         self.assertNotIn("--single", argv)
 
 
+# ---------------------------------------------------------------------------
+# _tool_argv — exact argv pin for every tool
+# ---------------------------------------------------------------------------
+#
+# The argv translation is the one place a wrong flag silently changes what a
+# tool does to the store (the 07-10 refactor class of bug). Pin the exact
+# argv for all 17 tools, minimal and full-argument forms, so any drift
+# between the MCP schema and the CLI mapping fails loudly.
+
+class TestToolArgvMappings(unittest.TestCase):
+
+    CASES = [
+        # (tool, arguments, expected argv)
+        ("ask", {"question": "q"}, ["ask", "q"]),
+        ("ask",
+         {"question": "q", "clearance": "secret", "anticipate": True,
+          "llm": True, "graph": True, "hops": 2},
+         ["ask", "q", "--clearance", "secret", "--anticipate", "--llm",
+          "--graph", "--hops", "2"]),
+        ("explain", {"id": 5}, ["explain", "5"]),
+        ("blame", {"id": 5}, ["blame", "5"]),
+        ("blame", {"id": 5, "clearance": "secret"},
+         ["blame", "5", "--clearance", "secret"]),
+        ("revoke", {"id": 5}, ["revoke", "5"]),
+        ("revoke", {"id": 5, "reason": "r", "apply": True},
+         ["revoke", "5", "--reason", "r", "--yes"]),
+        ("redact", {"id": 5, "reason": "r"},
+         ["redact", "5", "--reason", "r", "--single"]),
+        ("redact", {"id": 5, "reason": "r", "cascade": True, "apply": True},
+         ["redact", "5", "--reason", "r", "--yes"]),
+        ("recompute", {}, ["recompute", "--all"]),
+        ("recompute", {"all": True}, ["recompute", "--all"]),
+        ("recompute", {"id": 5}, ["recompute", "5"]),
+        ("consolidate", {}, ["consolidate"]),
+        ("check", {}, ["check"]),
+        ("export", {"path": "/tmp/out.jsonl"}, ["export", "/tmp/out.jsonl"]),
+        ("export", {"path": "/tmp/out.jsonl", "since": "2026-01-01T00:00:00Z"},
+         ["export", "/tmp/out.jsonl", "--since", "2026-01-01T00:00:00Z"]),
+        ("neighborhood", {"id": 5}, ["neighborhood", "5"]),
+        ("neighborhood",
+         {"id": 5, "hops": 3, "min_integrity": "user", "clearance": "secret"},
+         ["neighborhood", "5", "--hops", "3", "--min-integrity", "user",
+          "--clearance", "secret"]),
+        ("profile", {"id": 5}, ["profile", "5"]),
+        ("check_action", {"id": 5, "required": "user"},
+         ["check-action", "5", "--require", "user"]),
+        ("retrieve", {"query": "q"}, ["retrieve", "q"]),
+        ("retrieve", {"query": "q", "k": 3, "clearance": "secret"},
+         ["retrieve", "q", "--k", "3", "--clearance", "secret"]),
+        ("ingest_text", {"text": "t", "channel": "user"},
+         ["ingest-text", "t", "--channel", "user"]),
+        ("ingest_text", {"text": "t", "channel": "user", "source_ref": "x"},
+         ["ingest-text", "t", "--channel", "user", "--ref", "x"]),
+        ("obsidian_sync", {}, ["obsidian-sync"]),
+        ("obsidian_sync", {"vault": "/v", "channel": "user", "no_prune": True},
+         ["obsidian-sync", "/v", "--channel", "user", "--no-prune"]),
+        ("obsidian_export", {}, ["obsidian-export"]),
+        ("obsidian_export",
+         {"node": 5, "query": "q", "vault": "/v", "folder": "f", "title": "t"},
+         ["obsidian-export", "5", "--query", "q", "--vault", "/v",
+          "--folder", "f", "--title", "t"]),
+        ("verify_stale", {}, ["verify-stale"]),
+        ("verify_stale", {"apply": True}, ["verify-stale", "--apply"]),
+    ]
+
+    def test_every_tool_has_at_least_one_case(self):
+        covered = {name for name, _, _ in self.CASES}
+        self.assertEqual(covered, memsom_mcp.TOOL_NAMES)
+
+    def test_argv_mappings(self):
+        for name, arguments, expected in self.CASES:
+            with self.subTest(tool=name, arguments=arguments):
+                self.assertEqual(memsom_mcp._tool_argv(name, arguments), expected)
+
+    def test_unknown_tool_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            memsom_mcp._tool_argv("does_not_exist", {})
+
+    def test_missing_required_argument_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            memsom_mcp._tool_argv("redact", {"id": 1})  # no reason
+
+
+# ---------------------------------------------------------------------------
+# End-to-end dispatch — every tool not already exercised via tools/call
+# ---------------------------------------------------------------------------
+#
+# The argv pins above guard the mapping; these guard the seam between the
+# mapping and the real CLI parsers (a pinned-but-wrong flag fails here as
+# argparse SystemExit(2) -> isError). Mutating tools additionally verify the
+# DB effect, dry-run and applied.
+
+class TestDispatchEndToEnd(Base):
+
+    def setUp(self):
+        super().setUp()
+        from memsom.interface import cli as memsom_cli
+        self.cli = memsom_cli
+        self.cli.main(["migrate"])
+
+    def _call(self, name, arguments=None, msg_id=100):
+        resp = memsom_mcp.handle({
+            "jsonrpc": "2.0", "id": msg_id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}},
+        })
+        return resp["result"]["isError"], resp["result"]["content"][0]["text"]
+
+    def _seed(self, content="Nebula lighthouse needs a public IP.", channel="endorsed"):
+        with self.conn:
+            return memsom.insert_node(self.conn, content, channel)
+
+    def test_explain(self):
+        nid = self._seed()
+        is_error, text = self._call("explain", {"id": nid})
+        self.assertFalse(is_error, text)
+        self.assertIn(str(nid), text)
+
+    def test_blame_with_clearance(self):
+        nid = self._seed()
+        is_error, text = self._call("blame", {"id": nid, "clearance": "secret"})
+        self.assertFalse(is_error, text)
+        self.assertIn(str(nid), text)
+
+    def test_profile(self):
+        nid = self._seed()
+        is_error, text = self._call("profile", {"id": nid})
+        self.assertFalse(is_error, text)
+
+    def test_neighborhood(self):
+        nid = self._seed()
+        is_error, text = self._call("neighborhood", {"id": nid, "hops": 2})
+        self.assertFalse(is_error, text)
+
+    def test_check(self):
+        is_error, text = self._call("check")
+        self.assertFalse(is_error, text)
+
+    def test_check_action_allow_and_deny(self):
+        endorsed = self._seed(channel="endorsed")
+        is_error, text = self._call("check_action", {"id": endorsed, "required": "external"})
+        self.assertFalse(is_error, text)
+        self.assertIn("ALLOW", text)
+
+        external = self._seed("untrusted web content", channel="external")
+        is_error, text = self._call("check_action", {"id": external, "required": "endorsed"})
+        self.assertTrue(is_error, "deny must surface as isError (exit 2)")
+        self.assertIn("DENY", text)
+
+    def test_consolidate(self):
+        is_error, text = self._call("consolidate")
+        self.assertFalse(is_error, text)
+
+    def test_recompute_default_all(self):
+        self._seed()
+        is_error, text = self._call("recompute")
+        self.assertFalse(is_error, text)
+
+    def test_export_writes_changeset_file(self):
+        self._seed()
+        out = Path(self.tmp.name) / "changeset.jsonl"
+        is_error, text = self._call("export", {"path": str(out)})
+        self.assertFalse(is_error, text)
+        self.assertTrue(out.exists(), "export should write the changeset file")
+        self.assertTrue(out.read_text(encoding="utf-8").strip(),
+                        "changeset should not be empty")
+
+    def test_revoke_dry_run_then_apply(self):
+        nid = self._seed()
+        is_error, text = self._call("revoke", {"id": nid, "reason": "test"})
+        self.assertFalse(is_error, text)
+        row = self.conn.execute(
+            "SELECT tombstoned FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], 0, "dry-run revoke must not tombstone")
+
+        is_error, text = self._call("revoke", {"id": nid, "reason": "test", "apply": True})
+        self.assertFalse(is_error, text)
+        row = self.conn.execute(
+            "SELECT tombstoned FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], 1, "apply=true revoke must tombstone")
+
+    def test_redact_dry_run_then_apply_single(self):
+        original = "secret payload to destroy"
+        nid = self._seed(original)
+        child, _ = memsom.derive_node(self.conn, "derived from the secret", [nid])
+
+        is_error, text = self._call("redact", {"id": nid, "reason": "test"})
+        self.assertFalse(is_error, text)
+        row = self.conn.execute(
+            "SELECT content FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], original, "dry-run redact must not touch the payload")
+
+        # cascade omitted -> --single: only the named node, never the child
+        is_error, text = self._call("redact", {"id": nid, "reason": "test", "apply": True})
+        self.assertFalse(is_error, text)
+        row = self.conn.execute(
+            "SELECT content, redacted FROM nodes WHERE id = ?", (nid,)).fetchone()
+        self.assertEqual(row[0], "", "applied redact must destroy the payload")
+        self.assertEqual(row[1], 1)
+        row = self.conn.execute(
+            "SELECT redacted FROM nodes WHERE id = ?", (child,)).fetchone()
+        self.assertEqual(row[0], 0, "cascade omitted must leave descendants intact")
+
+    def test_obsidian_sync_ingests_vault_note(self):
+        vault = Path(self.tmp.name) / "vault"
+        vault.mkdir()
+        (vault / "lighthouse.md").write_text(
+            "Nebula lighthouse hosts run on UDP 4242.", encoding="utf-8")
+        is_error, text = self._call(
+            "obsidian_sync", {"vault": str(vault), "channel": "user"})
+        self.assertFalse(is_error, text)
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE content LIKE '%UDP 4242%'").fetchone()
+        self.assertGreaterEqual(row[0], 1, "sync should ingest the vault note")
+
+    def test_obsidian_export_writes_note(self):
+        vault = Path(self.tmp.name) / "vault"
+        (vault / "memsom").mkdir(parents=True)
+        nid = self._seed()
+        is_error, text = self._call(
+            "obsidian_export", {"node": nid, "vault": str(vault), "title": "mcp-export-test"})
+        self.assertFalse(is_error, text)
+        notes = list((vault / "memsom").glob("*.md"))
+        self.assertEqual(len(notes), 1, f"export should write one note; got {notes}")
+
+    def test_missing_required_argument_is_client_error_not_crash(self):
+        is_error, text = self._call("redact", {"id": 1})  # no reason
+        self.assertTrue(is_error)
+        self.assertIn("missing required argument", text)
+
+
 if __name__ == "__main__":
     unittest.main()
