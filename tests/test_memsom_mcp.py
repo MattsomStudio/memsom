@@ -275,5 +275,30 @@ class TestSubprocess(Base):
         self.assertEqual(r2["id"], 2)
 
 
+# ---------------------------------------------------------------------------
+# redact argv mapping — cascade is OPT-IN per the tool schema
+# ---------------------------------------------------------------------------
+#
+# The CLI cascades by default (--single opts out), but the MCP schema documents
+# cascade as "Also redact all transitive descendants" i.e. opt-in. Regression:
+# _tool_argv never emitted --single, so cascade:false (or omitted) still
+# destroyed every descendant's payload — irreversible over-redaction.
+
+class TestRedactArgv(unittest.TestCase):
+    def test_cascade_false_maps_to_single(self):
+        argv = memsom_mcp._tool_argv(
+            "redact", {"id": 1, "reason": "r", "cascade": False, "apply": True})
+        self.assertIn("--single", argv)
+
+    def test_cascade_omitted_maps_to_single(self):
+        argv = memsom_mcp._tool_argv("redact", {"id": 1, "reason": "r"})
+        self.assertIn("--single", argv)
+
+    def test_cascade_true_cascades(self):
+        argv = memsom_mcp._tool_argv(
+            "redact", {"id": 1, "reason": "r", "cascade": True})
+        self.assertNotIn("--single", argv)
+
+
 if __name__ == "__main__":
     unittest.main()

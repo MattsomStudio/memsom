@@ -290,8 +290,12 @@ def _tool_argv(name, arguments):
 
     if name == "redact":
         argv = ["redact", str(arguments["id"]), "--reason", str(arguments["reason"])]
-        if arguments.get("cascade"):
-            argv.append("--cascade")
+        # The CLI cascades BY DEFAULT (--single opts out), but this tool's schema
+        # documents cascade as opt-in. Honor the schema: anything short of an
+        # explicit cascade=true must redact only the named node — over-redaction
+        # is irreversible payload destruction.
+        if not arguments.get("cascade"):
+            argv.append("--single")
         if arguments.get("apply"):
             argv.append("--yes")
         return argv

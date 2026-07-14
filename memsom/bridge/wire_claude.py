@@ -40,9 +40,11 @@ def skills_dst_dir(home=None):
 
 
 def default_skills_src():
-    # Works when running from the repo (python memsom_cli.py wire-claude); bootstrap
-    # passes an explicit --skills-src for the installed case.
-    return Path(__file__).resolve().parent / "claude" / "skills"
+    # The bundled claude/ dir sits NEXT TO the memsom package — repo root for a
+    # checkout, site-packages for a wheel (pyproject force-include installs it as
+    # site-packages/claude). This file is memsom/bridge/wire_claude.py, so that
+    # shared parent is parents[2].
+    return Path(__file__).resolve().parents[2] / "claude" / "skills"
 
 
 def _default_exe():

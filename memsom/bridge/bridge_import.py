@@ -42,7 +42,6 @@ from pathlib import Path
 import memsom
 from memsom.interface import ingest as memsom_ingest
 from memsom.storage import schema as memsom_schema
-from memsom.storage import schema as memsom_schema
 
 
 # --- channel mapping (plan Phase 0b) -----------------------------------------
@@ -284,7 +283,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
     """
     memory_dir = Path(memory_dir)
     index_path = memory_dir / "MEMORY.md"
-    stats = {"created": 0, "tombstoned": 0, "skipped": 0, "total": 0}
+    stats = {"created": 0, "updated": 0, "tombstoned": 0, "skipped": 0, "total": 0}
     if not index_path.exists():
         return stats
     desired = {}
@@ -300,13 +299,30 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
     def _do():
         for sref, (section, payload) in desired.items():
-            if sref in existing:
-                stats["skipped"] += 1
-                continue
-            stats["created"] += 1
-            if dry_run:
-                continue
             content = _literal_content(section, payload)
+            if sref in existing:
+                # The sref is a hash of the LINE TEXT only, so an existing sref
+                # can still differ in section — the user moved the line under a
+                # different ## heading. That placement is curated data; skipping
+                # here would silently revert the move on the next render.
+                # Supersede exactly like a changed file (tombstone + reinsert).
+                nid = existing[sref]
+                row = conn.execute(
+                    "SELECT content FROM nodes WHERE id = ?", (nid,)).fetchone()
+                if row and row[0] == content:
+                    stats["skipped"] += 1
+                    continue
+                stats["updated"] += 1
+                if dry_run:
+                    continue
+                conn.execute(
+                    "UPDATE nodes SET tombstoned = 1, tombstoned_at = ?, revoke_reason = ? "
+                    "WHERE id = ?",
+                    (memsom.now_iso(), "superseded by bridge reimport", nid))
+            else:
+                stats["created"] += 1
+                if dry_run:
+                    continue
             nid = memsom.insert_node(conn, content, "endorsed", source_ref=sref)
             conn.execute("UPDATE nodes SET content_hash = ? WHERE id = ?",
                          (memsom_ingest._content_hash(content), nid))

@@ -193,5 +193,23 @@ class TestOrchestration(unittest.TestCase):
         self.assertIn("PermissionError", out["claude_md"]["detail"])
 
 
+# --- default skills source must actually exist ---------------------------------
+#
+# Regression (ccc19b8 package refactor): this module moved from the repo root to
+# memsom/bridge/ but default_skills_src() kept a parent-relative path, resolving
+# to the nonexistent memsom/bridge/claude/skills — so a bare `memsom wire-claude`
+# silently installed ZERO skills (wire_skills returns [] for a non-dir src).
+
+class TestDefaultSkillsSrc(unittest.TestCase):
+    def test_points_at_bundled_skills(self):
+        src = wc.default_skills_src()
+        # claude/ sits NEXT TO the memsom package (repo root / site-packages)
+        pkg_root = Path(wc.__file__).resolve().parents[2]
+        self.assertEqual(src, pkg_root / "claude" / "skills")
+        # in a checkout (where these tests run) the dir must exist and be non-empty
+        self.assertTrue(src.is_dir())
+        self.assertTrue(any(src.iterdir()))
+
+
 if __name__ == "__main__":
     unittest.main()

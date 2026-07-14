@@ -169,29 +169,31 @@ def _cosine(a: list, b: list) -> float:
 # Index a single node
 # ---------------------------------------------------------------------------
 
-def index_node(conn: sqlite3.Connection, nid: int) -> None:
+def index_node(conn: sqlite3.Connection, nid: int) -> bool:
     """Rebuild postings + docstats for *nid*.  If Ollama is reachable, also
     store an embedding.  Ollama unreachable -> BM25 index is still built.
 
     No-op for agent-derived or tombstoned nodes (they are not source nodes).
+    Returns True if the node was indexed, False if it was skipped (and any
+    stale postings purged) — index_all counts on this.
     """
     migrate(conn)
     row = conn.execute(
         "SELECT content, channel, tombstoned FROM nodes WHERE id = ?", (nid,)
     ).fetchone()
     if row is None:
-        return  # unknown id; caller's problem
+        return False  # unknown id; caller's problem
     content, channel, tombstoned = row
     if tombstoned or channel == "agent-derived":
         deindex_node(conn, nid)  # purge any stale postings for a now-dead node
-        return  # only index live source nodes
+        return False  # only index live source nodes
     # F-15: never (re)index a redacted node — purge its postings instead so a
     # reindex pass can't resurrect stale term frequencies from wiped content.
     if memsom_schema.column_exists(conn, "nodes", "redacted"):
         r = conn.execute("SELECT redacted FROM nodes WHERE id = ?", (nid,)).fetchone()
         if r and r[0]:
             deindex_node(conn, nid)
-            return
+            return False
     # COMPACT/F-15: an ARCHIVED (compacted-away) episode is pool-excluded at read
     # time (taint_filter_clauses forces archived = 0), yet if left in postings/
     # docstats it still pollutes the BM25 CORPUS STATS — N, avgdl, df/idf are
@@ -204,7 +206,7 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
         r = conn.execute("SELECT archived FROM nodes WHERE id = ?", (nid,)).fetchone()
         if r and r[0]:
             deindex_node(conn, nid)
-            return
+            return False
 
     tokens = tokenize(content)
     length = len(tokens)
@@ -234,13 +236,13 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
     from memsom.retrieval import embed as memsom_embed
     b = memsom_embed.backend()
     if b == "bm25":
-        return  # BM25-only by request; no vectors stored
+        return True  # BM25-only by request; no vectors stored
     if b == "bge-m3" and memsom_embed.bge_available():
         try:
             enc = memsom_embed.encode_doc(content)
             if enc is not None:
                 memsom_embed.store_bge(conn, nid, enc)
-                return
+                return True
         except Exception:
             pass  # bge failed -> fall through to Ollama, then BM25-only
 
@@ -259,6 +261,7 @@ def index_node(conn: sqlite3.Connection, nid: int) -> None:
     except Exception:
         # Ollama down, model not pulled, network error — skip vector silently
         pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +309,14 @@ def index_all(conn: sqlite3.Connection) -> int:
         "SELECT id FROM nodes WHERE tombstoned = 0 AND channel != 'agent-derived'"
         + archived_clause + " ORDER BY id"
     ).fetchall()
+    # Count what index_node actually indexed, not what the query returned: the
+    # visit itself must still happen for redacted nodes (the F-15 purge path),
+    # but a purged-and-skipped node is not an "indexed" one.
+    n = 0
     for (nid,) in rows:
-        index_node(conn, nid)
-    return len(rows)
+        if index_node(conn, nid):
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +631,13 @@ def retrieve(
         cand_ids = [nid for nid, _ in fused[:cand_n]]
         reranked = colbert_rerank(conn, query, cand_ids)
         top_nids = [nid for nid, _ in reranked[:k]]
+        # The window is a RE-RANK bound, not a result cap: if it is narrower
+        # than k, backfill from the fused tail in fused order so the caller
+        # still gets k results (the tail just isn't MaxSim-reordered).
+        if len(top_nids) < k:
+            seen = set(top_nids)
+            top_nids += [nid for nid, _ in fused
+                         if nid not in seen][: k - len(top_nids)]
     else:
         top_nids = [nid for nid, _ in fused[:k]]
 

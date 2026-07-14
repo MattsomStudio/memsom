@@ -233,6 +233,33 @@ class TestIndexAll(Base):
         ).fetchone()
         self.assertIsNone(row)
 
+    def test_reindex_count_excludes_redacted(self):
+        """index_all must report what it INDEXED, not what its query returned.
+
+        Regression: the bulk query filtered tombstoned/agent-derived/archived
+        but not redacted, so `memsom reindex` counted nodes index_node's F-15
+        guard deliberately skipped. The redacted node must still be VISITED
+        (its stale postings purged) — just not counted.
+        """
+        a = self.add("alpha nebula lighthouse content", "user")
+        b = self.add("beta nebula lighthouse content", "user")
+
+        def _failing(*args, **kwargs):
+            raise OSError("no ollama")
+        with patch.object(memsom_retrieve, "_call_ollama_embed", _failing):
+            self.assertEqual(memsom_retrieve.index_all(self.conn), 2)
+            memsom_redact.migrate(self.conn)
+            memsom_redact.redact_node(self.conn, b, "test", cascade=False)
+            # plant a stale posting for the redacted node to prove the purge
+            # path still runs even though the node is no longer counted
+            self.conn.execute(
+                "INSERT INTO docstats(node_id, length) VALUES (?, 1)", (b,))
+            n = memsom_retrieve.index_all(self.conn)
+
+        self.assertEqual(n, 1)  # only the live node counted
+        docstats = self.conn.execute("SELECT COUNT(*) FROM docstats").fetchone()[0]
+        self.assertEqual(docstats, 1)  # ...and the stale entry was purged
+
 
 # ---------------------------------------------------------------------------
 # TestBM25
@@ -420,6 +447,31 @@ class TestRetrieve(Base):
         with patch.object(memsom_retrieve, "_call_ollama_embed", _no_embed):
             memsom_retrieve.index_all(self.conn)
         return ids
+
+    def test_colbert_window_narrower_than_k_still_returns_k(self):
+        """The ColBERT window is a re-rank bound, not a result cap.
+
+        Regression: with MEMDAG_COLBERT_CANDIDATES < k, `reranked` held only
+        cand_n entries and the [:k] slice never backfilled from the fused
+        tail — retrieval silently returned fewer than k results.
+        """
+        from memsom.retrieval import embed as memsom_embed
+        docs = [(f"nebula lighthouse overlay doc number {i}", "user")
+                for i in range(6)]
+        self._seed_and_index(docs)
+
+        def _fake_rerank(conn, query, candidate_ids):
+            return [(nid, 1.0) for nid in reversed(candidate_ids)]
+
+        with patch.object(memsom_embed, "backend", return_value="bge-m3"), \
+             patch.object(memsom_embed, "bge_available", return_value=True), \
+             patch.object(memsom_embed, "colbert_candidates", return_value=2), \
+             patch.object(memsom_retrieve, "colbert_rerank", _fake_rerank), \
+             patch.object(memsom_retrieve, "_call_ollama_embed",
+                          side_effect=OSError("down")):
+            results = memsom_retrieve.retrieve(self.conn, "nebula lighthouse", k=5)
+
+        self.assertEqual(len(results), 5)  # backfilled past the 2-wide window
 
     def test_retrieve_bm25_fallback_when_ollama_down(self):
         """retrieve() must not crash when Ollama is unreachable."""

@@ -526,6 +526,14 @@ def import_changeset(conn, changeset):
                 # Also scrub if we already hold the redaction record for this uuid.
                 content = "" if forced_redacted else node.get("content", "")
 
+                # Clamp status exactly like label/conf_label above: any other
+                # value would hit the CHECK (status IN ('live','quarantined'))
+                # constraint and roll back the ENTIRE changeset — a one-node DoS
+                # on the whole import.
+                status = node.get("status", "live")
+                if status not in ("live", "quarantined"):
+                    status = "live"
+
                 cur = conn.execute(
                     "INSERT INTO nodes("
                     "  content, channel, label, conf_label, status, source_ref, created_at,"
@@ -539,7 +547,7 @@ def import_changeset(conn, changeset):
                         channel,
                         label,
                         conf_label,
-                        node.get("status", "live"),
+                        status,
                         node.get("source_ref"),
                         node.get("created_at", memsom.now_iso()),
                         node.get("tombstoned", 0),

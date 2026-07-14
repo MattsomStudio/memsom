@@ -68,6 +68,17 @@ def load_weights() -> list[dict]:
     if not db.exists():
         raise SystemExit(f"memsom DB not found: {db}")
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    # The forget_* columns are created by forget.migrate, which only runs from
+    # bridge-render — a fresh store (init/migrate_all only) doesn't have them,
+    # and this read-only connection can't add them.
+    have_forget = con.execute(
+        "SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name = 'forget_rs'"
+    ).fetchone()[0]
+    if not have_forget:
+        con.close()
+        raise SystemExit(
+            "no forgetting telemetry yet: run `memsom bridge-render` once "
+            f"to populate the forget_* columns in {db}")
     rows = con.execute(
         "SELECT source_ref, content, channel, forget_rs, forget_count, "
         "forget_last_used, forget_first_seen, forget_tier FROM nodes "

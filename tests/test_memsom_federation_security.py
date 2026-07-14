@@ -687,5 +687,40 @@ class TestFed2RedactionCascadeOnImport(SecurityBase):
         self.assertEqual(d_content, "", "the descendant's secret-quoting content must be scrubbed")
 
 
+# ---------------------------------------------------------------------------
+# FED-DOS: status must be clamped like label/conf_label
+# ---------------------------------------------------------------------------
+
+class TestStatusClamp(SecurityBase):
+    """An out-of-range status in one node must not roll back the whole import.
+
+    nodes.status carries CHECK (status IN ('live','quarantined')) on migrated
+    stores; inserting a changeset value verbatim turns one bad node — from an
+    untrusted peer or a corrupted line — into an IntegrityError that aborts the
+    ENTIRE changeset (the same one-node DoS class label/conf_label were already
+    clamped for).
+    """
+
+    def test_bogus_status_clamped_to_live(self):
+        cs = self._changeset("peer-evil", [self._node_dict(
+            "u-bogus-status", "peer-evil", "hello", "user", 2,
+            status="archived")])
+        stats = memsom_federation.import_changeset(self.conn, cs)  # must not raise
+        self.assertEqual(stats["nodes_new"], 1)
+        row = self.conn.execute(
+            "SELECT status FROM nodes WHERE uuid=?", ("u-bogus-status",)).fetchone()
+        self.assertEqual(row[0], "live")
+
+    def test_valid_quarantined_status_preserved(self):
+        cs = self._changeset("peer-q", [self._node_dict(
+            "u-quarantined", "peer-q", "sus", "user", 2,
+            status="quarantined", quarantined_at="2026-01-01T00:00:00+00:00",
+            quarantine_reason="contested")])
+        memsom_federation.import_changeset(self.conn, cs)
+        row = self.conn.execute(
+            "SELECT status FROM nodes WHERE uuid=?", ("u-quarantined",)).fetchone()
+        self.assertEqual(row[0], "quarantined")
+
+
 if __name__ == "__main__":
     unittest.main()

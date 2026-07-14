@@ -256,6 +256,39 @@ class TestLiterals(Base):
         self.assertEqual(stats["files"]["created"], len(SAMPLE))
         self.assertEqual(stats["literals"]["created"], 2)
 
+    def test_section_move_updates_literal(self):
+        """Moving a literal line under a different ## heading must stick.
+
+        Regression: the sref keys on the LINE TEXT hash only, and the skip path
+        never compared the stored section — so a hand-moved literal was silently
+        reverted to its old section on the next render.
+        """
+        bi.import_literals(self.conn, self.mem, dry_run=False)
+        # same two literal lines, but the progress-check moved to a new section
+        (self.mem / "MEMORY.md").write_text(
+            "# Memory - Alex\n\n"
+            "## About the User\n- **Alex** — goal: cybersecurity\n\n"
+            "## Reminders\n⏰ **Progress check DUE 2026-06-30** — raise it proactively\n",
+            encoding="utf-8")
+
+        stats = bi.import_literals(self.conn, self.mem, dry_run=False)
+        self.assertEqual(stats["updated"], 1)      # the moved line
+        self.assertEqual(stats["skipped"], 1)      # the unmoved line
+        rows = self._literal_nodes()
+        self.assertEqual(len(rows), 2)             # still exactly two live literals
+        prog = next(r[0] for r in rows if "Progress check" in r[0])
+        self.assertIn("section: Reminders", prog)
+
+    def test_section_move_dry_run_writes_nothing(self):
+        bi.import_literals(self.conn, self.mem, dry_run=False)
+        idx = (self.mem / "MEMORY.md").read_text(encoding="utf-8")
+        idx = idx.replace("## Personal context", "## Renamed context")
+        (self.mem / "MEMORY.md").write_text(idx, encoding="utf-8")
+        stats = bi.import_literals(self.conn, self.mem, dry_run=True)
+        self.assertEqual(stats["updated"], 1)
+        prog = next(r[0] for r in self._literal_nodes() if "Progress check" in r[0])
+        self.assertIn("section: Personal context", prog)  # untouched
+
 
 class TestSweep(Base):
     """Reconcile deletions: a removed source file tombstones its node."""

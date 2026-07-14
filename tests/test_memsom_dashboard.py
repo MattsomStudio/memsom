@@ -142,5 +142,27 @@ class TestMissingDB(unittest.TestCase):
                 os.environ.pop("MEMDAG_DB", None)
 
 
+# --- pre-bridge-render store: friendly exit, not a traceback -------------------
+#
+# The forget_* columns are created by forget.migrate, which only runs from
+# bridge-render. Regression: `memsom dashboard` on a store that had only ever
+# seen init/migrate_all crashed with a raw OperationalError (no such column:
+# forget_rs) instead of telling the user to run bridge-render.
+
+class TestPreBridgeRenderStore(unittest.TestCase):
+    def test_load_weights_exits_cleanly_without_forget_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["MEMDAG_DB"] = str(Path(tmp) / "fresh.db")
+            try:
+                conn = memsom.get_connection()   # base schema, NO forget.migrate
+                bi.migrate(conn)
+                conn.close()
+                with self.assertRaises(SystemExit) as ctx:
+                    dash.load_weights()
+                self.assertIn("bridge-render", str(ctx.exception))
+            finally:
+                os.environ.pop("MEMDAG_DB", None)
+
+
 if __name__ == "__main__":
     unittest.main()
