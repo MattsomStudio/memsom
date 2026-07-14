@@ -1,6 +1,6 @@
 # memsom — Architecture
 
-A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 45+ runtime modules / ~18k LOC / ~880 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
+A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 45+ runtime modules / ~19k LOC / ~975 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
 
 ## The mental model
 
@@ -36,8 +36,11 @@ edges(child, parent)                 -- came-from / provenance (the DAG)
 Feature modules extend `nodes` **additively** via `memsom_schema.add_column` (never altering frozen behavior): `content_hash, status, quarantine_reason/at, redacted/at, redact_reason, archived/at, conf_label, uuid, origin, obsidian_path/mtime`. Each owns its own tables: `rel_edges` (relates-to/wikilinks), `postings/docstats/embeddings` (retrieval index), `elevations` (audited integrity-elevation log), `gate_log`, `claims/claim_assertions/corroborations/independence_roots`, `query_log/prefetch_cache`, `trusted_origins`, `redaction_log`.
 
 **Two edge types, deliberately separate:**
-- `edges` (**came-from**): causal, one-hop, set by `derive_node`. Carries the Biba integrity floor.
-- `rel_edges` (**relates-to**): associative/bidirectional, set by `relate` and Obsidian wikilinks. Navigated by `neighborhood()` with the same floor-propagation discipline but orthogonal to derivation.
+- `edges` (**came-from**): causal, one-hop, set by `derive_node` — and by the fact
+  layer's `depends_on:` (a measurement *derives from* the hardware it was taken on),
+  so retiring a fact stales its dependents through the same cascade. Carries the
+  Biba integrity floor.
+- `rel_edges` (**relates-to**): associative/bidirectional, set by `relate` and Obsidian/memory wikilinks. Navigated by `neighborhood()` with the same floor-propagation discipline but orthogonal to derivation — and deliberately invisible to the cascade (association must never propagate staleness or revocation).
 
 ## Channel / integrity model
 
@@ -85,6 +88,7 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 - `memsom_cli` — unified CLI (75+ subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
 - `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, 15+ tools), all diagnostics to stderr.
 - `memsom_obsidian` — vault integration: `sync_vault` (notes → nodes, `[[wikilinks]]` → `rel_edges`), `export_note`, `watch_vault`. A note's frontmatter `memsom-channel` can only **lower** integrity (`min(default, declared)`) — closing the write→re-ingest laundering loop.
+- `memsom.bridge.facts` — the fact layer: single-source-of-truth values (`type: fact` memories with `value`/`unit`/`last-verified`) referenced as `[[fact_<stem>]]` from other memories and resolved **at read time** (digest = current value; retrieve = drift vs the referencing memory's age; retired = last known, flagged). The supersede chain is the value history (`fact-log`); `fact-set` edits the file, never the DB. `depends_on:` between facts materializes into `edges` so the stale cascade covers real derivation. Core rule: memories are immutable history, facts carry the lifecycle, all reconciliation happens at read.
 - `memsom_config` (MCP client wiring), `bootstrap.py` (one-command install), `memsom_chats` (chat import).
 
 ## End-to-end: `ask "X" --retrieve --graph --clearance public`

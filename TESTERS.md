@@ -178,6 +178,14 @@ the one thing this layer exists to prevent.
 **Tell me:** did the block land in CLAUDE.md? Did `MEMORY.md` regenerate? Did a
 re-run touch anything it shouldn't have?
 
+> **Bonus (optional): the fact layer.** Values that change over time (a version,
+> a benchmark) can live in one `fact_<name>.md` file and be *referenced* from
+> other memories as `[[fact_<name>]]` — the regenerated `MEMORY.md` substitutes
+> the current value at render time, and `memsom fact-log fact_<name>` prints the
+> value's full history after you change it (`memsom fact-set fact_<name> <new>`
+> then `memsom bridge-render`). If a reference ever renders stale or the history
+> looks wrong, that's a bug — tell me.
+
 ---
 
 ## Part 4 — Try to break it (for the technically inclined, optional)

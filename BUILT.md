@@ -445,3 +445,69 @@ failures** (+5 net new — 4 in `test_memsom_verify_stale.py`, +1 net in
   close the wiring gap); `memsom/bridge/bridge_render.py`'s existing silent
   try/except around its internal `verify-stale` call is untouched (separate,
   deliberate fail-safe design).
+
+---
+
+# 2026-07-14 — audit sweep + the fact layer
+
+Two builds in one day. Suite went **926 → 974 passing** (+37 fact-layer tests,
++11 regression tests from the audit).
+
+## Morning: adversarial audit, 7 confirmed findings closed
+
+Four parallel reviewers over the whole tree, every finding repro'd before it
+was accepted, every fix shipped with a regression test:
+
+1. **mcp/redact** — the MCP tool's `cascade` was silently ignored (`--cascade`
+   is a CLI no-op; `--single` was never emitted): `cascade: false` still
+   destroyed every descendant's payload. MCP redact is now single-node unless
+   `cascade: true` — a behavior change, but the one the tool schema always
+   documented.
+2. **wire-claude** — `default_skills_src()` regression from the `ccc19b8`
+   package refactor: bare `memsom wire-claude` silently installed zero skills.
+3. **federation** — changeset `status` was inserted unclamped; one bad value
+   hit the CHECK constraint and rolled back the entire import (one-node DoS,
+   same class as label/conf_label's existing clamps).
+4. **dashboard** — crashed with a raw OperationalError on a store that had
+   never run `bridge-render` (forget_* columns absent); now a clear exit.
+5. **bridge-import** — moving a literal index line under a different `##`
+   section was silently reverted on the next render; now supersedes.
+6. **retrieve** — `index_all` counted redacted nodes its own F-15 guard skips;
+   `index_node` now reports whether it indexed and the count is honest.
+7. **retrieve** — `MEMDAG_COLBERT_CANDIDATES < k` acted as a hard result cap;
+   the re-rank window now backfills from the fused tail to k.
+
+Also landed: the index-metadata fallback (`section:`/`index_title:`/
+`index_hook:` frontmatter > previously-stamped node meta when a memory has no
+MEMORY.md line) — a brand-new memory can no longer be permanently unfiled, and
+a digest budget eviction is recoverable instead of terminal.
+
+## Evening: the fact layer (memsom.bridge.facts + importer + digest + retrieve + CLI)
+
+Single-source-of-truth values. Design: **memories are immutable history; facts
+carry the lifecycle; all reconciliation happens at read time.**
+Spec: `docs/facts-design.md` (untracked by repo convention).
+
+- **Phase 0** — `type: fact` → user channel; fact files carry `value`/`unit`/
+  `last-verified`/`section: Facts`; references are the *filename stem*
+  (`[[fact_pc_gpu]]`), matching the wikilink resolver (the kebab `name:` slug
+  does NOT resolve — regression-tested both ways).
+- **Phase 1** — `relate_fact_deps` (Pass 2b): `depends_on:` frontmatter →
+  rows in the came-from `edges` DAG (derivation, not association). Supersede
+  rewires by re-derivation; missing targets defer; deleting a fact file
+  `mark_stale_cascade`s its dependents (stale, never tombstoned) after the
+  sweep's transaction commits.
+- **Phases 2-3** — `resolve_fact_refs`: the digest substitutes current values
+  in hooks + literal lines BEFORE budget accounting; a fact entry's own hook is
+  its value + verified date; `retrieve` resolves with `as_of` = the memory's
+  `created_at` and renders drift ("61 tok/s (was 45 tok/s when written, ...)").
+  Retired facts resolve to last-known, flagged; unknown stems stay verbatim.
+  Frozen core untouched (`compose` does not resolve).
+- **Phase 4** — `fact-set` (edits the FILE; the DB follows on the next
+  bridge-import — never writes a node) + `fact-log` (value history from the
+  supersede chain). Flat hyphenated verbs per CLI convention.
+
+| Test file                         | New tests |
+|-----------------------------------|-----------|
+| tests/test_memsom_bridge_import.py | 12 (fact convention + depends_on cascade) |
+| tests/test_memsom_facts.py (new)   | 26 (resolver, digest, retrieve, CLI) |

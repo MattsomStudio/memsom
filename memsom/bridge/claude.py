@@ -75,7 +75,18 @@ drop, but it means your write can silently cost an unrelated memory its slot.
 
 To capture a session's worth of facts, use **`/saveall`**. Before saving, check
 whether a file already covers the fact and update it instead of duplicating; delete
-(tombstone) memories that turn out to be wrong."""
+(tombstone) memories that turn out to be wrong.
+
+**Changing values live in FACT files, referenced — never copied.** A measured
+value (benchmark, version, dose, income) goes in ONE `fact_<name>.md` with
+`type: fact`, `value:`, `last-verified:`, `section: Facts` frontmatter; other
+memories write `[[fact_<name>]]` (the filename stem) where the number would go.
+Read surfaces substitute the current value automatically, so referencing
+memories can never go stale. Update a value with `memsom fact-set fact_<name>
+<value>` (or edit the file) — never by rewriting the memories that cite it.
+If one fact is only true because of another (a measurement on specific
+hardware), add `depends_on: fact_<other>` so retiring the dependency flags it
+for reverification."""
 
 PREAMBLE = """# CLAUDE.md
 

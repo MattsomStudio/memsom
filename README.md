@@ -281,6 +281,46 @@ machines that should mirror without re-rendering.
 > MEMORY.md. The author's GPU/vault-coupled BGE retrieval engine is intentionally
 > **not** included; `memsom retrieve` is the portable substrate.
 
+### Facts — single-source-of-truth values
+
+The same measured value (a benchmark, a version, an income figure) written
+verbatim into several memories drifts: one copy gets updated, the rest go stale.
+The fact layer normalizes it: **store the value once, reference it everywhere,
+reconcile at read time.** Memories are immutable history; the fact carries the
+lifecycle.
+
+A fact is an ordinary memory file with `type: fact`:
+
+```markdown
+---
+name: fact-gpu-toksps
+description: local LLM throughput
+type: fact
+value: 61
+unit: tok/s
+last-verified: 2026-07-14
+depends_on: fact_pc_gpu
+section: Facts
+---
+Measured on the standard workload; source cited here.
+```
+
+- **Reference it** from any memory body as `[[fact_gpu_toksps]]` (the *filename
+  stem*). Stored content keeps the link forever; the read surfaces substitute the
+  live value — the MEMORY.md digest shows the current value, and `retrieve` shows
+  drift for older memories (`61 tok/s (was 45 tok/s when written, ...)`) by
+  walking the supersede chain. A retired fact resolves to its last known value,
+  flagged; a typo'd reference stays visibly broken.
+- **Update it** by editing the file or with `memsom fact-set fact_gpu_toksps 61`
+  (the file is the store-of-record; the DB follows on the next bridge-render).
+  History is automatic — the append-only supersede chain — and `memsom fact-log`
+  prints it.
+- **`depends_on:`** declares real derivation between facts (a measurement is only
+  true because of the hardware it was taken on). It materializes into the
+  came-from DAG, so deleting a fact's file marks its dependents **stale** — they
+  land in MEMORY.md's Needs Reverification list instead of silently lying.
+  Ordinary `[[wikilinks]]` stay associative and never cascade.
+
 ## Command catalog
 
 | Subcommand       | Module             | What it does |
@@ -362,6 +402,8 @@ machines that should mirror without re-rendering.
 | `dashboard`      | memsom_dashboard   | Build + open the memory telemetry dashboard (HTML) |
 | `tombstone`      | memsom_tombstone   | Sanctioned delete path: revoke a memory's node + remove its file |
 | `tombstone-list` | memsom_tombstone   | List tombstoned memory nodes |
+| `fact-set`       | memsom_facts       | Update a fact file's value + last-verified (the file is the store-of-record) |
+| `fact-log`       | memsom_facts       | Print a fact's value history from the supersede chain |
 
 ## Concepts
 
