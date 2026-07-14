@@ -511,3 +511,33 @@ Spec: `docs/facts-design.md` (untracked by repo convention).
 |-----------------------------------|-----------|
 | tests/test_memsom_bridge_import.py | 12 (fact convention + depends_on cascade) |
 | tests/test_memsom_facts.py (new)   | 26 (resolver, digest, retrieve, CLI) |
+
+## Night: MCP dispatch coverage + bench smoke (tests only, no runtime changes)
+
+Coverage-gap sweep found exactly one thin spot: the MCP server exposed 17
+tools but only 4 were ever dispatched end-to-end, and the tool→argv
+translation (`_tool_argv`) — the seam where a wrong flag silently mutates the
+store — was unit-tested for `redact` alone. Closed both ends:
+
+- **Argv pins** — exact expected argv for all 17 tools, minimal and
+  full-argument forms, plus a completeness check that fails the moment a tool
+  is added without a case. Error paths pinned too (unknown tool → `ValueError`,
+  missing required arg → `KeyError` → client error, not a crash).
+- **End-to-end dispatch** — the 13 previously-undispatched tools now run
+  through `handle()` against a temp DB, so a pinned-but-wrong flag fails as
+  argparse `SystemExit(2)` → `isError`. Mutators verify the DB effect both
+  ways: `revoke`/`redact` dry-run leaves state untouched, apply
+  tombstones/destroys; `redact` with cascade omitted proves the child survives
+  (the over-redaction regression, now guarded at the DB, not just argv);
+  `check_action` covers ALLOW and DENY-as-isError; `export` verifies the
+  changeset file; both obsidian tools run against a temp vault.
+- **bench/ smoke** — `bench/` is excluded from discovery by design, so nothing
+  caught a syntax error until a hand-run. New test compiles every `bench/*.py`
+  (compile, never import — no side effects).
+
+| Test file                       | New tests |
+|---------------------------------|-----------|
+| tests/test_memsom_mcp.py        | 18 (argv pins + e2e dispatch) |
+| tests/test_bench_smoke.py (new) | 2 (compile-only) |
+
+Full suite after: **994 tests, 0 failures**.

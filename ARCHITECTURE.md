@@ -1,6 +1,6 @@
 # memsom — Architecture
 
-A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 45+ runtime modules / ~19k LOC / ~975 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
+A provenance-aware memory store for AI agents — *"version control for machine knowledge."* Snapshot at the current HEAD: 45+ runtime modules / ~19k LOC / ~995 tests. Pure-stdlib Python over a single SQLite file (the only required dependency); Ollama is optional and degrades gracefully.
 
 ## The mental model
 
@@ -86,7 +86,7 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 
 **Surfaces:**
 - `memsom_cli` — unified CLI (75+ subcommands), `migrate_all` (every module's idempotent migration + versioned steps), enhanced `ask` orchestrating `--retrieve / --graph / --anticipate / --llm`.
-- `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, 15+ tools), all diagnostics to stderr.
+- `memsom_mcp` — stdio MCP server (JSON-RPC 2.0, 17 tools), all diagnostics to stderr. The tool→argv mapping and end-to-end dispatch of every tool are pinned by tests (`tests/test_memsom_mcp.py`).
 - `memsom_obsidian` — vault integration: `sync_vault` (notes → nodes, `[[wikilinks]]` → `rel_edges`), `export_note`, `watch_vault`. A note's frontmatter `memsom-channel` can only **lower** integrity (`min(default, declared)`) — closing the write→re-ingest laundering loop.
 - `memsom.bridge.facts` — the fact layer: single-source-of-truth values (`type: fact` memories with `value`/`unit`/`last-verified`) referenced as `[[fact_<stem>]]` from other memories and resolved **at read time** (digest = current value; retrieve = drift vs the referencing memory's age; retired = last known, flagged). The supersede chain is the value history (`fact-log`); `fact-set` edits the file, never the DB. `depends_on:` between facts materializes into `edges` so the stale cascade covers real derivation. Core rule: memories are immutable history, facts carry the lifecycle, all reconciliation happens at read.
 - `memsom_config` (MCP client wiring), `bootstrap.py` (one-command install), `memsom_chats` (chat import).
