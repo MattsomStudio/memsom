@@ -28,8 +28,20 @@ Link related memories with [[their-name]].>
 `project_*` / `reference_*` are user-channel and decay out of the index when unused.
 
 **MEMORY.md is the always-loaded index, and it is GENERATED** from the store on
-session end by the `memsom bridge-render` Stop hook. Do NOT hand-edit MEMORY.md —
-edit the per-fact files and let it regenerate. Keep it under ~16 KB.
+session end by the `memsom bridge-render` Stop hook. Don't rewrite its hooks or
+content by hand — edit the per-fact files and let it regenerate. Keep it under ~16 KB.
+
+**But DO add the index line when you create a NEW memory** — one
+`- [Title](file.md) — hook` bullet under the right `##` section. This is the one
+hand-edit that IS required: the importer reads a memory's `section` from the
+MEMORY.md line (falling back to the file's own `section:` frontmatter), and the
+digest only renders memories that have one. A new file with neither is written to
+disk, stays fully searchable — and never loads into context. So: add the line, or
+put `section:` / `index_title:` / `index_hook:` in the file's frontmatter. Do one.
+
+**If MEMORY.md is near the 16 KB cap, reclaim BEFORE adding to it.** Over budget,
+the digest sheds the lowest-RS entries to fit; that is a transient, recoverable
+drop, but it means your write can silently cost an unrelated memory its slot.
 
 To capture a session's worth of facts, use **`/saveall`**. Before saving, check
 whether a file already covers the fact and update it instead of duplicating; delete

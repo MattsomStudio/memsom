@@ -349,3 +349,63 @@ class TestRelateWikilinks(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- index metadata must survive absence from MEMORY.md -----------------------
+#
+# digest._select_hot requires a truthy `section`, and section was sourced ONLY
+# from the curated MEMORY.md index. So any file absent from the index resolved
+# section=None and became permanently unselectable — even while hot. Two live
+# failures (2026-07-13): a brand-new memory could never enter MEMORY.md at all,
+# and a memory the digest's byte-budget evicted lost its section on the next
+# import, turning a transient RS-ordered eviction into a permanent unfiling.
+
+class TestIndexMetaFallback(Base):
+    def _section_of(self, rel):
+        node = self.live_node(rel)
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        return fm.get("section")
+
+    def test_new_memory_not_in_index_keeps_frontmatter_section(self):
+        """A brand-new memory files itself via its own frontmatter."""
+        (self.mem / "reference_new.md").write_text(
+            "---\nname: New\ndescription: d\ntype: reference\n"
+            "section: References\nindex_title: New thing\nindex_hook: the hook\n"
+            "---\n\nbody\n", encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+
+        self.assertEqual(self._section_of("reference_new.md"), "References")
+        fm = bi.fm_top_level(
+            bi.split_frontmatter(self.live_node("reference_new.md")["content"])[0])
+        self.assertEqual(fm.get("index_title"), "New thing")
+        self.assertEqual(fm.get("index_hook"), "the hook")
+
+    def test_eviction_from_index_does_not_wipe_section(self):
+        """A memory dropped from MEMORY.md keeps the section already stamped on it.
+
+        Regression: eviction is a transient, RS-ordered budget decision made by the
+        digest — it must never destroy the memory's filing metadata, or the entry
+        can never come back.
+        """
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(self._section_of("user_adhd.md"), "About the User")
+
+        # the digest evicts it: its line disappears from MEMORY.md, file untouched
+        index = (self.mem / "MEMORY.md").read_text(encoding="utf-8")
+        evicted = "\n".join(l for l in index.splitlines()
+                            if "user_adhd.md" not in l)
+        (self.mem / "MEMORY.md").write_text(evicted, encoding="utf-8")
+        # touch the file so the importer re-reads it rather than hash-skipping
+        (self.mem / "user_adhd.md").write_text(
+            SAMPLE["user_adhd.md"] + "\nmore\n", encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+
+        self.assertEqual(self._section_of("user_adhd.md"), "About the User")
+
+    def test_curated_index_still_wins_over_frontmatter(self):
+        """MEMORY.md remains the curated source when it HAS a line for the file."""
+        (self.mem / "user_adhd.md").write_text(
+            "---\nname: ADHD\ndescription: has ADHD\ntype: user\n"
+            "section: Wrong Section\n---\n\nbody\n", encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(self._section_of("user_adhd.md"), "About the User")

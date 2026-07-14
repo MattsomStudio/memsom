@@ -442,6 +442,21 @@ def _live_node_for_path(conn, rel: str):
     ).fetchone()
 
 
+def _stored_index_meta(conn, rel: str) -> dict:
+    """Index metadata (section/index_title/index_hook) already stamped on the live
+    node for *rel*, or {}.  The last-resort fallback below: it is what keeps a
+    budget-evicted memory filed (see the fallback chain in import_memory_dir)."""
+    row = conn.execute(
+        "SELECT content FROM nodes "
+        "WHERE bridge_path = ? AND tombstoned = 0 ORDER BY id DESC LIMIT 1",
+        (rel,),
+    ).fetchone()
+    if not row or not row[0]:
+        return {}
+    fm = fm_top_level(split_frontmatter(row[0])[0])
+    return {k: fm[k] for k in ("section", "index_title", "index_hook") if fm.get(k)}
+
+
 def _mtime_sig(path: Path) -> str:
     st = path.stat()
     return f"{st.st_mtime_ns}:{st.st_size}"
@@ -493,6 +508,23 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             fm = fm_top_level(split_frontmatter(raw)[0])
             channel = CHANNEL_BY_TYPE.get(memory_type(stem, fm), DEFAULT_CHANNEL)
             title, hook, section = primary.get(rel, (None, None, None))
+            # MEMORY.md is the CURATED source for index metadata — but it must not
+            # be the ONLY one. digest._select_hot requires a truthy section, so any
+            # file absent from the index resolved section=None and became
+            # permanently unselectable, even while hot:
+            #   - a BRAND-NEW memory (never in MEMORY.md) could never enter it —
+            #     rendering alone could not file it, so /saveall silently dropped it;
+            #   - a memory the digest's byte-budget EVICTED lost its section on the
+            #     next import, so a purely-transient, RS-ordered eviction became a
+            #     permanent unfiling it could not recover from.
+            # Fall back: curated index > the file's own frontmatter > whatever is
+            # already stamped on the live node. Eviction stays reversible (the digest
+            # re-drops by RS each render); nothing silently loses its filing.
+            if section is None or title is None or hook is None:
+                prev = _stored_index_meta(conn, rel)
+                section = section or fm.get("section") or prev.get("section")
+                title = title or fm.get("index_title") or prev.get("index_title")
+                hook = hook or fm.get("index_hook") or prev.get("index_hook")
             stamped = stamp_fm(raw, section=section, index_title=title, index_hook=hook)
             new_hash = memsom_ingest._content_hash(stamped)
 
