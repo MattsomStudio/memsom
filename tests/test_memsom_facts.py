@@ -8,7 +8,7 @@ import os
 import tempfile
 import unittest
 import warnings
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -243,6 +243,137 @@ class TestRetrieveResolution(FakeClock, Base):
         self._import()
         out = self._seed_and_retrieve()
         self.assertIn("nebula overlay plain content no refs", out)
+
+
+class TestFactSetCli(Base):
+    """Phase 4: `fact-set` edits the fact FILE only — never the DB."""
+
+    def _run(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            facts.main(list(argv))
+        return buf.getvalue()
+
+    def test_set_updates_value_and_verified_preserves_other_keys(self):
+        content = (
+            "---\nname: fact-5070-toksps\ndescription: throughput\ntype: fact\n"
+            "value: 45\nunit: tok/s\nlast-verified: 2026-07-01\n"
+            "depends_on: fact_pc_gpu\nsection: Facts\n---\n\nmeasured on ollama\n"
+        )
+        (self.mem / "fact_5070_toksps.md").write_text(content, encoding="utf-8")
+
+        self._run("fact-set", "fact_5070_toksps", "61", "--unit", "tok/s",
+                   "--verified", "2026-07-17", "--memory-dir", str(self.mem))
+
+        new_content = (self.mem / "fact_5070_toksps.md").read_text(encoding="utf-8")
+        self.assertIn("value: 61", new_content)
+        self.assertIn("unit: tok/s", new_content)
+        self.assertIn("last-verified: 2026-07-17", new_content)
+        # untouched keys + body
+        self.assertIn("name: fact-5070-toksps", new_content)
+        self.assertIn("description: throughput", new_content)
+        self.assertIn("depends_on: fact_pc_gpu", new_content)
+        self.assertIn("section: Facts", new_content)
+        self.assertIn("measured on ollama", new_content)
+
+    def test_set_without_unit_preserves_existing_unit(self):
+        self._write_fact(45, unit="tok/s")
+        self._run("fact-set", "fact_5070_toksps", "61", "--verified", "2026-07-17",
+                   "--memory-dir", str(self.mem))
+        content = (self.mem / "fact_5070_toksps.md").read_text(encoding="utf-8")
+        self.assertIn("value: 61", content)
+        self.assertIn("unit: tok/s", content)
+
+    def test_set_default_verified_is_today(self):
+        self._write_fact(45, verified="2000-01-01")
+        self._run("fact-set", "fact_5070_toksps", "50", "--memory-dir", str(self.mem))
+        content = (self.mem / "fact_5070_toksps.md").read_text(encoding="utf-8")
+        expected = memsom.local_date(memsom.now_iso())
+        self.assertIn(f"last-verified: {expected}", content)
+
+    def test_set_refuses_missing_file(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run("fact-set", "fact_nonexistent", "1", "--memory-dir", str(self.mem))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertFalse((self.mem / "fact_nonexistent.md").exists())
+
+    def test_set_refuses_non_fact_file(self):
+        (self.mem / "fact_notreally.md").write_text(
+            "---\nname: notreally\ndescription: d\ntype: project\n"
+            "section: Personal projects\n---\nbody\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            self._run("fact-set", "fact_notreally", "1", "--memory-dir", str(self.mem))
+        self.assertNotEqual(cm.exception.code, 0)
+        # frontmatter must be untouched
+        content = (self.mem / "fact_notreally.md").read_text(encoding="utf-8")
+        self.assertIn("type: project", content)
+        self.assertNotIn("value:", content)
+
+    def test_set_rejects_stem_without_fact_prefix(self):
+        (self.mem / "user_adhd.md").write_text(
+            "---\nname: adhd\ndescription: d\ntype: user\nsection: About the User\n"
+            "---\nbody\n", encoding="utf-8")
+        with self.assertRaises(SystemExit) as cm:
+            self._run("fact-set", "user_adhd", "1", "--memory-dir", str(self.mem))
+        self.assertNotEqual(cm.exception.code, 0)
+        content = (self.mem / "user_adhd.md").read_text(encoding="utf-8")
+        self.assertNotIn("value:", content)
+
+    def test_set_accepts_stem_with_and_without_md_suffix(self):
+        self._write_fact(45)
+        self._run("fact-set", "fact_5070_toksps.md", "50", "--memory-dir", str(self.mem))
+        content = (self.mem / "fact_5070_toksps.md").read_text(encoding="utf-8")
+        self.assertIn("value: 50", content)
+
+        self._run("fact-set", "fact_5070_toksps", "55", "--memory-dir", str(self.mem))
+        content = (self.mem / "fact_5070_toksps.md").read_text(encoding="utf-8")
+        self.assertIn("value: 55", content)
+
+
+class TestFactLogCli(FakeClock, Base):
+    """Phase 4: `fact-log` prints the supersede chain read via fact_versions."""
+
+    def _run(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            facts.main(list(argv))
+        return buf.getvalue()
+
+    def test_log_prints_chain_after_supersede_newest_last(self):
+        self._write_fact(45)
+        self._import()
+        self._write_fact(61)
+        self._import()
+
+        out = self._run("fact-log", "fact_5070_toksps")
+
+        self.assertIn("45 tok/s", out)
+        self.assertIn("61 tok/s", out)
+        self.assertLess(out.index("45 tok/s"), out.index("61 tok/s"))
+        self.assertIn("now", out)  # the live (61) version is open-ended
+
+    def test_log_shows_retire_reason_when_not_boilerplate(self):
+        self._write_fact(45)
+        (self.mem / "user_keep.md").write_text(   # mass-wipe guard needs >=1 file
+            "---\nname: keep\ndescription: k\ntype: user\n"
+            "section: About the User\n---\nk\n", encoding="utf-8")
+        self._import()
+        (self.mem / "fact_5070_toksps.md").unlink()
+        self._import()  # sweep tombstones the fact with its generic boilerplate reason
+
+        out = self._run("fact-log", "fact_5070_toksps")
+        self.assertIn("45 tok/s", out)
+        self.assertNotIn("bridge reconcile", out)  # boilerplate reason suppressed
+
+    def test_log_unknown_stem_exits_nonzero(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run("fact-log", "fact_does_not_exist")
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_log_rejects_non_fact_stem(self):
+        with self.assertRaises(SystemExit) as cm:
+            self._run("fact-log", "user_adhd")
+        self.assertNotEqual(cm.exception.code, 0)
 
 
 if __name__ == "__main__":

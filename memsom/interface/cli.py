@@ -26,6 +26,7 @@ Subcommands (39 total):
     memsom_gate       -> check-action gate-log
     memsom_corroborate -> register-root assert-claim corroborate claims-list roots-list
     memsom_verify_stale -> verify-stale
+    memsom_facts      -> fact-set fact-log
 """
 
 import argparse
@@ -74,6 +75,7 @@ from memsom.interface import audit as memsom_audit
 from memsom.interface import dashboard as memsom_dashboard
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.integrity import contradict as memsom_contradict
+from memsom.bridge import facts as memsom_facts
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +660,7 @@ def main(argv=None):
     memsom_dashboard.register(sub)
     memsom_tombstone.register(sub)
     memsom_contradict.register(sub)
+    memsom_facts.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures
