@@ -105,6 +105,7 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(bi.CHANNEL_BY_TYPE["feedback"], "endorsed")
         self.assertEqual(bi.CHANNEL_BY_TYPE["project"], "user")
         self.assertEqual(bi.CHANNEL_BY_TYPE["reference"], "user")
+        self.assertEqual(bi.CHANNEL_BY_TYPE["fact"], "user")  # fact layer Phase 0
 
     def test_stamp_section_idempotent(self):
         text = SAMPLE["project_kali.md"]
@@ -378,6 +379,273 @@ class TestRelateWikilinks(Base):
         except Exception:
             n = 0
         self.assertEqual(n, 0)
+
+
+# --- Fact layer Phase 0 (docs/facts-design.md) --------------------------------
+#
+# A fact is a normal memory file distinguished by type: fact. Two things to
+# prove here: (1) it imports through the ordinary path with no special-casing
+# (channel from CHANNEL_BY_TYPE, section self-filed via the frontmatter
+# fallback since facts are never in MEMORY.md's curated index), and (2) the
+# `[[...]]` reference form other memories must use to link it, because
+# relate_wikilinks resolves against the FILENAME STEM (via _build_resolver /
+# _resolve_target in memsom.bridge.obsidian), not the frontmatter `name:`
+# slug. The spec's own example uses a kebab name (`fact-5070-toksps`) as the
+# reference target; the filename convention (`fact_<snake_name>.md`) is
+# underscored, so a kebab-form wikilink silently fails to resolve. See the
+# fix documented in docs/facts-design.md.
+
+FACT_FILE = (
+    "---\n"
+    "name: fact-5070-toksps\n"
+    "description: RTX 5070 local LLM throughput\n"
+    "type: fact\n"
+    "value: 61\n"
+    "unit: tok/s\n"
+    "last-verified: 2026-07-14\n"
+    "section: Facts\n"
+    "---\n"
+    "Optional context: how it was measured, on what workload.\n"
+)
+
+
+class TestFactLayerPhase0(Base):
+    def _write_fact(self):
+        (self.mem / "fact_5070_toksps.md").write_text(FACT_FILE, encoding="utf-8")
+
+    def test_fact_file_imports_with_user_channel(self):
+        self._write_fact()
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        node = self.live_node("fact_5070_toksps.md")
+        self.assertIsNotNone(node)
+        self.assertEqual(node["channel"], "user")
+
+    def test_fact_section_self_files_from_frontmatter(self):
+        """A fact is never in MEMORY.md's curated index — it must file itself
+        via the `section:` frontmatter fallback (same path a brand-new,
+        never-indexed memory takes; see TestIndexMetaFallback)."""
+        self._write_fact()
+        self.assertNotIn("fact_5070_toksps.md", INDEX)  # sanity: not curated
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        node = self.live_node("fact_5070_toksps.md")
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        self.assertEqual(fm.get("section"), "Facts")
+
+    def test_fact_referenced_by_filename_stem_resolves(self):
+        """The reference form that actually works: the filename stem
+        (underscored, per the `fact_<snake_name>.md` convention) — NOT the
+        kebab `name:` slug from the frontmatter."""
+        from memsom.retrieval import relate as memsom_relate
+        self._write_fact()
+        (self.mem / "user_adhd.md").write_text(
+            "---\nname: ADHD\ntype: user\n---\n\n"
+            "Throughput is [[fact_5070_toksps]].\n", encoding="utf-8")
+        edges = bi.import_all(self.conn, self.mem, dry_run=False)["edges"]
+        self.assertEqual(edges["resolved"], 1)
+        self.assertEqual(edges["unresolved"], 0)
+
+        src = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        fact = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+        nbrs = {d["id"] for d in memsom_relate.neighborhood(self.conn, src, hops=1)}
+        self.assertIn(fact, nbrs)
+
+    def test_fact_referenced_by_kebab_name_does_not_resolve(self):
+        """Documents the spec-vs-code mismatch: the frontmatter `name:` slug
+        (kebab, matching the design doc's own example) is NOT what
+        relate_wikilinks resolves against, so a link written that way is
+        silently inert."""
+        self._write_fact()
+        (self.mem / "user_adhd.md").write_text(
+            "---\nname: ADHD\ntype: user\n---\n\n"
+            "Throughput is [[fact-5070-toksps]].\n", encoding="utf-8")
+        edges = bi.import_all(self.conn, self.mem, dry_run=False)["edges"]
+        self.assertEqual(edges["resolved"], 0)
+        self.assertEqual(edges["unresolved"], 1)
+
+
+# --- Fact layer Phase 1: dependencies and cascade (docs/facts-design.md) ------
+#
+# `depends_on:` is derivation, not association — it lands in the `edges` table
+# CASCADE_CTE walks (memsom.derive_node/revoke_cascade/mark_stale_cascade),
+# NOT rel_edges. parent = the depended-on fact's live node, child = the
+# dependent fact's live node. Five behaviors, each regression-tested below.
+
+GPU_FACT = (
+    "---\n"
+    "name: fact-pc-gpu\n"
+    "type: fact\n"
+    "value: RTX 5070\n"
+    "last-verified: 2026-07-14\n"
+    "section: Facts\n"
+    "---\n"
+    "GPU note.\n"
+)
+
+TOKSPS_FACT = (
+    "---\n"
+    "name: fact-5070-toksps\n"
+    "type: fact\n"
+    "value: 61\n"
+    "unit: tok/s\n"
+    "last-verified: 2026-07-14\n"
+    "depends_on: fact_pc_gpu\n"
+    "section: Facts\n"
+    "---\n"
+    "Throughput note.\n"
+)
+
+
+class TestFactDependencyCascade(Base):
+    def _write_gpu_toksps(self):
+        (self.mem / "fact_pc_gpu.md").write_text(GPU_FACT, encoding="utf-8")
+        (self.mem / "fact_5070_toksps.md").write_text(TOKSPS_FACT, encoding="utf-8")
+
+    def _edge_exists(self, child, parent):
+        return self.conn.execute(
+            "SELECT 1 FROM edges WHERE child = ? AND parent = ?", (child, parent)
+        ).fetchone() is not None
+
+    # --- Behavior 1: depends_on creates the edge; idempotent ------------------
+
+    def test_depends_on_creates_edge_and_is_idempotent(self):
+        self._write_gpu_toksps()
+        stats = bi.import_all(self.conn, self.mem, dry_run=False)["fact_edges"]
+        self.assertEqual(stats["resolved"], 1)
+        self.assertEqual(stats["unresolved"], 0)
+
+        gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+        toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+        self.assertTrue(self._edge_exists(toksps, gpu))
+
+        n_before = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        stats2 = bi.import_all(self.conn, self.mem, dry_run=False)["fact_edges"]
+        n_after = self.conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        self.assertEqual(n_before, n_after)   # re-import, no change -> creates nothing
+        self.assertEqual(stats2["resolved"], 1)  # still resolves; just no new row
+
+    # --- Behavior 2: supersede rewires edges, both as parent and as child -----
+
+    def test_supersede_of_depended_on_fact_rewires_parent_edge(self):
+        """The depended-on fact (GPU) changes value -> new live node; the
+        dependent must be reachable from the NEW parent via cascade_set (the
+        same CASCADE_CTE walk mark_stale_cascade/revoke_cascade use)."""
+        self._write_gpu_toksps()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        old_gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+
+        (self.mem / "fact_pc_gpu.md").write_text(
+            GPU_FACT.replace("RTX 5070", "RTX 5090"), encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+
+        new_gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+        toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+        self.assertNotEqual(new_gpu, old_gpu)
+        self.assertEqual(memsom.get_node(self.conn, old_gpu)["tombstoned"], 1)
+
+        descendants = {r[0] for r in memsom.cascade_set(self.conn, new_gpu)}
+        self.assertIn(toksps, descendants)
+
+    def test_supersede_of_dependent_fact_rewires_child_edge(self):
+        """The dependent fact (TPS reading) itself gets a fresh value -> new
+        live node; the (unchanged) parent must reach the NEW child, not the
+        stale predecessor."""
+        self._write_gpu_toksps()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+        old_toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+
+        (self.mem / "fact_5070_toksps.md").write_text(
+            TOKSPS_FACT.replace("value: 61", "value: 68"), encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+
+        new_toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+        self.assertNotEqual(new_toksps, old_toksps)
+
+        descendants = {r[0] for r in memsom.cascade_set(self.conn, gpu)}
+        self.assertIn(new_toksps, descendants)
+
+    # --- Behavior 3: missing target defers, resolves once it arrives ----------
+
+    def test_missing_dependency_target_defers_then_resolves(self):
+        (self.mem / "fact_5070_toksps.md").write_text(TOKSPS_FACT, encoding="utf-8")
+        # fact_pc_gpu.md does not exist yet -> depends_on target is unresolved,
+        # never a crash.
+        stats = bi.import_all(self.conn, self.mem, dry_run=False)["fact_edges"]
+        self.assertEqual(stats["unresolved"], 1)
+        self.assertEqual(stats["resolved"], 0)
+        toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE child = ?", (toksps,)).fetchone()[0], 0)
+
+        # the target arrives on a later run -> picked up automatically
+        (self.mem / "fact_pc_gpu.md").write_text(GPU_FACT, encoding="utf-8")
+        stats2 = bi.import_all(self.conn, self.mem, dry_run=False)["fact_edges"]
+        self.assertEqual(stats2["resolved"], 1)
+        self.assertEqual(stats2["unresolved"], 0)
+        gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+        self.assertTrue(self._edge_exists(toksps, gpu))
+
+    # --- Behavior 4: deleting the fact FILE stales dependents, never tombstones them
+
+    def test_deleted_fact_file_marks_dependent_stale_not_tombstoned(self):
+        self._write_gpu_toksps()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        gpu = bi._live_node_for_path(self.conn, "fact_pc_gpu.md")[0]
+        toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+
+        (self.mem / "fact_pc_gpu.md").unlink()
+        stats = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(stats["swept"], 1)
+        self.assertGreater(stats["stale_cascaded"], 0)
+
+        gpu_row = self.conn.execute(
+            "SELECT tombstoned, stale FROM nodes WHERE id = ?", (gpu,)).fetchone()
+        self.assertEqual(gpu_row[0], 1)          # GPU fact retired (tombstoned)
+
+        toksps_row = self.conn.execute(
+            "SELECT tombstoned, stale FROM nodes WHERE id = ?", (toksps,)).fetchone()
+        self.assertEqual(toksps_row[0], 0)       # dependent stays LIVE
+        self.assertEqual(toksps_row[1], 1)       # ...flagged stale for reverification
+
+    def test_sweep_of_unrelated_file_does_not_stale_unrelated_facts(self):
+        """A deleted memory file nothing depends_on cascades no further than
+        itself — no unrelated fact goes stale as a side effect."""
+        self._write_gpu_toksps()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        toksps = bi._live_node_for_path(self.conn, "fact_5070_toksps.md")[0]
+
+        (self.mem / "project_kali.md").unlink()   # unrelated; nothing depends on it
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+
+        toksps_row = self.conn.execute(
+            "SELECT stale FROM nodes WHERE id = ?", (toksps,)).fetchone()
+        self.assertEqual(toksps_row[0], 0)
+
+    # --- Behavior 5: a depends_on cycle must not hang or crash -----------------
+
+    def test_dependency_cycle_does_not_hang(self):
+        (self.mem / "fact_a.md").write_text(
+            "---\nname: fact-a\ntype: fact\nvalue: 1\ndepends_on: fact_b\n"
+            "section: Facts\n---\nA.\n", encoding="utf-8")
+        (self.mem / "fact_b.md").write_text(
+            "---\nname: fact-b\ntype: fact\nvalue: 2\ndepends_on: fact_a\n"
+            "section: Facts\n---\nB.\n", encoding="utf-8")
+
+        stats = bi.import_all(self.conn, self.mem, dry_run=False)["fact_edges"]
+        self.assertEqual(stats["resolved"], 2)
+        self.assertEqual(stats["unresolved"], 0)
+
+        a = bi._live_node_for_path(self.conn, "fact_a.md")[0]
+        b = bi._live_node_for_path(self.conn, "fact_b.md")[0]
+
+        # CASCADE_CTE already dedupes cycles (UNION, not UNION ALL) - exercised
+        # here through the depends_on-populated edges table specifically.
+        descendants = {r[0] for r in memsom.cascade_set(self.conn, a)}
+        self.assertEqual(descendants, {a, b})
+
+        from memsom.integrity import stale as memsom_stale
+        n = memsom_stale.mark_stale_cascade(self.conn, a, "cycle test")
+        self.assertEqual(n, 2)   # both a and b marked stale; no infinite loop
 
 
 if __name__ == "__main__":

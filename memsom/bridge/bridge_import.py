@@ -52,6 +52,7 @@ CHANNEL_BY_TYPE = {
     "feedback": "endorsed",
     "project": "user",
     "reference": "user",
+    "fact": "user",  # fact layer (docs/facts-design.md): demotable, earns keep by being referenced
 }
 DEFAULT_CHANNEL = "user"  # unknown/untyped memory -> user-grade, demotable
 
@@ -429,16 +430,104 @@ def relate_wikilinks(conn, memory_dir, *, dry_run: bool = True) -> dict:
     return stats
 
 
+def relate_fact_deps(conn, memory_dir, *, dry_run: bool = True) -> dict:
+    """Pass 2b: materialise fact ``depends_on:`` into the ``edges`` DAG (Phase 1).
+
+    docs/facts-design.md ("Dependencies and cascade"): depends_on expresses
+    real derivation ("this measurement is only true because of that
+    hardware"), NOT association — so unlike relate_wikilinks (which fills
+    rel_edges), this fills the SAME ``edges`` table CASCADE_CTE walks: the
+    revoke/stale derivation DAG memsom.derive_node also writes. parent = the
+    depended-on fact's live node, child = the dependent fact's live node.
+
+    ``depends_on:`` values are filename stems, resolved via the identical
+    _build_resolver/_resolve_target the wikilink pass uses (per the Phase 0
+    "Verified" note: the stem, NOT the ``name:`` kebab slug) — comma/space
+    separated for more than one dependency.
+
+    Every call re-derives ALL depends_on edges from the CURRENT frontmatter
+    against the CURRENT live nodes — not just files that changed this run —
+    exactly like relate_wikilinks. That is what makes a supersede (spec
+    Behavior 2) "rewire" for free: whichever endpoint (parent OR child) just
+    rolled over to a new node id, the next call resolves that stem to its
+    CURRENT live node and inserts the correct fresh edge; the edge row still
+    pointing at the now-tombstoned predecessor is simply never re-derived and
+    stays dormant (never traversed — every CASCADE_CTE walk in this codebase
+    is seeded from a live id), the same fate relate_wikilinks leaves orphaned
+    rel_edges rows to.
+
+    Idempotent: edges' PK is (child, parent) and every insert is OR IGNORE.
+    A ``depends_on:`` target with no live node yet (not written, or not
+    imported this run) is counted "unresolved", never an error — Behavior 3,
+    picked up automatically the next time this runs after the target exists.
+    Self-deps are counted "skipped_self", not inserted.
+    """
+    from memsom.bridge import obsidian as memsom_obsidian
+
+    memory_dir = Path(memory_dir)
+    stats = {"edges": 0, "resolved": 0, "unresolved": 0, "skipped_self": 0}
+
+    files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
+    by_name, by_relpath = memsom_obsidian._build_resolver([p.name for p in files])
+
+    # Pass A: parse every file's depends_on (comma/space-separated stems).
+    fact_deps = {}
+    for path in files:
+        fm = fm_top_level(split_frontmatter(path.read_text(encoding="utf-8"))[0])
+        raw = (fm.get("depends_on") or "").strip()
+        if not raw:
+            continue
+        seen, targets = set(), []
+        for tok in re.split(r"[,\s]+", raw):
+            if tok and tok not in seen:
+                seen.add(tok)
+                targets.append(tok)
+        if targets:
+            fact_deps[path.name] = targets
+
+    # Pass B: resolve each target to a LIVE node and materialise the edge.
+    for child_rel, targets in fact_deps.items():
+        child_row = _live_node_for_path(conn, child_rel)
+        if child_row is None:
+            continue  # this file has no live node yet (e.g. dry-run on an empty DB)
+        child = child_row[0]
+        for tgt in targets:
+            parent_rel = memsom_obsidian._resolve_target(tgt, by_name, by_relpath)
+            if parent_rel is None:
+                stats["unresolved"] += 1
+                continue
+            parent_row = _live_node_for_path(conn, parent_rel)
+            if parent_row is None:
+                stats["unresolved"] += 1
+                continue
+            parent = parent_row[0]
+            if parent == child:
+                stats["skipped_self"] += 1
+                continue
+            stats["resolved"] += 1
+            if dry_run:
+                continue
+            with conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO edges(child, parent) VALUES (?, ?)",
+                    (child, parent))
+            stats["edges"] += 1
+
+    return stats
+
+
 def import_all(conn, memory_dir, *, dry_run: bool = True) -> dict:
     """Import the per-file memories, the literal index lines, then wire edges.
 
-    Order matters: relate_wikilinks runs LAST so every file already has a live
-    node to point an edge at (Pass 2, exactly as memsom_obsidian sequences it).
+    Order matters: relate_wikilinks / relate_fact_deps run LAST so every file
+    already has a live node to point an edge at (Pass 2, exactly as
+    memsom_obsidian sequences it).
     """
     files = import_memory_dir(conn, memory_dir, dry_run=dry_run)
     lits = import_literals(conn, memory_dir, dry_run=dry_run)
     edges = relate_wikilinks(conn, memory_dir, dry_run=dry_run)
-    return {"files": files, "literals": lits, "edges": edges}
+    fact_edges = relate_fact_deps(conn, memory_dir, dry_run=dry_run)
+    return {"files": files, "literals": lits, "edges": edges, "fact_edges": fact_edges}
 
 
 # --- DB helpers ---------------------------------------------------------------
@@ -484,7 +573,11 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     """Import every memory/*.md (excluding MEMORY.md) into memsom.
 
     Returns stats: {total_files, created, updated, skipped, tombstoned}.
-    Atomic: all writes happen in one transaction (or none, if dry_run).
+    Atomic: all writes happen in one transaction (or none, if dry_run) — with
+    ONE exception: if the reconcile-deletion sweep tombstones a fact node this
+    run, the Behavior-4 stale cascade for its dependents (docs/facts-design.md)
+    runs in its own follow-up transaction(s) immediately after, once the sweep
+    above has already committed (see the comment at the call site).
     """
     memory_dir = Path(memory_dir)
     if not memory_dir.is_dir():
@@ -496,7 +589,8 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
     files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
     stats = {"total_files": len(files), "created": 0, "updated": 0,
-             "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0}
+             "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0,
+             "stale_cascaded": 0}
 
     # Mass-wipe guard: importing a directory with ZERO memory files while the
     # store holds live memory nodes would make the reconcile sweep below (and
@@ -515,6 +609,12 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 f"files but the store has {live} live memory node(s) — the "
                 f"reconcile sweep would tombstone all of them. Wrong directory? "
                 f"Set MEMDAG_BRIDGE_MEMORY_DIR to the real memory dir.")
+
+    # (nid, opath) tombstoned by the reconcile-deletion sweep below, THIS run.
+    # Behavior 4 (docs/facts-design.md) cascades stale from these AFTER the
+    # sweep's own transaction commits — see the comment at the bottom of this
+    # function for why it must not run nested inside it.
+    swept_ids = []
 
     def _do():
         for path in files:
@@ -628,6 +728,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                     "WHERE id = ?",
                     (memsom.now_iso(), "source file removed (bridge reconcile)", nid),
                 )
+                swept_ids.append((nid, opath))
 
     if dry_run:
         _do()
@@ -636,6 +737,30 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             _do()
+
+        # Behavior 4 (docs/facts-design.md): a swept node may be a fact other
+        # facts depends_on. Its dependents must go STALE, never revoked or
+        # tombstoned again — "selling the GPU retires the GPU fact and
+        # *questions* the TPS fact; it does not destroy it." mark_stale_cascade
+        # walks the SAME edges table relate_fact_deps materialised (parent =
+        # this swept node), so sweeping a node nothing depends_on is a no-op
+        # cascade beyond marking itself stale too (harmless — stale and
+        # tombstoned are orthogonal flags; see memsom.integrity.stale's
+        # module docstring).
+        #
+        # This MUST run after the sweep's own transaction above has already
+        # committed: mark_stale_cascade opens its own `with conn:` block, and
+        # nesting that inside the still-open BEGIN IMMEDIATE would let
+        # sqlite3's commit-on-`with`-exit end the outer transaction early,
+        # silently breaking this function's documented atomicity (the same
+        # reason memsom_ingest.ingest_text fires on_reingest_supersede only
+        # AFTER its own node-insert `with conn:` block has exited).
+        if swept_ids:
+            from memsom.integrity import stale as memsom_stale
+            for nid, opath in swept_ids:
+                stats["stale_cascaded"] += memsom_stale.mark_stale_cascade(
+                    conn, nid, f"dependency retired: source file removed ({opath})")
+
     return stats
 
 
@@ -678,6 +803,9 @@ def _print_stats(stats, dry_run):
     if f.get("refused_resurrect"):
         print(f"  RESURRECT BLK  : {f['refused_resurrect']} (redacted node's file "
               f"resurfaced -> refused + file unlinked)")
+    if f.get("stale_cascaded"):
+        print(f"  stale cascaded : {f['stale_cascaded']} node(s) (dependents of a "
+              f"deleted fact — docs/facts-design.md Behavior 4)")
     print(f"  literals       : {l['total']} total | {l['created']} created | "
           f"{l['skipped']} skipped | {l['tombstoned']} tombstoned")
     e = stats.get("edges")
@@ -685,6 +813,11 @@ def _print_stats(stats, dry_run):
         verb = "would relate" if dry_run else "created"
         print(f"  wikilink edges : {e['edges']} {verb} | {e['resolved']} resolved | "
               f"{e['unresolved']} unresolved | {e['skipped_self']} self-links skipped")
+    fe = stats.get("fact_edges")
+    if fe is not None:
+        verb = "would create" if dry_run else "created"
+        print(f"  fact deps      : {fe['edges']} {verb} | {fe['resolved']} resolved | "
+              f"{fe['unresolved']} unresolved | {fe['skipped_self']} self-deps skipped")
 
 
 def _cmd_import(args):
