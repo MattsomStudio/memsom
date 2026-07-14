@@ -133,6 +133,14 @@ def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None):
     if not hook:
         d = fm.get("description", "")
         hook = (d[:70].rstrip() + "…") if len(d) > 71 else d
+    # A fact's hook IS its current value (docs/facts-design.md): the digest is
+    # the always-loaded surface, so the value must be readable without opening
+    # the file. Verified date included — a fact whose freshness you can't see
+    # is a number you can't trust.
+    if (fm.get("type") or "").strip() == "fact" and fm.get("value") is not None:
+        val = f"{fm['value']} {fm['unit']}" if fm.get("unit") else str(fm["value"])
+        lv = fm.get("last-verified")
+        hook = f"{val} (verified {lv})" if lv else val
     return {"kind": "file", "section": section, "stem": stem,
             "name": name, "desc": hook,
             "pinned": channel == "endorsed", "tier": tier or "hot",
@@ -200,6 +208,16 @@ def render_digest(conn, *, title=None, budget=BUDGET):
     """Render the MEMORY.md digest string from the live bridge nodes."""
     title = title or os.environ.get("MEMDAG_DIGEST_TITLE", DEFAULT_TITLE)
     hot = _select_hot([_entry(*r) for r in _rows(conn)])
+    # Read-time fact resolution (docs/facts-design.md Phase 2): substitute
+    # [[fact_*]] in hooks and literal lines with the CURRENT value. Must happen
+    # BEFORE the budget loop below — resolved values change line length, and
+    # eviction has to see the real rendered sizes, not the placeholder's.
+    from memsom.bridge import facts as memsom_facts
+    for e in hot:
+        if e["kind"] == "literal":
+            e["line"] = memsom_facts.resolve_fact_refs(conn, e["line"])
+        elif e.get("desc"):
+            e["desc"] = memsom_facts.resolve_fact_refs(conn, e["desc"])
     # droppable = non-pinned user files, lowest RS first (dropped in THIS order)
     droppable = sorted([e for e in hot if e["kind"] == "file" and not e["pinned"]],
                        key=lambda e: (e["rs"] if e["rs"] is not None else 0.0))

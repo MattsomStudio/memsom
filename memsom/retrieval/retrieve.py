@@ -778,9 +778,19 @@ def _cmd_retrieve(args):
         if not results:
             print("[memsom-retrieve] no results")
             return
+        from memsom.bridge import facts as memsom_facts
         for row in results:
             nid, content, channel, label, source_ref = row
             ref = source_ref or "(stated directly)"
+            # Read-time fact resolution (docs/facts-design.md Phase 3): current
+            # value, with drift shown against the version live when this memory
+            # was written (as_of = the memory's created_at). Resolve BEFORE
+            # snippet() so truncation can't cut a substituted value in half.
+            if "[[fact_" in (content or ""):
+                created = conn.execute(
+                    "SELECT created_at FROM nodes WHERE id = ?", (nid,)).fetchone()
+                content = memsom_facts.resolve_fact_refs(
+                    conn, content, as_of=created[0] if created else None)
             print(f"[{nid}] {channel:<13} integrity={memsom.NAME[label]:<13} {ref}")
             print(f'      "{memsom.snippet(content)}"')
     finally:
