@@ -35,6 +35,7 @@ from pathlib import Path
 import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, parse_index_entries, parse_primary_index, default_memory_dir
+from memsom.lifecycle import forget as _forget
 
 # Default section display order. Carries no user-specific taxonomy so the shipped
 # module is identity-free; override with a comma-separated $MEMDAG_DIGEST_SECTIONS.
@@ -50,7 +51,20 @@ SECTIONS = [
     "References",
     "Feedback",
 ]
-BUDGET = 16384
+BUDGET = 16384  # hard-fallback cap; live value = `memory_budget` in the store's
+#                 canonical.json params (resolve_budget below / forget.load_params)
+
+
+def resolve_budget(memory_dir):
+    """The live byte cap for MEMORY.md: `memory_budget` from the store's
+    canonical.json params, falling back to BUDGET when absent/invalid.  Resolved
+    at call time — never bound into a signature default."""
+    try:
+        params, _ = _forget.load_params(
+            Path(memory_dir) / ".weights" / "canonical.json")
+        return int(params["memory_budget"])
+    except Exception:
+        return BUDGET
 # Content floor (fail-safe): a render that keeps fewer than this fraction of the
 # PRIOR MEMORY.md's index entries is rejected — a collapse that large means the
 # store is wrong (empty/mispointed), not that the brain legitimately halved
@@ -204,8 +218,10 @@ def _assemble(title, entries, *, include_reverify=True):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_digest(conn, *, title=None, budget=BUDGET):
+def render_digest(conn, *, title=None, budget=None):
     """Render the MEMORY.md digest string from the live bridge nodes."""
+    if budget is None:
+        budget = BUDGET
     title = title or os.environ.get("MEMDAG_DIGEST_TITLE", DEFAULT_TITLE)
     hot = _select_hot([_entry(*r) for r in _rows(conn)])
     # Read-time fact resolution (docs/facts-design.md Phase 2): substitute
@@ -256,7 +272,7 @@ def _entry_counts(text):
     return len(files), literals
 
 
-def validate(conn, *, budget=BUDGET, title=None, prior_text=None):
+def validate(conn, *, budget=None, title=None, prior_text=None):
     """Export-boundary check: the digest must render, be non-empty, and fit budget.
 
     This is the Phase-6 cutover PRE-FLIGHT: the hook renders + validates, and only
@@ -271,6 +287,8 @@ def validate(conn, *, budget=BUDGET, title=None, prior_text=None):
     on-disk MEMORY.md) is supplied, a render that keeps less than the shrink
     floor's fraction of the prior entries is rejected too — a stale-but-intact
     brain beats a freshly-blanked one every time."""
+    if budget is None:
+        budget = BUDGET
     try:
         text = render_digest(conn, title=title, budget=budget)
     except DigestTooLarge as exc:
@@ -308,7 +326,9 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memsom.md", title=None):
 
     Never touches the real MEMORY.md.  Returns (path, text).
     """
-    text = render_digest(conn, title=title)
+    # Same live budget the real render uses — otherwise the shadow trims (or
+    # doesn't) against a different cap than the status line reports.
+    text = render_digest(conn, title=title, budget=resolve_budget(memory_dir))
     path = Path(memory_dir) / name
     # write_bytes (not write_text): keep LF on Windows so the on-disk size matches
     # the budget accounting and the file's line endings match the original.
@@ -316,7 +336,7 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memsom.md", title=None):
     return path, text
 
 
-def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=BUDGET):
+def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
     """CUTOVER write: validate, then overwrite the REAL MEMORY.md ONLY if valid.
 
     Fail-safe, never fail-open: on ANY validation problem the existing file is left
@@ -324,7 +344,12 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=BUDGET)
     blank or truncate the always-on brain.  On success writes atomically (tmp +
     replace) and returns (True, {"bytes", "path"}).  This is what the Phase-6 Stop
     hook calls; until that hook is wired, nothing invokes it.
+
+    budget=None resolves the live `memory_budget` from this store's canonical.json
+    (falling back to BUDGET) — callers that already loaded params pass it in.
     """
+    if budget is None:
+        budget = resolve_budget(memory_dir)
     path = Path(memory_dir) / name
     prior_text = None
     if path.exists():
@@ -389,7 +414,7 @@ def _cmd_shadow(args):
         mem = Path(args.memory_dir) if args.memory_dir else default_memory_dir()
         path, text = write_shadow(conn, mem)
         size = len(text.encode("utf-8"))
-        print(f"[digest] wrote shadow {path} ({size} / {BUDGET} bytes)")
+        print(f"[digest] wrote shadow {path} ({size} / {resolve_budget(mem)} bytes)")
         real = mem / "MEMORY.md"
         if real.exists():
             diffs = compare_index(real.read_text(encoding="utf-8"), text)

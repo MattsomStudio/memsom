@@ -73,6 +73,7 @@ from memsom.bridge import claude as memsom_claude
 from memsom.bridge import wire_claude as memsom_wire_claude
 from memsom.interface import audit as memsom_audit
 from memsom.interface import dashboard as memsom_dashboard
+from memsom.interface import panel as memsom_panel
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.integrity import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
@@ -658,6 +659,7 @@ def main(argv=None):
     memsom_wire_claude.register(sub)
     memsom_audit.register(sub)
     memsom_dashboard.register(sub)
+    memsom_panel.register(sub)
     memsom_tombstone.register(sub)
     memsom_contradict.register(sub)
     memsom_facts.register(sub)

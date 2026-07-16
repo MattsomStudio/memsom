@@ -54,8 +54,14 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     bi.migrate(conn)
     forget.migrate(conn)
     bi.import_all(conn, memory_dir, dry_run=False)
-    usage = Path(memory_dir) / ".weights" / "usage"
-    forget.recompute_forget(conn, usage_dir=str(usage))
+    weights = Path(memory_dir) / ".weights"
+    # Runtime tunables: the same canonical.json the original mem_weights.py
+    # maintains.  This is what makes panel-written params live — the render pass
+    # actually computes with them.  Warnings are logged HERE (forget never prints).
+    params, param_warnings = forget.load_params(weights / "canonical.json")
+    for w in param_warnings:
+        print(f"[bridge] tunables: {w}")
+    forget.recompute_forget(conn, usage_dir=str(weights / "usage"), params=params)
 
     if not render:
         return {"rendered": False, "reason": "non-author (MEMDAG_BRIDGE_AUTHOR=0)"}
@@ -73,7 +79,10 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     except Exception as exc:  # staleness is advisory — never block the render
         print(f"[bridge] verify-stale skipped: {exc!r}")
 
-    ok, info = digest.write_live(conn, str(memory_dir))
+    # Budget comes from the same loaded params (memory_budget) so one knob write
+    # moves the render threshold and the digest cap together, atomically.
+    ok, info = digest.write_live(conn, str(memory_dir),
+                                 budget=params["memory_budget"])
 
     # Keep the CLAUDE.md managed block current in the same pass (idempotent: a
     # second run is a no-op). Best-effort — a CLAUDE.md problem must never stop the

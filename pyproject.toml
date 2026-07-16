@@ -45,6 +45,12 @@ dependencies = []
 # is known to accept. Bump only after re-testing.
 bge = ["FlagEmbedding>=1.4.0"]
 
+# Panel server system-telemetry module (memsom.interface.telemetry): per-process
+# RAM/GPU sampling needs psutil. Opt-in ONLY — the core stays zero-dependency and
+# the telemetry module degrades its psutil-backed sections gracefully when this
+# extra isn't installed (see memsom/interface/telemetry.py).
+panel = ["psutil>=7"]
+
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"
 

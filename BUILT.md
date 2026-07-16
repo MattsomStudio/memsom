@@ -541,3 +541,38 @@ store — was unit-tested for `redact` alone. Closed both ends:
 | tests/test_bench_smoke.py (new) | 2 (compile-only) |
 
 Full suite after: **994 tests, 0 failures**.
+
+## 2026-07-16 — live tuning + telemetry panel (`memsom panel`)
+
+- **Runtime params, wired for real** — `forget.load_params()` reads the store's
+  `.weights/canonical.json` `params` block per run (tolerant merge over the
+  golden DEFAULTS; degenerate values rejected with warnings logged by the
+  bridge, never by the library). `bridge-render` now computes the forgetting
+  pass with them, and the MEMORY.md byte budget became a 14th param
+  (`memory_budget`, in `PANEL_PARAM_DEFAULTS` — never in the parity-pinned
+  DEFAULTS dict). `digest`/`audit`/`dashboard` all resolve the budget from the
+  same file: the hand-synced copies are gone.
+- **`memsom.interface.panel`** — loopback-only stdlib HTTP server (hard bind
+  refusal, Host allowlist, JSON+Origin CSRF checks, sha256-pinned inline
+  script, `default-src 'none'` CSP) serving live memory telemetry, system
+  telemetry, and a three-tier knob UI. Four providers: canonical params,
+  JSON key-paths, `set KEY=VALUE` env files, scheduled-task cadences (write
+  degrades to a copyable elevated command when the token can't). Bounds
+  validation rejects — never clamps. Two-phase JSONL audit log; a pending
+  intent line with no result line is surfaced as a crash marker.
+- **`memsom.interface.telemetry`** — request-time sampling: commit charge via
+  `GetPerformanceInfo` (Task-Manager-exact) split from working set, GPU via
+  nvidia-smi ([N/A] rows dropped), disk growth deltas (in-process only), TCP
+  service probes (never ICMP), Syncthing REST (API key read per-request from
+  config.xml, never stored/returned). psutil is the `panel` optional extra;
+  core stays zero-dependency.
+- Host-specific knob inventories live in a host profile JSON passed via
+  `--profile` — machine paths/task names never enter the repo.
+
+| Test file                        | New tests |
+|----------------------------------|-----------|
+| tests/test_forget_params.py (new)| 13 |
+| tests/test_memsom_forget.py      | +6 (param-override parity, plumbing) |
+| tests/test_panel_telemetry.py (new)| 22 |
+| tests/test_panel_knobs.py (new)  | 44 |
+| tests/test_panel_server.py (new) | 26 |

@@ -282,7 +282,73 @@ def _stem_of(source_ref):
     return source_ref
 
 
-def build_inventory(conn):
+# --- runtime tunables --------------------------------------------------------- #
+
+# Panel-layer params that ride in canonical.json's `params` block alongside the
+# 13 compute params but are NOT part of the golden compute contract.  Kept out of
+# DEFAULTS: test_memsom_forget.TestParity asserts DEFAULTS == mem_weights.DEFAULTS
+# byte-for-byte, and the original knows nothing about the digest budget.
+PANEL_PARAM_DEFAULTS = {"memory_budget": 16384}
+
+
+def _param_ok(key, v):
+    """True if *v* is sane for *key*.  Only degenerate, compute-breaking values
+    are rejected here (fall back to the key's default); richer bounds belong to
+    the panel's write-side validation."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if key == "decay_base":
+        return 0 < v <= 1
+    if key in ("rs_cap", "ss_cap", "rs_seed"):
+        return v > 0
+    if key == "salience_default":
+        return 0 <= v <= 1
+    if key == "memory_budget":
+        return v >= 1024
+    return v >= 0  # gains, floors, thresholds, grace_days, decay_k, mig_k
+
+
+def load_params(params_path):
+    """Read the `params` block of a store's canonical.json (the same file the
+    original mem_weights.py maintains) merged over DEFAULTS + PANEL_PARAM_DEFAULTS.
+
+    Tolerant by contract: an absent/corrupt file, unknown keys (legacy cruft), or
+    degenerate values never raise — bad values fall back to that key's default.
+    Returns ``(params, warnings)``: warnings are strings for the CALLER to log
+    (library discipline: this module never prints).
+    """
+    params = {**DEFAULTS, **PANEL_PARAM_DEFAULTS}
+    warnings = []
+    path = Path(params_path) if params_path else None
+    if not path or not path.is_file():
+        return params, warnings
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = data.get("params", {}) if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        warnings.append(
+            f"canonical.json unreadable ({exc.__class__.__name__}); using default params")
+        return params, warnings
+    if not isinstance(raw, dict):
+        warnings.append("canonical.json 'params' is not an object; using default params")
+        return params, warnings
+    for key, v in raw.items():
+        if key not in params:
+            continue  # unknown/legacy keys (pre-rename cruft) are ignored, not merged
+        if _param_ok(key, v):
+            params[key] = v
+        else:
+            warnings.append(
+                f"param {key}={v!r} rejected (degenerate); using default {params[key]}")
+    if params["ss_floor"] > params["ss_cap"]:
+        warnings.append(
+            f"param ss_floor={params['ss_floor']} > ss_cap={params['ss_cap']}; "
+            "ss_floor reset to default")
+        params["ss_floor"] = DEFAULTS["ss_floor"]
+    return params, warnings
+
+
+def build_inventory(conn, params=None):
     """Return (mems, canon, node_by_stem) from the live bridge nodes.
 
     mems / canon are shaped exactly as compute() expects, so the ported pure
@@ -309,7 +375,11 @@ def build_inventory(conn):
         st = {"tier": tier}
         if rs is not None:
             st["rs"] = rs
-            st["ss"] = ss if ss is not None else DEFAULTS["ss_floor"]
+            if ss is not None:
+                st["ss"] = ss
+            # ss stays absent when the column is NULL: _seed_rs_ss then applies
+            # p["ss_floor"], so an overridden floor reaches legacy rows exactly
+            # the way mem_weights does (st.get("ss", p["ss_floor"])).
         if cnt is not None:
             st["count"] = cnt
         if fseen:
@@ -320,7 +390,8 @@ def build_inventory(conn):
             st["index_line"] = stem  # synthetic had_stash (see docstring)
         memories[stem] = st
     canon = {"version": 1, "updated": _get_updated(conn),
-             "params": dict(DEFAULTS), "memories": memories}
+             "params": dict(params) if params else dict(DEFAULTS),
+             "memories": memories}
     return mems, canon, node_by_stem
 
 
@@ -366,16 +437,18 @@ def fix_pins(conn):
 
 
 def recompute_forget(conn, *, usage_dir=None, events=None, now=None,
-                     stale=None, dry_run=False):
+                     stale=None, dry_run=False, params=None):
     """One decay+reinforce pass over all bridge memories; writes RS/SS/tier back
     to node columns.  Returns the list of promote/demote actions.
 
     `events` (pre-built {stem: [(ts, hits)]}) wins; else read from `usage_dir`;
-    else no reinforcement (pure decay).  Single-writer discipline: run this
-    PC-only (mirrors mem_reconcile's Sunday cadence) so a synced DB never has two
-    authorities racing the same rows.
+    else no reinforcement (pure decay).  `params` (a dict from ``load_params``)
+    overrides the compute defaults; None keeps DEFAULTS — so existing callers and
+    stores without a canonical.json behave exactly as before.  Single-writer
+    discipline: run this PC-only (mirrors mem_reconcile's Sunday cadence) so a
+    synced DB never has two authorities racing the same rows.
     """
-    mems, canon, node_by_stem = build_inventory(conn)
+    mems, canon, node_by_stem = build_inventory(conn, params=params)
     if events is None:
         events = read_usage_events(usage_dir, after_ts=canon["updated"])
     new, actions = compute(canon, mems, events, now=now, stale=stale)

@@ -32,8 +32,10 @@ import sys
 from pathlib import Path
 
 from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, parse_primary_index, default_memory_dir
+from memsom.distill.digest import resolve_budget
 
-BUDGET = 16384
+BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
+#                 (`memory_budget` in the store's canonical.json params)
 VALID_TYPES = {"user", "personal", "feedback", "project", "reference"}
 # IGNORECASE so detection mirrors the case-folding resolver (_norm); otherwise an
 # uppercase target like [[ADHD]] with no match would silently never be flagged.
@@ -156,12 +158,13 @@ def run_audit(mem_dir):
         findings.append(_F("broken-wikilink", "INFO", tgt,
                            f"[[{tgt}]] has no target (referenced by {len(srcs)}: {ex})"))
 
-    # budget
+    # budget (live cap from canonical.json params, falling back to BUDGET)
     if memory_md.exists():
         size = memory_md.stat().st_size
-        if size > BUDGET:
+        cap = resolve_budget(mem_dir)
+        if size > cap:
             findings.append(_F("budget-breach", "WARN", "MEMORY.md",
-                               f"{size} bytes > {BUDGET} cap (over by {size - BUDGET})"))
+                               f"{size} bytes > {cap} cap (over by {size - cap})"))
 
     return findings, files, (md_text, db_ok)
 
@@ -174,9 +177,10 @@ SEV_MARK = {"ERROR": "x ERROR", "WARN": "! WARN ", "INFO": ". INFO "}
 def print_report(findings, files, mem_dir, md_text):
     memory_md = Path(mem_dir) / "MEMORY.md"
     sz = memory_md.stat().st_size if memory_md.exists() else 0
+    cap = resolve_budget(mem_dir)
     print(f"\n  memsom audit — {mem_dir}")
-    print(f"  {len(files)} memories | MEMORY.md {sz}/{BUDGET} bytes "
-          f"(headroom {BUDGET - sz})\n")
+    print(f"  {len(files)} memories | MEMORY.md {sz}/{cap} bytes "
+          f"(headroom {cap - sz})\n")
     if not findings:
         print("  clean — no structural issues.\n")
         return
@@ -206,7 +210,7 @@ def _cmd_audit(args):
             "mem_dir": str(mem_dir),
             "memories": len(files),
             "memory_md_bytes": sz,
-            "budget": BUDGET,
+            "budget": resolve_budget(mem_dir),
             "findings": findings,
             "errors": sum(1 for f in findings if f["sev"] == "ERROR"),
         }, indent=2))

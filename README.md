@@ -400,6 +400,7 @@ Measured on the standard workload; source cited here.
 | `verify-stale`   | memsom_verify_stale| Flag state-bearing memory notes whose verification age has gone stale |
 | `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only) |
 | `dashboard`      | memsom_dashboard   | Build + open the memory telemetry dashboard (HTML) |
+| `panel`          | memsom_panel       | Live tuning + telemetry panel: loopback-only web UI over runtime params (canonical.json), JSON/env-file knobs, scheduled-task cadences, and system telemetry — bounds-validated writes, JSONL audit log (`--profile <host-profile.json>`) |
 | `tombstone`      | memsom_tombstone   | Sanctioned delete path: revoke a memory's node + remove its file |
 | `tombstone-list` | memsom_tombstone   | List tombstoned memory nodes |
 | `fact-set`       | memsom_facts       | Update a fact file's value + last-verified (the file is the store-of-record) |

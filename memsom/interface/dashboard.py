@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memsom.bridge.bridge_import import default_memory_dir, split_frontmatter, fm_top_level
+from memsom.lifecycle import forget
 
 HOME = Path.home()
 
@@ -41,10 +42,9 @@ def _memsom_db():
     # so $MEMDAG_DB (or a test override) is honored.
     return Path(os.environ.get("MEMDAG_DB") or HOME / ".memdag" / "memdag.db")
 
-# Forgetting-layer thresholds (from mem_weights.py PARAMS) — keep in sync.
-DEMOTE_BELOW = 0.2   # hot -> cold when RS (accessibility) drops under this
-PROMOTE_AT = 0.5     # cold -> hot hysteresis
-MEMORY_BUDGET = 16384  # bytes; /saveall + /audit enforce this cap on MEMORY.md
+# Forgetting-layer thresholds + budget are read LIVE from the store's
+# canonical.json params (forget.load_params) in build_telemetry() — no more
+# hand-synced copies here; absent file -> the same defaults as before.
 
 TYPE_PREFIXES = ("user", "feedback", "project", "personal", "reference")
 
@@ -238,15 +238,18 @@ def build_telemetry():
               "count": r["count"], "tier": r["tier"],
               "age_days": age_days(r)} for r in risk]
 
-    # MEMORY.md budget
+    # MEMORY.md budget + thresholds — live params, same file the panel tunes
     mem_dir = default_memory_dir()
+    params, _ = forget.load_params(
+        (mem_dir / ".weights" / "canonical.json") if mem_dir else None)
     budget = None
     if mem_dir:
         mf = mem_dir / "MEMORY.md"
         if mf.exists():
             size = mf.stat().st_size
-            budget = {"bytes": size, "cap": MEMORY_BUDGET,
-                      "pct": round(100 * size / MEMORY_BUDGET, 1)}
+            cap = params["memory_budget"]
+            budget = {"bytes": size, "cap": cap,
+                      "pct": round(100 * size / cap, 1)}
 
     return {
         "generated": now.strftime("%Y-%m-%d %H:%M UTC"),
@@ -260,7 +263,8 @@ def build_telemetry():
         "stale": stale,
         "budget": budget,
         "sessions": session_count(),
-        "thresholds": {"demote_below": DEMOTE_BELOW, "promote_at": PROMOTE_AT},
+        "thresholds": {"demote_below": params["demote_below"],
+                        "promote_at": params["promote_at"]},
         "graph": build_graph(mem_dir, rows),
     }
 

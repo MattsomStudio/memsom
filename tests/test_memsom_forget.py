@@ -95,6 +95,33 @@ class TestParity(unittest.TestCase):
     def test_defaults_identical(self):
         self.assertEqual(forget.DEFAULTS, self.mw.DEFAULTS)
 
+    def test_compute_identical_under_param_overrides(self):
+        """Parity must hold under non-default params too — the panel makes these
+        live, so a divergence here is a real-world divergence, not theoretical."""
+        import copy
+        canon, mems, events, now = _sample_inputs()
+        canon["params"].update({"decay_base": 0.7, "rs_gain": 0.3, "ss_floor": 0.5,
+                                "demote_below": 0.35, "grace_days": 10})
+        new_a, act_a = forget.compute(copy.deepcopy(canon), mems, events, now=now)
+        new_b, act_b = self.mw.compute(copy.deepcopy(canon), mems, events, now=now)
+        self.assertEqual(new_a, new_b, "ported compute() diverged under param overrides")
+        self.assertEqual(act_a, act_b, "ported actions diverged under param overrides")
+
+
+class TestPanelParamIsolation(unittest.TestCase):
+    """Runs everywhere (no mem_weights needed): the panel-layer params must never
+    bleed into the golden DEFAULTS dict that TestParity pins to the original."""
+
+    def test_panel_params_disjoint_from_defaults(self):
+        overlap = set(forget.PANEL_PARAM_DEFAULTS) & set(forget.DEFAULTS)
+        self.assertEqual(overlap, set(),
+                         "PANEL_PARAM_DEFAULTS must stay out of the golden DEFAULTS")
+
+    def test_load_params_default_shape(self):
+        params, warns = forget.load_params(None)
+        self.assertEqual(warns, [])
+        self.assertEqual(params, {**forget.DEFAULTS, **forget.PANEL_PARAM_DEFAULTS})
+
 
 # --- storage-adapter tests (always run) --------------------------------------
 
@@ -236,6 +263,58 @@ class Adapter(unittest.TestCase):
         forget.recompute_forget(self.conn, dry_run=True)
         self.assertEqual(self.tier_of("project_g"), "hot")  # unchanged
         self.assertIsNone(forget._get_updated(self.conn))
+
+
+class ParamsPlumbing(Adapter):
+    """recompute_forget(params=...) must actually change compute behavior — the
+    end-to-end seam the panel writes through."""
+
+    def test_default_params_when_none(self):
+        self.add_mem("project_p0", "user")
+        _, canon, _ = forget.build_inventory(self.conn)
+        self.assertEqual(canon["params"], dict(forget.DEFAULTS))  # unchanged contract
+
+    def test_params_passthrough_to_canon(self):
+        self.add_mem("project_p1", "user")
+        params, _ = forget.load_params(None)
+        params["demote_below"] = 0.42
+        _, canon, _ = forget.build_inventory(self.conn, params=params)
+        self.assertEqual(canon["params"]["demote_below"], 0.42)
+
+    def test_overridden_demote_below_changes_outcome(self):
+        # old enough to clear grace_days, recently used so RS barely decays:
+        # rs≈0.4 stays hot under the default 0.2 threshold, demotes under 0.5.
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        for stem in ("project_dft", "project_ovr"):
+            self.add_mem(stem, "user",
+                         forget_rs=0.4, forget_ss=0.0,
+                         forget_first_seen=old, forget_last_used=recent,
+                         forget_tier="hot")
+        forget.recompute_forget(self.conn, now=now)  # defaults
+        self.assertEqual(self.tier_of("project_dft"), "hot")
+        params, _ = forget.load_params(None)
+        params["demote_below"] = 0.5
+        forget.recompute_forget(self.conn, now=now, params=params)
+        self.assertEqual(self.tier_of("project_ovr"), "cold")
+
+    def test_null_ss_seeds_from_overridden_floor(self):
+        # forget_ss NULL + overridden ss_floor: the seed path must use the
+        # override (the old code pinned DEFAULTS["ss_floor"] here).
+        now = datetime.now(timezone.utc)
+        recent = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.add_mem("project_ssn", "user",
+                     forget_rs=0.8,
+                     forget_first_seen=recent, forget_last_used=recent,
+                     forget_tier="hot")  # forget_ss stays NULL
+        params, _ = forget.load_params(None)
+        params["ss_floor"] = 0.5
+        forget.recompute_forget(self.conn, now=now, params=params)
+        ss = self.conn.execute(
+            "SELECT forget_ss FROM nodes WHERE source_ref = ?",
+            ("memory:project_ssn",)).fetchone()[0]
+        self.assertAlmostEqual(ss, 0.5, places=3)
 
 
 if __name__ == "__main__":
