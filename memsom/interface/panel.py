@@ -75,6 +75,7 @@ from memsom.providers import handlers as provider_handlers
 from memsom.providers import agent_handlers
 from memsom.providers.agent_store import GraphStore
 from memsom.providers.agents import AgentRunner
+from memsom.providers.schedule import Scheduler
 from memsom.providers.base import run_no_window
 from memsom.providers.session import SessionRunner
 
@@ -1245,6 +1246,9 @@ class PanelConfig:
     # agent orchestration layer (same defaulting rationale)
     graph_store: "GraphStore" = None
     agent_runner: "AgentRunner" = None
+    # scheduler is constructed here but only started by the serve loop (_cmd_panel)
+    # so tests that build_config/build_server never spawn the background thread.
+    scheduler: "Scheduler" = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
@@ -1284,6 +1288,11 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     agent_runner = AgentRunner(agents_dir / "runs", registry,
                                agents_dir / "audit.jsonl")
     agent_runner.reconcile_on_boot()
+    # in-process schedule tick — fires enabled TRIGGER schedules through the same
+    # runner. Constructed always, started only by the serve loop.
+    scheduler = Scheduler(graph_store, agent_runner, registry,
+                          agents_dir / "audit.jsonl",
+                          agents_dir / "scheduler_state.json")
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
@@ -1292,6 +1301,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         agents_cache=agents_cache, memories_cache=memories_cache,
         registry=registry, session_runner=session_runner,
         graph_store=graph_store, agent_runner=agent_runner,
+        scheduler=scheduler,
     )
 
 
@@ -1845,6 +1855,9 @@ def make_handler(config: PanelConfig):
                 self._send_json(st, body)
             elif path == "/api/agents/runs":
                 st, body = agent_handlers.handle_runs_list(config.agent_runner)
+
+            elif path == "/api/agents/scheduler":
+                st, body = agent_handlers.handle_scheduler_status(config.scheduler)
                 self._send_json(st, body)
             else:
                 self._send_json(404, {"error": "not found"})
@@ -2045,11 +2058,15 @@ def _cmd_panel(args):
     print(f"panel: {url}")
     if not args.no_open:
         webbrowser.open(url)
+    if config.scheduler is not None:
+        config.scheduler.start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if config.scheduler is not None:
+            config.scheduler.stop()
         httpd.shutdown()
         httpd.server_close()
     return 0

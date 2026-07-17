@@ -106,3 +106,11 @@ def handle_run_read(runner: AgentRunner, run_id: str, cursor: int) -> tuple:
 
 def handle_runs_list(runner: AgentRunner) -> tuple:
     return 200, {"ok": True, "runs": runner.list_runs()}
+
+
+def handle_scheduler_status(scheduler) -> tuple:
+    """Scheduler liveness + per-graph schedule state for the AGENTS status chip.
+    Defensive against a None scheduler (a hand-built PanelConfig in a test)."""
+    if scheduler is None:
+        return 200, {"ok": True, "running": False, "tick_s": None, "schedules": []}
+    return 200, {"ok": True, **scheduler.status()}
