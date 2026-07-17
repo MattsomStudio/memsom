@@ -18,6 +18,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
+from memsom.providers import oai
 from memsom.providers.base import (
     Capabilities,
     ModelInfo,
@@ -84,6 +85,8 @@ class CodexAdapter(Provider):
         return self._infer_cli(model, messages, params, sink)
 
     def _infer_cli(self, model, messages, params, sink) -> dict:
+        if params.get("tools"):
+            raise ProviderError("custom tools not supported over cli transport")
         argv = [self.cli_path, "exec"]
         if model:
             argv += ["-m", model]
@@ -106,6 +109,12 @@ class CodexAdapter(Provider):
         key = os.environ.get(self.api_key_env)
         if not key:
             raise ProviderError(f"${self.api_key_env} not set")
+        if params.get("tools"):
+            stats = oai.chat_once(self.api_base, model or self.api_model,
+                                  messages, params, sink,
+                                  headers={"Authorization": f"Bearer {key}"})
+            stats["transport"] = "api"
+            return stats
         body = {
             "model": model or self.api_model,
             "messages": messages,

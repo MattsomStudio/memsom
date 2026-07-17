@@ -140,6 +140,8 @@ class OllamaAdapter(Provider):
             options["top_p"] = params["top_p"]
         if params.get("max_tokens"):
             options["num_predict"] = int(params["max_tokens"])
+        if params.get("tools"):
+            return self._infer_tools(model, messages, params, sink, options)
         # /api/chat carries the whole conversation (messages) so multi-turn works
         body = {"model": model, "messages": messages, "stream": True}
         if options:
@@ -175,6 +177,42 @@ class OllamaAdapter(Provider):
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,
                 TimeoutError, json.JSONDecodeError) as exc:
             raise ProviderError(f"ollama inference failed: {exc}") from exc
+        return stats
+
+    def _infer_tools(self, model: str, messages: list, params: dict, sink: Sink,
+                     options: dict) -> dict:
+        """Tool-calling turn — non-streaming /api/chat with ``tools`` in the
+        body (a tool call has no meaningful token stream). The whole reply
+        arrives as one JSON object: the final text (if any) goes to *sink* as
+        ONE token, and tool calls come back canonically in
+        ``stats["tool_calls"]`` with synthesized ids (Ollama has none)."""
+        body = {"model": model, "messages": _messages_to_ollama(messages),
+                "stream": False, "tools": params["tools"]}
+        if options:
+            body["options"] = options
+        ka = params.get("keep_alive")
+        if ka is not None:
+            body["keep_alive"] = ka
+        data = self._post("/api/chat", body,
+                          timeout=params.get("timeout", 600))
+        message = data.get("message") or {}
+        if message.get("content"):
+            sink.token(message["content"])
+        stats: dict = {}
+        ec = data.get("eval_count")
+        ed = data.get("eval_duration")  # nanoseconds
+        if ec and ed:
+            stats["eval_count"] = ec
+            stats["eval_duration_s"] = ed / 1e9
+        if data.get("prompt_eval_count"):
+            stats["prompt_tokens"] = data["prompt_eval_count"]
+        tool_calls = []
+        for i, tc in enumerate(message.get("tool_calls") or [], 1):
+            fn = tc.get("function") or {}
+            tool_calls.append({"id": f"tc_{i}", "name": fn.get("name", ""),
+                               "arguments": _parse_arguments(fn.get("arguments"))})
+        if tool_calls:
+            stats["tool_calls"] = tool_calls
         return stats
 
     # ---- HTTP plumbing ----
@@ -225,6 +263,50 @@ def _normalize_show(show: dict) -> dict:
         "embedding_length": by_suffix("embedding_length"),
         "ctx_max": by_suffix("context_length") or details.get("context_length"),
     }
+
+
+def _messages_to_ollama(messages: list) -> list:
+    """Canonical internal messages → Ollama /api/chat shape. Ollama has no
+    tool-call ids: assistant tool_calls keep ``{"function": {"name",
+    "arguments"}}`` (arguments stays a dict), ``role:"tool"`` messages keep
+    their content (name carried as ``tool_name``, which Ollama understands),
+    and the canonical id/tool_call_id fields are dropped. Plain messages pass
+    through untouched."""
+    out = []
+    for m in messages or []:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            out.append({
+                "role": "assistant",
+                "content": m.get("content") or "",
+                "tool_calls": [
+                    {"function": {"name": tc.get("name", ""),
+                                  "arguments": tc.get("arguments") or {}}}
+                    for tc in m["tool_calls"]],
+            })
+        elif role == "tool":
+            msg = {"role": "tool", "content": m.get("content", "")}
+            if m.get("name"):
+                msg["tool_name"] = m["name"]
+            out.append(msg)
+        else:
+            out.append(m)
+    return out
+
+
+def _parse_arguments(raw) -> dict:
+    """Tool-call arguments as a dict. Ollama already sends a parsed object, but
+    be defensive: a JSON string is parsed, malformed input becomes
+    ``{"_raw": <value>}`` rather than raising."""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else None
+    except json.JSONDecodeError:
+        parsed = None
+    return parsed if isinstance(parsed, dict) else {"_raw": raw}
 
 
 def _mb(nbytes) -> float:

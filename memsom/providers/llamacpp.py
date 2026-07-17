@@ -128,6 +128,8 @@ class LlamaCppAdapter(Provider):
         return self._procman.stop(self.id)
 
     def infer(self, model: str, messages: list, params: dict, sink: Sink) -> dict:
+        if params.get("tools"):
+            return oai.chat_once(self.base, model, messages, params, sink)
         return oai.chat_stream(self.base, model, messages, params, sink)
 
 

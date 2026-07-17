@@ -72,6 +72,9 @@ from memsom.interface import telemetry
 from memsom.lifecycle import forget
 from memsom.providers import build_registry
 from memsom.providers import handlers as provider_handlers
+from memsom.providers import agent_handlers
+from memsom.providers.agent_store import GraphStore
+from memsom.providers.agents import AgentRunner
 from memsom.providers.base import run_no_window
 from memsom.providers.session import SessionRunner
 
@@ -1239,6 +1242,9 @@ class PanelConfig:
     # local-AI control plane (defaulted so existing constructors don't break)
     registry: dict = None
     session_runner: "SessionRunner" = None
+    # agent orchestration layer (same defaulting rationale)
+    graph_store: "GraphStore" = None
+    agent_runner: "AgentRunner" = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
@@ -1271,6 +1277,13 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     inference_dir = Path(profile["audit_log"]).parent / "inference"
     registry = build_registry(profile, servers_path=inference_dir / "servers.json")
     session_runner = SessionRunner(inference_dir)
+    # agent orchestration: saved canvases + durable tool-loop runs, sibling of
+    # inference/. Boot reconcile stamps runs orphaned by a server restart.
+    agents_dir = Path(profile["audit_log"]).parent / "agents"
+    graph_store = GraphStore(agents_dir / "graphs")
+    agent_runner = AgentRunner(agents_dir / "runs", registry,
+                               agents_dir / "audit.jsonl")
+    agent_runner.reconcile_on_boot()
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
@@ -1278,6 +1291,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         claude_dir=claude_dir, workflows_cache=workflows_cache,
         agents_cache=agents_cache, memories_cache=memories_cache,
         registry=registry, session_runner=session_runner,
+        graph_store=graph_store, agent_runner=agent_runner,
     )
 
 
@@ -1814,6 +1828,24 @@ def make_handler(config: PanelConfig):
                 self._send_json(200, saveall_runner.status(config.claude_dir))
             elif path == "/api/session-status":
                 self._send_json(200, _read_session_status(config.claude_dir))
+            elif path == "/api/agents/graphs":
+                st, body = agent_handlers.handle_graphs_list(config.graph_store)
+                self._send_json(st, body)
+            elif path == "/api/agents/graph":
+                st, body = agent_handlers.handle_graph_get(
+                    config.graph_store, _q1(query, "id"))
+                self._send_json(st, body)
+            elif path == "/api/agents/tools":
+                st, body = agent_handlers.handle_tool_catalog()
+                self._send_json(st, body)
+            elif path == "/api/agents/run":
+                st, body = agent_handlers.handle_run_read(
+                    config.agent_runner, _q1(query, "run_id"),
+                    _qint(query, "cursor", 0))
+                self._send_json(st, body)
+            elif path == "/api/agents/runs":
+                st, body = agent_handlers.handle_runs_list(config.agent_runner)
+                self._send_json(st, body)
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -1909,6 +1941,28 @@ def make_handler(config: PanelConfig):
                     config.registry, config.session_runner,
                     config.audit_log_path, payload)
                 self._send_json(status, result)
+            elif path == "/api/agents/graph":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                st, body = agent_handlers.handle_graph_save(
+                    config.graph_store, config.audit_log_path, payload)
+                self._send_json(st, body)
+            elif path == "/api/agents/graph/delete":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                st, body = agent_handlers.handle_graph_delete(
+                    config.graph_store, config.audit_log_path, payload)
+                self._send_json(st, body)
+            elif path == "/api/agents/run":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                st, body = agent_handlers.handle_run_start(
+                    config.graph_store, config.agent_runner, config.registry,
+                    config.audit_log_path, payload)
+                self._send_json(st, body)
             elif path == "/api/saveall/start":
                 payload = self._read_post_json()
                 if payload is None:

@@ -98,6 +98,8 @@ class ClaudeAdapter(Provider):
         return self._infer_cli(model, messages, params, sink)
 
     def _infer_cli(self, model, messages, params, sink) -> dict:
+        if params.get("tools"):
+            raise ProviderError("custom tools not supported over cli transport")
         argv = [self.cli_path, "-p", "--output-format", "json"]
         if model:
             argv += ["--model", model]
@@ -121,12 +123,18 @@ class ClaudeAdapter(Provider):
         key = os.environ.get(self.api_key_env)
         if not key:
             raise ProviderError(f"${self.api_key_env} not set")
-        system, convo = _split_system(messages)
+        tools = params.get("tools")
+        if tools:
+            system, convo = _to_anthropic_tool_convo(messages)
+        else:
+            system, convo = _split_system(messages)
         body = {
             "model": model or self.api_model,
             "max_tokens": int(params.get("max_tokens", self.max_tokens)),
             "messages": convo,
         }
+        if tools:
+            body["tools"] = _tools_to_anthropic(tools)
         if system:
             body["system"] = system
         if params.get("temperature") is not None:
@@ -147,11 +155,19 @@ class ClaudeAdapter(Provider):
             raise ProviderError(f"anthropic API failed: {exc}") from exc
         text = "".join(b.get("text", "") for b in data.get("content", [])
                        if b.get("type") == "text")
-        sink.token(text)
+        if text or not tools:
+            sink.token(text)
         usage = data.get("usage") or {}
-        return {"transport": "api",
-                "prompt_tokens": usage.get("input_tokens"),
-                "eval_count": usage.get("output_tokens")}
+        stats = {"transport": "api",
+                 "prompt_tokens": usage.get("input_tokens"),
+                 "eval_count": usage.get("output_tokens")}
+        tool_calls = [{"id": b.get("id", ""), "name": b.get("name", ""),
+                       "arguments": b.get("input") or {}}
+                      for b in data.get("content", [])
+                      if b.get("type") == "tool_use"]
+        if tool_calls:
+            stats["tool_calls"] = tool_calls
+        return stats
 
     # ---- HTTP plumbing (api transport) ----
 
@@ -206,6 +222,53 @@ def _split_system(messages: list) -> tuple:
     for m in messages or []:
         if m.get("role") == "system":
             system_parts.append(m.get("content", ""))
+        else:
+            convo.append({"role": m.get("role", "user"),
+                          "content": m.get("content", "")})
+    if not convo:
+        convo = [{"role": "user", "content": ""}]
+    return ("\n\n".join(p for p in system_parts if p), convo)
+
+
+def _tools_to_anthropic(tools: list) -> list:
+    """Canonical OpenAI-wire tool definitions → Anthropic's tool shape
+    (``parameters`` becomes ``input_schema``)."""
+    out = []
+    for t in tools or []:
+        fn = t.get("function") or {}
+        out.append({"name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters")
+                    or {"type": "object", "properties": {}}})
+    return out
+
+
+def _to_anthropic_tool_convo(messages: list) -> tuple:
+    """Canonical messages → (system_text, Anthropic content-block messages).
+
+    Same system-vs-conversation split as :func:`_split_system`, but block-aware:
+    assistant tool_calls become ``tool_use`` blocks (after a text block when the
+    turn had text), and ``role:"tool"`` results become user-role
+    ``tool_result`` blocks. Plain text messages keep string content."""
+    system_parts, convo = [], []
+    for m in messages or []:
+        role = m.get("role")
+        if role == "system":
+            system_parts.append(m.get("content", ""))
+        elif role == "tool":
+            convo.append({"role": "user", "content": [
+                {"type": "tool_result",
+                 "tool_use_id": m.get("tool_call_id", ""),
+                 "content": m.get("content", "")}]})
+        elif role == "assistant" and m.get("tool_calls"):
+            blocks = []
+            if m.get("content"):
+                blocks.append({"type": "text", "text": m["content"]})
+            for tc in m["tool_calls"]:
+                blocks.append({"type": "tool_use", "id": tc.get("id", ""),
+                               "name": tc.get("name", ""),
+                               "input": tc.get("arguments") or {}})
+            convo.append({"role": "assistant", "content": blocks})
         else:
             convo.append({"role": m.get("role", "user"),
                           "content": m.get("content", "")})
