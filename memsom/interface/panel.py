@@ -67,8 +67,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from memsom.interface import dashboard
+from memsom.interface import saveall as saveall_runner
 from memsom.interface import telemetry
 from memsom.lifecycle import forget
+from memsom.providers import build_registry
+from memsom.providers import handlers as provider_handlers
+from memsom.providers.base import run_no_window
+from memsom.providers.session import SessionRunner
 
 try:
     from importlib.metadata import PackageNotFoundError as _PkgNotFound
@@ -131,7 +136,29 @@ def _host_header_allowed(host_header, port) -> bool:
 
 
 def _allowed_origins(config: "PanelConfig") -> set:
-    return {f"http://127.0.0.1:{config.port}", f"http://localhost:{config.port}"}
+    return {
+        f"http://127.0.0.1:{config.port}", f"http://localhost:{config.port}",
+        # The Tauri desktop app's own webview origin. plugin-http forwards this
+        # on POST (WebView2 on Windows = http://tauri.localhost; wkwebview on
+        # macOS = tauri://localhost), which the loopback allowlist would other-
+        # wise reject — blocking every /api/* mutation from the app. It's the
+        # app's own loopback origin; the bind stays 127.0.0.1-only regardless.
+        "http://tauri.localhost", "https://tauri.localhost", "tauri://localhost",
+    }
+
+
+def _q1(query: dict, key: str, default=None):
+    """First value of a parsed querystring key (parse_qs yields lists)."""
+    vals = query.get(key)
+    return vals[0] if vals else default
+
+
+def _qint(query: dict, key: str, default: int = 0) -> int:
+    v = _q1(query, key)
+    try:
+        return int(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -834,6 +861,364 @@ class MemoryCache:
 
 
 # ---------------------------------------------------------------------------
+# Activity feeds (DECK): workflow runs read straight off Claude Code's on-disk
+# session records. Read-only, cache-fronted, and defensive per-file — a
+# half-written record from a LIVE workflow run must never 500 the endpoint.
+# ---------------------------------------------------------------------------
+
+def default_claude_dir() -> Path:
+    """`~/.claude` from the live environment (same identity-fence idiom as the
+    desktop app's settings: nothing user-specific is baked in)."""
+    base = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+    return Path(base) / ".claude"
+
+
+def _scan_workflow_runs(projects_dir: Path, limit: int = 20) -> dict:
+    """Newest workflow-run records across all projects/sessions.
+
+    Source shape (one JSON file per run, written by the Claude Code harness):
+    projects/<project>/<session>/workflows/wf_*.json with status, phases[],
+    and workflowProgress[] carrying per-agent telemetry. Every field access
+    is .get()-with-default: the schema is the harness's, not ours, and it may
+    drift between versions.
+    """
+    try:
+        candidates = sorted(
+            projects_dir.glob("*/*/workflows/wf_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+    except OSError:
+        candidates = []
+
+    runs = []
+    for path in candidates:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue  # live/half-written record: skip, never 500
+        if not isinstance(record, dict):
+            continue
+        progress = record.get("workflowProgress") or []
+        agents = [
+            {
+                "label": entry.get("label"),
+                "agentId": entry.get("agentId"),
+                "model": entry.get("model"),
+                "state": entry.get("state"),
+                "tokens": entry.get("tokens"),
+                "toolCalls": entry.get("toolCalls"),
+                "durationMs": entry.get("durationMs"),
+                "lastToolName": entry.get("lastToolName"),
+            }
+            for entry in progress
+            if isinstance(entry, dict) and entry.get("type") == "workflow_agent"
+        ]
+        phases = [
+            {"title": ph.get("title"), "detail": ph.get("detail")}
+            for ph in (record.get("phases") or [])
+            if isinstance(ph, dict)
+        ]
+        runs.append(
+            {
+                "runId": record.get("runId"),
+                "workflowName": record.get("workflowName"),
+                "status": record.get("status"),
+                "startTime": record.get("startTime"),
+                "durationMs": record.get("durationMs"),
+                "totalTokens": record.get("totalTokens"),
+                "totalToolCalls": record.get("totalToolCalls"),
+                "summary": record.get("summary"),
+                "session_id": path.parts[-3] if len(path.parts) >= 3 else None,
+                "project": path.parts[-4] if len(path.parts) >= 4 else None,
+                "phases": phases,
+                "agents": agents,
+            }
+        )
+    return {"runs": runs}
+
+
+def _tail_jsonl(path: Path, window_bytes: int = 256 * 1024) -> list:
+    """Parse the last `window_bytes` of an append-only JSONL file, newest
+    LAST. Bad/partial lines (the window may start mid-line, concurrent
+    appends may interleave) are skipped, never raised."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as f:
+            f.seek(max(0, size - window_bytes))
+            raw = f.read()
+    except OSError:
+        return []
+    lines = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            lines.append(obj)
+    return lines
+
+
+# session_id becomes a FILENAME under episodic/inbox — this regex is the
+# path-traversal fence. Claude Code session ids are UUIDs; anything that
+# isn't a plain slug is refused, never sanitized.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$")
+
+
+def _read_memory_activity(claude_dir: Path, limit: int = 100) -> dict:
+    """Memory-injection events (askq_recall hits + panel injects) from
+    memory_activity.jsonl, newest first, plus the live-session picker list
+    (any transcript touched in the last 24h)."""
+    events = list(reversed(_tail_jsonl(claude_dir / "episodic" / "memory_activity.jsonl")))[:limit]
+
+    sessions = []
+    cutoff = time.time() - 24 * 3600
+    projects = claude_dir / "projects"
+    try:
+        for transcript in projects.glob("*/*.jsonl"):
+            try:
+                mtime = transcript.stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            sid = transcript.stem
+            if not _SESSION_ID_RE.match(sid):
+                continue
+            sessions.append(
+                {
+                    "session_id": sid,
+                    "project": transcript.parent.name,
+                    "last_active": datetime.fromtimestamp(
+                        mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+    except OSError:
+        pass
+    sessions.sort(key=lambda s: s["last_active"], reverse=True)
+    return {"events": events, "sessions": sessions[:15]}
+
+
+def _audit_inject_result(config: "PanelConfig", session_id: str, result: str) -> None:
+    """Best-effort RESULT line for an inject (same contract as _audit_result:
+    only the INTENT line gates the write)."""
+    try:
+        _audit_append(config.audit_log_path, {"ts": forget.now_iso(),
+                                              "inject": session_id, "result": result})
+    except OSError:
+        pass
+
+
+def handle_inject(config: "PanelConfig", payload: dict):
+    """POST /api/inject pipeline: validate -> two-phase audit -> append to the
+    session's inbox file (drained into context by the inbox_drain.py hook) ->
+    journal -> optional best-effort persist to the memory store.
+
+    Pure w.r.t. HTTP, same as handle_knob_write. Returns (status, body)."""
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "body must be a JSON object"}
+    session_id = payload.get("session_id")
+    text = payload.get("text")
+    persist = bool(payload.get("persist"))
+    if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+        return 400, {"ok": False, "error": "invalid session_id"}
+    if not isinstance(text, str) or not text.strip():
+        return 400, {"ok": False, "error": "missing required field: text"}
+    if len(text.encode("utf-8")) > 8192:
+        # headroom under the harness's 10KB additionalContext cap
+        return 400, {"ok": False, "error": "text too long (max 8KB)"}
+
+    try:
+        _audit_append(config.audit_log_path, {
+            "ts": forget.now_iso(), "inject": session_id,
+            "chars": len(text), "persist": persist, "result": "pending",
+        })
+    except OSError as exc:
+        return 503, {"ok": False, "error": f"audit log unavailable; inject refused: {exc}"}
+
+    inbox = config.claude_dir / "episodic" / "inbox"
+    try:
+        inbox.mkdir(parents=True, exist_ok=True)
+        # APPEND, never overwrite: two injects racing one drain must both
+        # survive (the drain reads the whole file then removes it).
+        fh = open(inbox / f"{session_id}.md", "a", encoding="utf-8")
+        try:
+            fh.write(text.strip() + "\n\n---\n\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        finally:
+            fh.close()
+    except OSError as exc:
+        _audit_inject_result(config, session_id, f"failed: {exc}")
+        return 500, {"ok": False, "error": f"inbox write failed: {exc}"}
+    _audit_inject_result(config, session_id, "ok")
+
+    # The panel's own injects show in the memories feed too.
+    try:
+        with (config.claude_dir / "episodic" / "memory_activity.jsonl").open(
+                "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": forget.now_iso(), "session_id": session_id,
+                "source": "inject", "memories": [],
+                "query_preview": text[:160],
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    body = {"ok": True}
+    if persist:
+        # Best-effort: the inject already succeeded; a persist failure is a
+        # warning, not an error. Same CLI path the MCP ingest_text tool rides.
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "memsom.interface.cli",
+                 "ingest-text", text, "--channel", "user",
+                 "--ref", f"panel-inject/{session_id}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            body["persisted"] = proc.returncode == 0
+            if proc.returncode != 0:
+                body["warning"] = (proc.stderr or proc.stdout or "ingest failed").strip()[:300]
+        except Exception as exc:  # noqa: BLE001 — best-effort by contract
+            body["persisted"] = False
+            body["warning"] = str(exc)[:300]
+    return 200, body
+
+
+def _read_agent_activity(claude_dir: Path, limit: int = 100) -> dict:
+    """Agent lifecycle events from the SubagentStart/SubagentStop hook journal
+    (agent_journal.py), paired into running/done states, newest first.
+
+    Pairing prefers agent_id (both events carry it — verified live); the
+    (session_id, agent_type) oldest-open-Start heuristic is the fallback for
+    journal lines from harness versions that omit it."""
+    events = _tail_jsonl(claude_dir / "episodic" / "agent_activity.jsonl")
+
+    open_starts: list = []
+    finished: list = []
+    for ev in events:
+        kind = ev.get("event")
+        if kind == "SubagentStart":
+            open_starts.append(
+                {
+                    "ts": ev.get("ts"),
+                    "session_id": ev.get("session_id"),
+                    "agent_type": ev.get("agent_type"),
+                    "agent_id": ev.get("agent_id"),
+                    "prompt_preview": ev.get("prompt_preview"),
+                    "state": "running",
+                }
+            )
+        elif kind == "SubagentStop":
+            match_idx = None
+            stop_id = ev.get("agent_id")
+            if stop_id:
+                for idx, item in enumerate(open_starts):
+                    if item.get("agent_id") == stop_id:
+                        match_idx = idx
+                        break
+            if match_idx is None:
+                for idx, item in enumerate(open_starts):
+                    if (
+                        item["session_id"] == ev.get("session_id")
+                        and item["agent_type"] == ev.get("agent_type")
+                    ):
+                        match_idx = idx
+                        break
+            if match_idx is None:
+                # Last resort for degraded payloads (missing/blank agent_id or
+                # agent_type) — but ONLY when unambiguous: with several agents
+                # open in the session, guessing would steal a still-running
+                # agent's Start and corrupt two records instead of zero.
+                session_open = [idx for idx, item in enumerate(open_starts)
+                                if item["session_id"] == ev.get("session_id")]
+                if len(session_open) == 1:
+                    match_idx = session_open[0]
+            if match_idx is not None:
+                item = dict(open_starts[match_idx], state="done",
+                            ended_ts=ev.get("ts"),
+                            agent_id=stop_id or open_starts[match_idx].get("agent_id"))
+                item["duration_s"] = _agent_duration(item.get("ts"), ev.get("ts"))
+                if ev.get("tokens") is not None:
+                    item["tokens"] = ev.get("tokens")
+                del open_starts[match_idx]
+                finished.append(item)
+            else:
+                finished.append(
+                    {
+                        "ts": ev.get("ts"),
+                        "ended_ts": ev.get("ts"),
+                        "session_id": ev.get("session_id"),
+                        "agent_type": ev.get("agent_type"),
+                        "agent_id": ev.get("agent_id"),
+                        "prompt_preview": None,
+                        "state": "done",
+                    }
+                )
+    # Unmatched Starts are presumed still running; newest activity first.
+    items = list(reversed(open_starts)) + list(reversed(finished))
+    return {"events": items[:limit], "active": len(open_starts)}
+
+
+def _agent_duration(start_iso, end_iso):
+    """Seconds between two ISO-Z timestamps, or None if either is unparseable."""
+    try:
+        from datetime import datetime
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        return int((datetime.strptime(end_iso, fmt)
+                    - datetime.strptime(start_iso, fmt)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_session_status(claude_dir: Path) -> dict:
+    """Live session status for the DECK panel, projected from the JSON payload
+    Claude Code pipes to the statusline (tee'd to episodic/statusline_state.json
+    by statusline.sh). Reflects the most-recently-rendered active session — i.e.
+    the chat you're currently in. Tolerant of missing fields / a partial write."""
+    p = Path(claude_dir) / "episodic" / "statusline_state.json"
+    if not p.is_file():
+        return {"available": False}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {"available": False}
+    cw = raw.get("context_window") or {}
+    rl = raw.get("rate_limits") or {}
+    fh = rl.get("five_hour") or {}
+    sd = rl.get("seven_day") or {}
+    model = raw.get("model") or {}
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = None
+    return {
+        "available": True,
+        "session_id": raw.get("session_id"),
+        "session_name": raw.get("session_name"),
+        "model": model.get("display_name") or model.get("id"),
+        "context_used_pct": cw.get("used_percentage"),
+        "context_window_size": cw.get("context_window_size"),
+        "context_input_tokens": cw.get("total_input_tokens"),
+        "exceeds_200k": raw.get("exceeds_200k_tokens"),
+        "five_hour": {"used_pct": fh.get("used_percentage"),
+                      "resets_at": fh.get("resets_at")},
+        "seven_day": {"used_pct": sd.get("used_percentage"),
+                      "resets_at": sd.get("resets_at")},
+        "effort": (raw.get("effort") or {}).get("level"),
+        "thinking": (raw.get("thinking") or {}).get("enabled"),
+        "fast_mode": raw.get("fast_mode"),
+        "output_style": (raw.get("output_style") or {}).get("name"),
+        "cost_usd": (raw.get("cost") or {}).get("total_cost_usd"),
+        "mtime": mtime,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Config + server construction
 # ---------------------------------------------------------------------------
 
@@ -847,11 +1232,22 @@ class PanelConfig:
     providers: dict
     memory_cache: MemoryCache
     telemetry: "telemetry.SystemTelemetry"
+    claude_dir: Path
+    workflows_cache: MemoryCache
+    agents_cache: MemoryCache
+    memories_cache: MemoryCache
+    # local-AI control plane (defaulted so existing constructors don't break)
+    registry: dict = None
+    session_runner: "SessionRunner" = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
                   run=None, urlopen=None, memory_builder=None, memory_now=None) -> PanelConfig:
     enforce_bind_policy(host)
+    # Default to the no-console-window runner so nvidia-smi / schtasks children
+    # don't flash a console when the panel runs detached (app-spawned). Tests
+    # that inject their own `run` keep it.
+    run = run or run_no_window
     profile = load_profile(profile_path)
     providers = {
         "canonical-params": CanonicalParamsProvider(),
@@ -862,10 +1258,26 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     memory_cache = MemoryCache(builder=memory_builder or dashboard.build_telemetry, now=memory_now)
     sys_telemetry = telemetry.SystemTelemetry(profile.get("telemetry") or {},
                                               run=run, urlopen=urlopen)
+    claude_dir = Path(profile.get("claude_dir") or default_claude_dir())
+    workflows_cache = MemoryCache(
+        builder=lambda: _scan_workflow_runs(claude_dir / "projects"), ttl=3.0)
+    agents_cache = MemoryCache(
+        builder=lambda: _read_agent_activity(claude_dir), ttl=3.0)
+    memories_cache = MemoryCache(
+        builder=lambda: _read_memory_activity(claude_dir), ttl=3.0)
+    # local-AI control plane: adapters + durable inference sessions live next to
+    # the audit log (episodic/inference/). servers.json tracks detached model
+    # servers' PIDs so start/stop survives a panel restart.
+    inference_dir = Path(profile["audit_log"]).parent / "inference"
+    registry = build_registry(profile, servers_path=inference_dir / "servers.json")
+    session_runner = SessionRunner(inference_dir)
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
         memory_cache=memory_cache, telemetry=sys_telemetry,
+        claude_dir=claude_dir, workflows_cache=workflows_cache,
+        agents_cache=agents_cache, memories_cache=memories_cache,
+        registry=registry, session_runner=session_runner,
     )
 
 
@@ -1375,6 +1787,33 @@ def make_handler(config: PanelConfig):
                 self._serve_system()
             elif path == "/api/knobs":
                 self._send_json(200, build_knobs_payload(config))
+            elif path == "/api/activity/workflows":
+                self._send_json(200, config.workflows_cache.get())
+            elif path == "/api/activity/agents":
+                self._send_json(200, config.agents_cache.get())
+            elif path == "/api/activity/memories":
+                self._send_json(200, config.memories_cache.get())
+            elif path == "/api/providers":
+                self._send_json(200,
+                    provider_handlers.build_providers_payload(config.registry))
+            elif path == "/api/providers/vram-estimate":
+                st, body = provider_handlers.handle_vram_estimate(
+                    config.registry, _q1(query, "provider"), _q1(query, "model"),
+                    _qint(query, "ctx", 0), _q1(query, "kv") or "fp16")
+                self._send_json(st, body)
+            elif path == "/api/inference/sessions":
+                st, body = provider_handlers.handle_inference_sessions(
+                    config.session_runner)
+                self._send_json(st, body)
+            elif path == "/api/inference":
+                st, body = provider_handlers.handle_inference_read(
+                    config.session_runner, _q1(query, "session_id"),
+                    _qint(query, "cursor", 0))
+                self._send_json(st, body)
+            elif path == "/api/saveall/status":
+                self._send_json(200, saveall_runner.status(config.claude_dir))
+            elif path == "/api/session-status":
+                self._send_json(200, _read_session_status(config.claude_dir))
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -1409,41 +1848,89 @@ def make_handler(config: PanelConfig):
                 except Exception:
                     pass
 
-        def _route_post(self):
-            path, _query = self._split_path()
-            if path != "/api/knobs":
-                self._send_json(404, {"error": "not found"})
-                return
-
+        def _read_post_json(self):
+            """Shared POST gate: Content-Type check, Origin allowlist, bounded
+            body read, JSON parse. Sends the error response itself and returns
+            None on any failure; the payload dict otherwise."""
             ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             if ctype != "application/json":
                 self._reject(403, {"ok": False, "error": "Content-Type must be application/json"})
-                return
+                return None
 
             origin = self.headers.get("Origin")
             if origin is not None and origin not in _allowed_origins(config):
                 self._reject(403, {"ok": False, "error": "origin not allowed"})
-                return
+                return None
 
             raw_len = self.headers.get("Content-Length")
             try:
                 length = int(raw_len) if raw_len is not None else 0
             except ValueError:
                 self._reject(400, {"ok": False, "error": "bad Content-Length"})
-                return
+                return None
             if length < 0 or length > _MAX_BODY_BYTES:
                 self._reject(413, {"ok": False, "error": "request body too large"})
-                return
+                return None
             body = self.rfile.read(length) if length else b""
 
             try:
-                payload = json.loads(body.decode("utf-8")) if body else {}
+                return json.loads(body.decode("utf-8")) if body else {}
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 self._send_json(400, {"ok": False, "error": f"invalid JSON body: {exc}"})
-                return
+                return None
 
-            status, result = handle_knob_write(config, payload)
-            self._send_json(status, result)
+        def _route_post(self):
+            path, _query = self._split_path()
+            if path == "/api/knobs":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = handle_knob_write(config, payload)
+                self._send_json(status, result)
+            elif path == "/api/inject":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = handle_inject(config, payload)
+                self._send_json(status, result)
+            elif path == "/api/providers/action":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = provider_handlers.handle_provider_action(
+                    config.registry, config.audit_log_path,
+                    payload.get("action"), payload)
+                self._send_json(status, result)
+            elif path == "/api/inference/start":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = provider_handlers.handle_inference_start(
+                    config.registry, config.session_runner,
+                    config.audit_log_path, payload)
+                self._send_json(status, result)
+            elif path == "/api/saveall/start":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                claude_adapter = config.registry.get("claude")
+                cli = getattr(claude_adapter, "cli_path", "claude") if claude_adapter else "claude"
+                try:
+                    _audit_append(config.audit_log_path, {
+                        "ts": forget.now_iso(), "action": "saveall",
+                        "result": "pending"})
+                    result = saveall_runner.start(config.claude_dir, cli_path=cli)
+                    _audit_append(config.audit_log_path, {
+                        "ts": forget.now_iso(), "action": "saveall",
+                        "session_id": result.get("session_id"), "result": "started"})
+                    self._send_json(200, result)
+                except Exception as exc:
+                    _audit_append(config.audit_log_path, {
+                        "ts": forget.now_iso(), "action": "saveall",
+                        "result": f"failed: {exc}"})
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+            else:
+                self._send_json(404, {"error": "not found"})
 
     return PanelHandler
 

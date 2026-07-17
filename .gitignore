@@ -45,3 +45,7 @@ mcp-bge.bat
 
 # local Claude workflow orchestration scripts (machine-specific paths) -- never ship
 .claude/
+
+# local tooling
+.serena/
+AI_DIGEST.md
