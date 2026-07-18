@@ -45,8 +45,16 @@ def handle_kernel_create(store: KernelStore, profile: dict, audit_path,
     if not os.path.isdir(cwd):
         return 400, {"ok": False, "error": f"cwd is not a directory: {cwd}"}
 
-    # cli path from the provider spec (profile) — the terminal bridge needs it.
-    spec = ((profile.get("providers") or {}).get(engine) or {})
+    # cli path from the provider spec (profile) — the terminal bridge needs
+    # it. The live profile's `providers` block is a LIST of spec dicts keyed
+    # by "id" (build_registry's input shape); tests/other profiles may use a
+    # dict — accept both.
+    raw = profile.get("providers") or {}
+    if isinstance(raw, list):
+        spec = next((s for s in raw
+                     if isinstance(s, dict) and s.get("id") == engine), {})
+    else:
+        spec = raw.get(engine) or {}
     cli_path = spec.get("cli_path") or engine
     if shutil.which(cli_path) is None and not os.path.isfile(cli_path):
         return 501, {"ok": False,

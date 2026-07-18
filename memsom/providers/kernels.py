@@ -17,9 +17,10 @@ appends to the same thread, so its pointer is stable once captured.
 Concurrency (claude-code has NO session lock — concurrent resumes fork
 silently and race ~/.claude.json): a per-kernel lock serializes headless
 prompts (busy -> 409 at the handler). The interactive-terminal fence lives in
-the app UI (sessiond state is invisible to this server by design); the
-``refresh_ptr`` scan at the top of every prompt picks up whatever an
-interactive ``claude --resume`` terminal did in the meantime.
+the app UI (sessiond state is invisible to this server by design). Terminal
+continuity needs no directory scanning: the TUI and the panel both resume the
+SAME kernel-owned session id (see the pointer-maintenance note in
+KernelRunner).
 
 Prompt bodies ride stdin (never argv — process listers see argv) and are
 never audited; audit lines carry action metadata only.
@@ -141,36 +142,20 @@ class KernelRunner:
         with self._locks_guard:
             return self._locks.setdefault(kernel_id, threading.Lock())
 
-    # -- pointer maintenance -------------------------------------------------
-
-    def _project_dir(self, cwd: str) -> Path:
-        # Claude Code encodes a project cwd by replacing every non-alphanumeric
-        # character with '-' (C:\Users\X -> C--Users-X).
-        encoded = re.sub(r"[^A-Za-z0-9-]", "-", cwd or "")
-        return self.claude_dir / "projects" / encoded
-
-    def refresh_ptr(self, kernel: dict) -> dict:
-        """Roll the pointer to the newest transcript in the kernel's project
-        dir when something (an interactive terminal) advanced it. NO-OP when
-        the pointer is null — a kernel must never adopt a transcript it didn't
-        create (the project dir may hold unrelated manual sessions)."""
-        ptr = kernel.get("session_ptr")
-        if not ptr or kernel.get("engine") != "claude":
-            return kernel
-        proj = self._project_dir(kernel.get("cwd") or "")
-        current = proj / f"{ptr}.jsonl"
-        if not current.is_file():
-            return kernel
-        try:
-            cur_mtime = current.stat().st_mtime
-            newest = max(proj.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
-        except (OSError, ValueError):
-            return kernel
-        if newest.stem != ptr and newest.stat().st_mtime > cur_mtime:
-            kernel = self.store.update(kernel["kernel_id"], session_ptr=newest.stem)
-        return kernel
-
     # -- prompting -----------------------------------------------------------
+    #
+    # NOTE (pointer maintenance, learned the hard way): an earlier design
+    # auto-rolled the pointer to the NEWEST transcript in the kernel's project
+    # dir before each prompt, to pick up interactive-terminal use. On the
+    # first live smoke it adopted an unrelated concurrent session (the project
+    # dir was USERPROFILE — shared with every manual session there) and forked
+    # it. Recency is NOT lineage; there is no reliable parent-id in the
+    # transcripts to chain on. So the pointer is kernel-owned ONLY: it moves
+    # when a run's result event reports an id (verified on CLI 2.1.212:
+    # --resume -p appends IN PLACE and reports the same id, so it is stable
+    # in practice). After interactive terminal use the next panel prompt
+    # resumes the same id — which the TUI also appended to — so continuity
+    # holds without any directory scanning.
 
     def prompt(self, kernel_id: str, prompt_text: str) -> str:
         """Fire one prompt. Returns the run session id immediately (poll it
@@ -187,7 +172,6 @@ class KernelRunner:
         if not lock.acquire(blocking=False):
             raise ProviderError("kernel busy: a prompt is already running")
         try:
-            kernel = self.refresh_ptr(kernel)
             run_id = f"krn-{kernel_id}-{uuid.uuid4().hex[:8]}"
             assert valid_session_id(run_id)
             path = self.sessions_dir / f"{run_id}.jsonl"

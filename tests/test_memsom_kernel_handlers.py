@@ -36,6 +36,22 @@ class CreateTests(unittest.TestCase):
             self.assertEqual(body["kernel"]["cli_path"], sys.executable)
             self.assertIsNone(body["kernel"]["session_ptr"])
 
+    def test_create_with_list_shaped_providers_block(self):
+        # The LIVE profile's providers block is a LIST of spec dicts keyed by
+        # "id" (build_registry's input shape) — regression for the 500 this
+        # caused on first deploy.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            store, runner, audit = _deps(d)
+            profile = {"providers": [
+                {"id": "ollama", "cli_path": "nope"},
+                {"id": "claude", "cli_path": sys.executable},
+            ]}
+            st, body = H.handle_kernel_create(
+                store, profile, audit, {"engine": "claude", "cwd": str(d)})
+            self.assertEqual(st, 201)
+            self.assertEqual(body["kernel"]["cli_path"], sys.executable)
+
     def test_unknown_engine_400_missing_cli_501_bad_cwd_400(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

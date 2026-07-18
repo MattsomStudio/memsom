@@ -265,31 +265,27 @@ class PromptFlowTests(unittest.TestCase):
         self.assertEqual(k["session_ptr"], SID_A)
 
 
-class RefreshPtrTests(unittest.TestCase):
-    def test_rolls_to_newer_transcript_only_with_baseline(self):
+class PointerOwnershipTests(unittest.TestCase):
+    def test_pointer_only_moves_via_stream_events(self):
+        """Regression for the removed refresh_ptr auto-scan (it adopted an
+        unrelated concurrent session on the first live smoke — recency is not
+        lineage): a pre-set pointer must survive a prompt whose stream never
+        reports a session id."""
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            cwd = str(d / "proj")
-            os.makedirs(cwd)
+            script = d / "silent_cli.py"
+            script.write_text(
+                "import sys\nsys.stdin.read()\nprint('plain text, no json')\n",
+                encoding="utf-8")
             store = KernelStore(d / "kernels")
-            runner = KernelRunner(store, d / "sessions", d / "claude")
-            proj = runner._project_dir(cwd)
-            proj.mkdir(parents=True)
-            old = proj / f"{SID_A}.jsonl"
-            old.write_text("{}", encoding="utf-8")
-            time.sleep(0.05)
-            new = proj / f"{SID_B}.jsonl"
-            new.write_text("{}", encoding="utf-8")
-            os.utime(old, (time.time() - 100, time.time() - 100))
-
-            kernel = store.create("t", "claude", None, None, cwd, "claude")
-            # null pointer: refresh must NOT adopt the stranger transcripts.
-            k = runner.refresh_ptr(store.get(kernel["kernel_id"]))
-            self.assertIsNone(k["session_ptr"])
-            # with a baseline on the older transcript, it rolls to the newest.
+            runner = ScriptedRunner(store, d / "sessions", d / "claude", script)
+            kernel = store.create("t", "claude", None, None, str(d), "claude")
             store.update(kernel["kernel_id"], session_ptr=SID_A)
-            k = runner.refresh_ptr(store.get(kernel["kernel_id"]))
-            self.assertEqual(k["session_ptr"], SID_B)
+            run_id = runner.prompt(kernel["kernel_id"], "x")
+            _wait_terminal(d / "sessions" / f"{run_id}.jsonl")
+            _wait_idle(store, kernel["kernel_id"])
+            self.assertEqual(store.get(kernel["kernel_id"])["session_ptr"],
+                             SID_A)
 
 
 class ReconcileTests(unittest.TestCase):
