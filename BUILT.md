@@ -576,3 +576,35 @@ Full suite after: **994 tests, 0 failures**.
 | tests/test_panel_telemetry.py (new)| 22 |
 | tests/test_panel_knobs.py (new)  | 44 |
 | tests/test_panel_server.py (new) | 26 |
+
+## 2026-07-17 — persistent CLI kernels (panel Phase 4 M2, `providers/kernels.py`)
+
+A kernel is a durable panel object wrapping a Claude Code (or Codex) session:
+the CLI's own transcript carries the context, so it survives app close, panel
+restart, and reboot. Each prompt is a fresh headless CLI call resuming the
+session (`claude --resume <ptr> -p --output-format stream-json`, prompt on
+stdin) streamed into the SAME durable sessions dir inference uses (`krn-`
+prefixed) — `/api/inference` serves kernel feeds unchanged, so the app's
+cursor-walk UI needed zero new streaming code.
+
+- `providers/kernels.py` — KernelStore (atomic JSON per kernel), KernelRunner
+  (per-kernel lock → 409; tolerant stream-json parser — hooks fire before the
+  init event on this machine; kill = tree-kill; boot reconcile stamps busy
+  strays). **Pointer rule:** `session_ptr` moves ONLY when a run's result
+  event reports an id. The recency-based `refresh_ptr` auto-scan was removed
+  after the first live smoke adopted an unrelated concurrent session and
+  forked it — recency is not lineage. Verified on CLI 2.1.212: `--resume -p`
+  appends in place (same id back), so terminal use and panel prompts share
+  one stable id.
+- `providers/kernel_handlers.py` — gated two-phase audit, 8KB prompt cap,
+  501 when the engine CLI is missing; accepts both list- and dict-shaped
+  `providers` profile blocks (the live profile is a list — this 500'd once).
+- panel.py — `/api/kernels` list/create + `<id>/prompt|kill|archive`; fixed
+  the `/api/agents/runs` route that computed a body but never sent it; `krn-`
+  feeds filtered out of the INFERENCE session picker.
+- The desktop-app side (sessiond durable-terminal daemon, KERNELS rail, the
+  terminal bridge + hard fence) lives in the memsom-agentic-os repo, v0.5.0.
+
+Live acceptance: create → "remember FALCON7" → "stored" → second process
+prompt → "FALCON7", pointer stable across the resume. 23 new tests; full
+suite 1138 passed.
