@@ -73,7 +73,9 @@ from memsom.lifecycle import forget
 from memsom.providers import build_registry
 from memsom.providers import handlers as provider_handlers
 from memsom.providers import agent_handlers
+from memsom.providers import kernel_handlers
 from memsom.providers.agent_store import GraphStore
+from memsom.providers.kernels import KernelRunner, KernelStore
 from memsom.providers.agents import AgentRunner
 from memsom.providers.schedule import Scheduler
 from memsom.providers.base import run_no_window
@@ -1246,6 +1248,8 @@ class PanelConfig:
     # agent orchestration layer (same defaulting rationale)
     graph_store: "GraphStore" = None
     agent_runner: "AgentRunner" = None
+    kernel_store: "KernelStore" = None
+    kernel_runner: "KernelRunner" = None
     # scheduler is constructed here but only started by the serve loop (_cmd_panel)
     # so tests that build_config/build_server never spawn the background thread.
     scheduler: "Scheduler" = None
@@ -1293,6 +1297,12 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     scheduler = Scheduler(graph_store, agent_runner, registry,
                           agents_dir / "audit.jsonl",
                           agents_dir / "scheduler_state.json")
+    # persistent CLI kernels: durable session pointers + per-prompt CLI runs
+    # streamed into the SAME sessions dir (krn- prefixed) so the inference
+    # read path serves them unchanged. Boot reconcile stamps busy strays.
+    kernel_store = KernelStore(Path(profile["audit_log"]).parent / "kernels")
+    kernel_runner = KernelRunner(kernel_store, inference_dir, claude_dir)
+    kernel_runner.reconcile_on_boot()
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
@@ -1302,6 +1312,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         registry=registry, session_runner=session_runner,
         graph_store=graph_store, agent_runner=agent_runner,
         scheduler=scheduler,
+        kernel_store=kernel_store, kernel_runner=kernel_runner,
     )
 
 
@@ -1855,7 +1866,13 @@ def make_handler(config: PanelConfig):
                 self._send_json(st, body)
             elif path == "/api/agents/runs":
                 st, body = agent_handlers.handle_runs_list(config.agent_runner)
-
+                self._send_json(st, body)
+            elif path == "/api/kernels":
+                include_archived = _q1(query, "all") in ("1", "true")
+                st, body = kernel_handlers.handle_kernels_list(
+                    config.kernel_store, config.kernel_runner,
+                    include_archived=include_archived)
+                self._send_json(st, body)
             elif path == "/api/agents/scheduler":
                 st, body = agent_handlers.handle_scheduler_status(config.scheduler)
                 self._send_json(st, body)
@@ -1975,6 +1992,37 @@ def make_handler(config: PanelConfig):
                 st, body = agent_handlers.handle_run_start(
                     config.graph_store, config.agent_runner, config.registry,
                     config.audit_log_path, payload)
+                self._send_json(st, body)
+            elif path == "/api/kernels":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                st, body = kernel_handlers.handle_kernel_create(
+                    config.kernel_store, config.profile,
+                    config.audit_log_path, payload)
+                self._send_json(st, body)
+            elif path.startswith("/api/kernels/"):
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                parts = path.split("/")  # ['', 'api', 'kernels', <id>, <verb>]
+                if len(parts) != 5:
+                    self._send_json(404, {"error": "not found"})
+                    return
+                kid, verb = parts[3], parts[4]
+                if verb == "prompt":
+                    st, body = kernel_handlers.handle_kernel_prompt(
+                        config.kernel_store, config.kernel_runner,
+                        config.audit_log_path, kid, payload)
+                elif verb == "kill":
+                    st, body = kernel_handlers.handle_kernel_kill(
+                        config.kernel_store, config.kernel_runner,
+                        config.audit_log_path, kid)
+                elif verb == "archive":
+                    st, body = kernel_handlers.handle_kernel_archive(
+                        config.kernel_store, config.audit_log_path, kid)
+                else:
+                    st, body = 404, {"error": "not found"}
                 self._send_json(st, body)
             elif path == "/api/saveall/start":
                 payload = self._read_post_json()

@@ -178,7 +178,12 @@ def handle_inference_read(session_runner, session_id: str, cursor: int) -> tuple
 
 
 def handle_inference_sessions(session_runner) -> tuple:
-    return 200, {"ok": True, "sessions": session_runner.list_sessions()}
+    # Kernel prompt runs share the sessions dir (krn- prefixed) so their read
+    # path is free — but they are NOT chat history; keep them out of the
+    # INFERENCE picker.
+    sessions = [s for s in session_runner.list_sessions()
+                if not str(s.get("session_id", "")).startswith("krn-")]
+    return 200, {"ok": True, "sessions": sessions}
 
 
 # ---------------------------------------------------------------------------
