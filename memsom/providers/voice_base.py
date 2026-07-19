@@ -172,6 +172,9 @@ class VoiceAdapter(Provider):
         if self._procman is not None and self.exec:
             self._procman.start(self.id, self._server_argv(model),
                                 port=self.port, model=model)
+        # In-process voice models (exec=None) warm their weights right here so a
+        # subsequent transcribe/synthesize is hot. Subclasses implement _warm.
+        self._warm(model)
         self._resident = model
         self._loaded_ts = now()
         return {"ok": True, "loaded": model, "vram_estimate": advisory}
@@ -182,6 +185,8 @@ class VoiceAdapter(Provider):
                 self._procman.stop(self.id)
             except ProviderError:
                 pass  # already gone — evicting VRAM is the goal, not the pid
+        # Drop any in-process weights + free the card. Subclasses implement _cool.
+        self._cool()
         freed = self._resident
         self._resident = None
         self._loaded_ts = None
@@ -191,6 +196,16 @@ class VoiceAdapter(Provider):
         """argv for the detached model server. Subclasses that run a server
         override this; the default assumes ``exec model --host --port``."""
         return [self.exec, model, "--host", self.host, "--port", str(self.port)]
+
+    # ---- in-process residency hooks (exec=None voice models) ----
+
+    def _warm(self, model: str) -> None:
+        """Build+cache the in-process model so the next inference is hot.
+        Default no-op (server-backed adapters do their warming via procman)."""
+
+    def _cool(self) -> None:
+        """Drop cached in-process weights and free any VRAM they held. Default
+        no-op. Called on unload()."""
 
     # ---- metrics ----
 
