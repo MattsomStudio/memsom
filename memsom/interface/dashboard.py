@@ -95,6 +95,10 @@ def load_weights() -> list[dict]:
             "last_used": lused,
             "first_seen": fseen,
             "tier": tier or "hot",
+            # Raw store channel (endorsed|user|agent-derived|external, CHECK-
+            # constrained at insert). Carried through so build_graph can expose an
+            # authoritative per-node trust channel instead of the frontend guessing.
+            "channel": channel,
             "pinned": 1 if (channel == "endorsed" or str(fm_top_level(split_frontmatter(content or "")[0]).get("pin", "")).strip().lower() in ("1", "true", "yes")) else 0,
         })
     return out
@@ -103,6 +107,70 @@ def load_weights() -> list[dict]:
 def stem_type(stem: str) -> str:
     head = stem.split("_", 1)[0]
     return head if head in TYPE_PREFIXES else "other"
+
+
+# Trust-channel enum surfaced to the frontend. The store's `channel` column is
+# authoritative (endorsed > user > agent-derived > external, per the memory
+# protocol and CHECK-constrained at insert); we only fold 'agent-derived' -> the
+# short 'agent' the panel enum uses. Fallback (channel absent — e.g. a synthetic
+# test row) derives from the memory TYPE, matching bridge_import.CHANNEL_BY_TYPE:
+# user/feedback/personal = endorsed; project/reference/fact = user.
+_CHANNEL_ENUM = {
+    "endorsed": "endorsed",
+    "user": "user",
+    "agent-derived": "agent",
+    "agent": "agent",
+    "external": "external",
+}
+_TYPE_CHANNEL = {
+    "user": "endorsed", "feedback": "endorsed", "personal": "endorsed",
+    "project": "user", "reference": "user", "fact": "user",
+}
+
+
+def memory_channel(raw_channel, stem: str) -> str:
+    """Authoritative trust channel for a memory node, as the panel enum
+    ("endorsed"|"user"|"agent"|"external"). Prefers the store's channel value;
+    derives from the type prefix only when the store value is missing."""
+    if raw_channel:
+        mapped = _CHANNEL_ENUM.get(str(raw_channel).strip().lower())
+        if mapped:
+            return mapped
+    return _TYPE_CHANNEL.get(stem.split("_", 1)[0], "user")
+
+
+def _consolidation_dir() -> Path:
+    """Where the weekly consolidation sweep (run-sweep.ps1, the PC-only
+    `ClaudeMemoryConsolidate` scheduled task) writes its artifacts. Env-
+    overridable for tests — same idiom as _memsom_db()."""
+    return Path(os.environ.get("MEMSOM_CONSOLIDATION_DIR")
+                or HOME / ".claude" / "consolidation")
+
+
+def last_consolidation() -> str | None:
+    """ISO8601 (UTC) of when the memory consolidation sweep last completed on
+    this machine, or None if it has never run here.
+
+    Source = the dated report the sweep writes on every SUCCESSFUL run
+    (`consolidation/reports/report-<date>.md`); the file's mtime is the real
+    completion time. Falls back to `latest-report.md` (a copy of the newest
+    report). This is deliberately NOT `generated` — that stamps the dashboard's
+    cache-build time, not the sweep."""
+    base = _consolidation_dir()
+    candidates = []
+    reports = base / "reports"
+    if reports.is_dir():
+        candidates.extend(reports.glob("report-*.md"))
+    latest = base / "latest-report.md"
+    if latest.exists():
+        candidates.append(latest)
+    if not candidates:
+        return None
+    try:
+        newest = max(candidates, key=lambda p: p.stat().st_mtime)
+        return datetime.fromtimestamp(newest.stat().st_mtime, timezone.utc).isoformat()
+    except OSError:
+        return None
 
 
 def session_count():
@@ -165,7 +233,8 @@ def build_graph(mem_dir, rows):
         nodes.append({"id": stem, "label": stem, "kind": "memory",
                       "section": sec, "type": stem_type(stem),
                       "count": int(r["count"]), "tier": r["tier"],
-                      "pinned": int(r["pinned"])})
+                      "pinned": int(r["pinned"]),
+                      "channel": memory_channel(r.get("channel"), stem)})
         links.append({"source": "§" + sec, "target": stem, "kind": "tree"})
 
     nodeset = {n["id"] for n in nodes}
@@ -253,6 +322,7 @@ def build_telemetry():
 
     return {
         "generated": now.strftime("%Y-%m-%d %H:%M UTC"),
+        "last_consolidation": last_consolidation(),
         "totals": {"total": total, "hot": hot, "cold": cold, "pinned": pinned},
         "tier": {"hot": hot, "cold": cold},
         "types": dict(type_counts),
