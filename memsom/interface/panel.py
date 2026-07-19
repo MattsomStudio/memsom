@@ -72,6 +72,7 @@ from memsom.interface import telemetry
 from memsom.lifecycle import forget
 from memsom.providers import build_registry
 from memsom.providers import handlers as provider_handlers
+from memsom.providers import voice_handlers
 from memsom.providers import agent_handlers
 from memsom.providers import kernel_handlers
 from memsom.providers.agent_store import GraphStore
@@ -1245,6 +1246,8 @@ class PanelConfig:
     # local-AI control plane (defaulted so existing constructors don't break)
     registry: dict = None
     session_runner: "SessionRunner" = None
+    # voice tab: its own durable-session dir (beside inference/) for streamed chat
+    voice_runner: "SessionRunner" = None
     # agent orchestration layer (same defaulting rationale)
     graph_store: "GraphStore" = None
     agent_runner: "AgentRunner" = None
@@ -1285,6 +1288,9 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     inference_dir = Path(profile["audit_log"]).parent / "inference"
     registry = build_registry(profile, servers_path=inference_dir / "servers.json")
     session_runner = SessionRunner(inference_dir)
+    # voice chat streams into its own sessions dir (sibling of inference/) so the
+    # voice tab's transcripts stay separate from the INFERENCE tab's history.
+    voice_runner = SessionRunner(Path(profile["audit_log"]).parent / "voice")
     # agent orchestration: saved canvases + durable tool-loop runs, sibling of
     # inference/. Boot reconcile stamps runs orphaned by a server restart.
     agents_dir = Path(profile["audit_log"]).parent / "agents"
@@ -1310,6 +1316,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         claude_dir=claude_dir, workflows_cache=workflows_cache,
         agents_cache=agents_cache, memories_cache=memories_cache,
         registry=registry, session_runner=session_runner,
+        voice_runner=voice_runner,
         graph_store=graph_store, agent_runner=agent_runner,
         scheduler=scheduler,
         kernel_store=kernel_store, kernel_runner=kernel_runner,
@@ -1748,6 +1755,10 @@ _SECURITY_HEADERS = {
 }
 
 _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB — knob JSON payloads are tiny
+# Voice STT ships a base64'd compressed-audio blob, which blows past 1 MiB for
+# anything longer than a short utterance. base64 inflates ~33%, so 8 MiB of body
+# ≈ 6 MiB of opus ≈ minutes of speech — a comfortable ceiling for an utterance.
+_MAX_VOICE_BODY_BYTES = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -1845,6 +1856,11 @@ def make_handler(config: PanelConfig):
                     config.session_runner, _q1(query, "session_id"),
                     _qint(query, "cursor", 0))
                 self._send_json(st, body)
+            elif path == "/api/voice/chat":
+                st, body = voice_handlers.handle_voice_chat_read(
+                    config.voice_runner, _q1(query, "session_id"),
+                    _qint(query, "cursor", 0))
+                self._send_json(st, body)
             elif path == "/api/saveall/status":
                 self._send_json(200, saveall_runner.status(config.claude_dir))
             elif path == "/api/session-status":
@@ -1910,10 +1926,11 @@ def make_handler(config: PanelConfig):
                 except Exception:
                     pass
 
-        def _read_post_json(self):
+        def _read_post_json(self, max_bytes=_MAX_BODY_BYTES):
             """Shared POST gate: Content-Type check, Origin allowlist, bounded
             body read, JSON parse. Sends the error response itself and returns
-            None on any failure; the payload dict otherwise."""
+            None on any failure; the payload dict otherwise. *max_bytes* raises
+            the body ceiling for one route (voice STT ships base64 audio)."""
             ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             if ctype != "application/json":
                 self._reject(403, {"ok": False, "error": "Content-Type must be application/json"})
@@ -1930,7 +1947,7 @@ def make_handler(config: PanelConfig):
             except ValueError:
                 self._reject(400, {"ok": False, "error": "bad Content-Length"})
                 return None
-            if length < 0 or length > _MAX_BODY_BYTES:
+            if length < 0 or length > max_bytes:
                 self._reject(413, {"ok": False, "error": "request body too large"})
                 return None
             body = self.rfile.read(length) if length else b""
@@ -1970,6 +1987,29 @@ def make_handler(config: PanelConfig):
                 status, result = provider_handlers.handle_inference_start(
                     config.registry, config.session_runner,
                     config.audit_log_path, payload)
+                self._send_json(status, result)
+            elif path == "/api/voice/stt":
+                # STT ships base64 audio — raise the body cap for this route only.
+                payload = self._read_post_json(_MAX_VOICE_BODY_BYTES)
+                if payload is None:
+                    return
+                status, result = voice_handlers.handle_voice_stt(
+                    config.registry, config.audit_log_path, payload)
+                self._send_json(status, result)
+            elif path == "/api/voice/chat":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = voice_handlers.handle_voice_chat_start(
+                    config.registry, config.voice_runner,
+                    config.audit_log_path, payload)
+                self._send_json(status, result)
+            elif path == "/api/voice/tts":
+                payload = self._read_post_json()
+                if payload is None:
+                    return
+                status, result = voice_handlers.handle_voice_tts(
+                    config.registry, config.audit_log_path, payload)
                 self._send_json(status, result)
             elif path == "/api/agents/graph":
                 payload = self._read_post_json()

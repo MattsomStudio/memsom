@@ -29,8 +29,9 @@ Sample shape
           "commit":   {"total","limit","used_pct"} | {"error"}},
   "top_procs": {"by_working_set": [{"pid","name","rss"}, ...],
                 "by_commit":      [{"pid","name","vms"}, ...]} | {"error"},
+  "cpu": {"used_pct"} | {"error"},
   "gpu": {"available": bool, "name"?, "vram_used_mb"?, "vram_total_mb"?,
-          "procs"?: [{"pid","name","used_mb"}]},
+          "gpu_util_pct"?, "gpu_temp_c"?, "procs"?: [{"pid","name","used_mb"}]},
   "disks": [{"path","bytes","delta_bytes"}],   # delta_bytes is None on first sample
   "probes": [{"name","host","port","ok","ms"}],
   "syncthing": {"reachable": bool, "connections"?: {...}, "error"?: str},
@@ -84,6 +85,20 @@ def _physical_ram(psutil_mod):
         "available": vm.available,
         "used_pct": round(float(vm.percent), 2),
     }
+
+
+def _cpu_percent(psutil_mod):
+    """System-wide CPU utilization, mirroring _physical_ram's lazy-psutil shape.
+
+    interval=None is the non-blocking form: it returns the load since the LAST
+    call (the first call in a process returns 0.0). The panel samples at request
+    time, not on a fixed cadence, so this is "load since the previous sample" —
+    good enough for a live gauge and it never blocks the request thread the way
+    interval>0 would.
+    """
+    if psutil_mod is None:
+        return {"error": PSUTIL_HINT}
+    return {"used_pct": round(float(psutil_mod.cpu_percent(interval=None)), 2)}
 
 
 def _top_procs(psutil_mod, top_n):
@@ -172,7 +187,8 @@ def _to_int(s):
 def _read_gpu(run):
     try:
         r = run(
-            ["nvidia-smi", "--query-gpu=name,memory.used,memory.total",
+            ["nvidia-smi",
+             "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
@@ -184,6 +200,10 @@ def _read_gpu(run):
     if not line:
         return {"available": False}
     parts = [p.strip() for p in line[0].split(",")]
+    # Still gate on the three fields we've always required (name + the two VRAM
+    # numbers). util/temp are additive: a driver that omits them (or the test
+    # fakes that only emit three fields) must degrade to util/temp=None, never
+    # collapse the whole GPU section to unavailable.
     if len(parts) < 3:
         return {"available": False}
     result = {
@@ -191,6 +211,8 @@ def _read_gpu(run):
         "name": parts[0],
         "vram_used_mb": _to_int(parts[1]),
         "vram_total_mb": _to_int(parts[2]),
+        "gpu_util_pct": _to_int(parts[3]) if len(parts) > 3 else None,
+        "gpu_temp_c": _to_int(parts[4]) if len(parts) > 4 else None,
     }
 
     try:
@@ -348,6 +370,9 @@ class SystemTelemetry:
             ),
             "top_procs": self._safe(
                 lambda: _top_procs(psutil_mod, top_n), {"error": "unavailable"}
+            ),
+            "cpu": self._safe(
+                lambda: _cpu_percent(psutil_mod), {"error": "unavailable"}
             ),
             "gpu": self._safe(lambda: _read_gpu(self._run), {"available": False}),
             "disks": self._safe(self._disks, []),

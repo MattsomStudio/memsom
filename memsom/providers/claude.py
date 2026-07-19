@@ -139,6 +139,12 @@ class ClaudeAdapter(Provider):
             body["system"] = system
         if params.get("temperature") is not None:
             body["temperature"] = params["temperature"]
+        # Streaming path for the voice tab: per-sentence TTS needs tokens as they
+        # arrive, not one blob at the end. Tools + streaming isn't wired (a tool
+        # turn has no useful token stream), so it falls through to the buffered
+        # request below.
+        if params.get("stream") and not tools:
+            return self._infer_api_stream(model, params, sink, body, key)
         try:
             req = urllib.request.Request(
                 self.api_base + "/v1/messages",
@@ -167,6 +173,61 @@ class ClaudeAdapter(Provider):
                       if b.get("type") == "tool_use"]
         if tool_calls:
             stats["tool_calls"] = tool_calls
+        return stats
+
+    def _infer_api_stream(self, model, params, sink, body, key) -> dict:
+        """Streaming Anthropic Messages call. Template is ollama.py's line-
+        iterating stream loop: read the response line by line, parse each SSE
+        ``data:`` frame, and push the text delta of every content_block_delta to
+        the sink. Usage counters ride the message_start / message_delta frames.
+
+        Anthropic SSE frame shapes we care about:
+          message_start        -> message.usage.input_tokens
+          content_block_delta  -> delta.type == "text_delta" -> delta.text
+          message_delta        -> usage.output_tokens (cumulative, terminal)
+        Other frame types (ping, content_block_start/stop, message_stop) are
+        ignored — we only need the text deltas and the two token counters.
+        """
+        body["stream"] = True
+        stats = {"transport": "api"}
+        try:
+            req = urllib.request.Request(
+                self.api_base + "/v1/messages",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "x-api-key": key, "anthropic-version": _API_VERSION})
+            with urllib.request.urlopen(
+                    req, timeout=params.get("timeout", 600)) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8").strip() if isinstance(raw, bytes) \
+                        else raw.strip()
+                    if not line or not line.startswith("data:"):
+                        continue  # skip blank lines and "event:" lines
+                    data_str = line[5:].strip()  # strip "data:"
+                    if not data_str:
+                        continue
+                    try:
+                        evt = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue  # a partial frame — next line completes it
+                    etype = evt.get("type")
+                    if etype == "content_block_delta":
+                        delta = evt.get("delta") or {}
+                        if delta.get("type") == "text_delta" and delta.get("text"):
+                            sink.token(delta["text"])
+                    elif etype == "message_start":
+                        usage = (evt.get("message") or {}).get("usage") or {}
+                        if usage.get("input_tokens"):
+                            stats["prompt_tokens"] = usage["input_tokens"]
+                    elif etype == "message_delta":
+                        usage = evt.get("usage") or {}
+                        if usage.get("output_tokens"):
+                            stats["eval_count"] = usage["output_tokens"]
+        except urllib.error.HTTPError as exc:
+            raise ProviderError(f"anthropic API {exc.code}") from exc
+        except (urllib.error.URLError, OSError, TimeoutError,
+                json.JSONDecodeError) as exc:
+            raise ProviderError(f"anthropic API failed: {exc}") from exc
         return stats
 
     # ---- HTTP plumbing (api transport) ----

@@ -15,15 +15,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from memsom.providers.chatterbox import ChatterboxAdapter
 from memsom.providers.claude import ClaudeAdapter
 from memsom.providers.codex import CodexAdapter
 from memsom.providers.llamacpp import LlamaCppAdapter
 from memsom.providers.ollama import OllamaAdapter
+from memsom.providers.parakeet import ParakeetAdapter
 from memsom.providers.procman import ProcessManager
 from memsom.providers.vllm import VllmAdapter
 
-# kinds that manage a local serving process → need the ProcessManager
-_PROC_KINDS = {"llamacpp", "vllm"}
+# kinds that manage a local serving process → need the ProcessManager. The voice
+# models (parakeet/chatterbox) launch a detached model server on load(), so they
+# take the procman too.
+_PROC_KINDS = {"llamacpp", "vllm", "parakeet", "chatterbox"}
 
 
 def build_registry(profile: dict, *, servers_path=None) -> dict:
@@ -63,4 +67,8 @@ def _construct(kind: str, spec: dict, procman):
         return ClaudeAdapter(spec)
     if kind == "codex":
         return CodexAdapter(spec)
+    if kind == "parakeet":
+        return ParakeetAdapter(spec, procman=procman)
+    if kind == "chatterbox":
+        return ChatterboxAdapter(spec, procman=procman)
     return None
