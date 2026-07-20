@@ -8,7 +8,7 @@ The voice flow, end to end:
   1. mic -> POST /api/voice/stt        (Parakeet)  -> {text}
   2. text -> POST /api/voice/chat      (Claude, STREAMED) -> {session_id}
   3. GET  /api/voice/chat?session_id=&cursor=N  cursor-polls the transcript
-  4. each finished sentence -> POST /api/voice/tts  (Chatterbox) -> {audio_b64}
+  4. each finished sentence -> POST /api/voice/tts  (Kokoro) -> {audio_b64}
 
 AUDIT DISCIPLINE (load-bearing): every mutation is two-phase audited (an intent
 "pending" line gates the action, a result line follows) against the panel's
@@ -152,9 +152,9 @@ def handle_voice_tts(registry: dict, audit_log_path, payload: dict) -> tuple:
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
         return 400, {"ok": False, "error": "missing 'text'"}
-    adapter = _find_by_kind(registry, "chatterbox")
+    adapter = _find_by_kind(registry, "kokoro")
     if adapter is None:
-        return 404, {"ok": False, "error": "no chatterbox (TTS) provider configured"}
+        return 404, {"ok": False, "error": "no kokoro (TTS) provider configured"}
 
     model = getattr(adapter, "default_model", "")
     intent = {"op": "tts", "model": model, "ctx_len": len(text)}

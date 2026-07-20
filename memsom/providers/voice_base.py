@@ -1,12 +1,13 @@
 """Shared base for the load-on-demand voice adapters (STT + TTS).
 
-Why this exists: Parakeet (speech->text) and Chatterbox (text->speech) are the
-same *shape* of backend — a small local model you warm into VRAM on demand, hold
-for a keep-alive window, then evict so the 30B chat model can have the card back.
-That residency lifecycle is identical to Ollama's ``load``/``unload`` (see
-``ollama.py``); only the actual inference call differs. So the lifecycle lives
-here once and the two concrete adapters (``parakeet.py``, ``chatterbox.py``) each
-add just their one inference method and their install metadata.
+Why this exists: Parakeet (speech->text) and Kokoro (text->speech) are the
+same *shape* of backend — a small local model you warm on demand, hold for a
+keep-alive window, then drop. That residency lifecycle is identical to Ollama's
+``load``/``unload`` (see ``ollama.py``); only the actual inference call differs.
+So the lifecycle lives here once and the two concrete adapters (``parakeet.py``,
+``kokoro.py``) each add just their one inference method and their install
+metadata. Both current voice models run on CPU (sherpa-onnx / kokoro-onnx), so
+neither holds VRAM — they set ``has_vram=False`` and never compete with the 30B.
 
 STUB BOUNDARY (deliberate, per the build guardrail): the *plumbing* is real —
 capabilities, status, VRAM estimate, the two-phase-audited load/unload, and the
@@ -46,7 +47,7 @@ class VoiceAdapter(Provider):
     """Base for local, load-on-demand voice models. Subclasses set the class
     attributes below and implement exactly one inference method."""
 
-    #: "parakeet" / "chatterbox" — also the registry kind. Set by subclass.
+    #: "parakeet" / "kokoro" — also the registry kind. Set by subclass.
     kind = ""
     #: default model id served when a call omits ``model``.
     default_model = ""
