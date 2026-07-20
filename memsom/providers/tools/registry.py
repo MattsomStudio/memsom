@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from memsom.providers.tools.base import Tool, ToolError
 from memsom.providers.tools.builtins import (
+    DeepRecall,
     FileRead,
     HttpFetch,
     MemoryRecall,
@@ -23,6 +24,7 @@ BUILTIN_TOOLS: dict[str, type[Tool]] = {
     HttpFetch.type: HttpFetch,
     WebSearch.type: WebSearch,
     MemoryRecall.type: MemoryRecall,
+    DeepRecall.type: DeepRecall,
     FileRead.type: FileRead,
     Shell.type: Shell,
 }

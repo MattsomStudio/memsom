@@ -275,6 +275,167 @@ class MemoryRecall(Tool):
 
 
 # ---------------------------------------------------------------------------
+# recall  (deep recall — the full /recall pipeline)
+# ---------------------------------------------------------------------------
+
+
+class DeepRecall(Tool):
+    """Shell out to ``recall_all.py`` — the bge-m3 hybrid retriever behind Matt's
+    ``/recall`` skill — instead of the store-only ``memsom retrieve``.
+
+    Why this exists: :class:`MemoryRecall` only searches the memsom store and, on
+    its own, missed his most central facts (it has zero vault/session coverage).
+    ``recall_all.py`` runs the SAME routed-hybrid engine (keyword + local bge-m3
+    vectors on the PC) over THREE corpora at once — his memsom memory files, his
+    Obsidian vault notes, and his archived Claude Code / desktop sessions — and
+    merges them into one ranked, source-labeled list. It self-degrades to a local
+    nomic tier and then to keyword-only if the vector service is down; this tool
+    surfaces that state to the model rather than failing.
+
+    Read-only: it only invokes ``recall_all.py`` with ``--json`` and parses the
+    result. A subprocess (not an in-process import) keeps the agent runner
+    isolated from the retriever's DB/embedder state, and lets it run under the
+    vector-capable interpreter (the panel's own Python may lack sqlite-vec).
+    """
+
+    type = "recall"
+    description = (
+        "Search Matt's FULL knowledge base with the bge-m3 hybrid retriever: his "
+        "memsom memory, his Obsidian vault notes, and his past Claude Code / "
+        "desktop sessions, merged into one ranked list. Use this for ANYTHING "
+        "about him — his past work, decisions, projects, goals, or notes — "
+        "before answering from guesswork. Returns hits labeled by source "
+        "(memory / vault / session) with date, title and a snippet."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "what to look up"},
+        },
+        "required": ["query"],
+    }
+    options_schema = {
+        "type": "object",
+        "properties": {
+            "k": {
+                "type": "integer",
+                "description": "max merged hits to return (default 8)",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["both", "sessions", "notes"],
+                "description": "corpora to search (default both)",
+            },
+            "python": {
+                "type": "string",
+                "description": "interpreter to run recall_all.py under "
+                               "(must have sqlite-vec; default the PC's "
+                               "Python 3.12, falling back to this process's).",
+            },
+            "script": {
+                "type": "string",
+                "description": "path to recall_all.py (default "
+                               "~/.claude/episodic/recall_all.py)",
+            },
+        },
+    }
+
+    #: the vector-capable interpreter the recall stack expects on the PC.
+    _DEFAULT_PY = r"C:\Program Files\Python312\python.exe"
+
+    def __init__(self, options: dict) -> None:
+        super().__init__(options)
+        self.k = int(self.options.get("k", 8))
+        self.source = str(self.options.get("source", "both"))
+        if self.source not in ("both", "sessions", "notes"):
+            raise ToolError(f"recall source must be both|sessions|notes, got {self.source!r}")
+
+        py = self.options.get("python") or self._DEFAULT_PY
+        # Fall back to this process's interpreter if the configured one is
+        # absent (e.g. running on the Mac), so the tool builds cleanly and the
+        # engine's own keyword-only fallback covers a missing embedder.
+        self.python = py if Path(py).exists() else sys.executable
+
+        script = self.options.get("script")
+        self.script = (Path(script) if script
+                       else Path.home() / ".claude" / "episodic" / "recall_all.py")
+
+    def run(self, arguments: dict, ctx: ToolContext) -> str:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            raise ToolError("recall requires a non-empty 'query'")
+        if not self.script.exists():
+            raise ToolError(f"recall_all.py not found at {self.script}")
+
+        argv = [self.python, str(self.script), query,
+                "--k", str(self.k), "--source", self.source, "--json"]
+        try:
+            # cwd = the script's dir so its sibling engine imports (config,
+            # recall_bge, vault_recall_bge) resolve regardless of caller cwd.
+            proc = run_no_window(argv, capture_output=True, text=True,
+                                 errors="replace", timeout=ctx.timeout_s,
+                                 cwd=str(self.script.parent))
+        except subprocess.TimeoutExpired as exc:
+            raise ToolError(
+                f"recall timed out after {ctx.timeout_s}s "
+                "(bge cold-load can take ~30s on the first call)") from exc
+        except OSError as exc:
+            raise ToolError(f"recall failed to launch: {exc}") from exc
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip()[-500:]
+            raise ToolError(f"recall exited {proc.returncode}: {tail}")
+
+        return _cap(self._format(proc.stdout or "", query), ctx.max_output_bytes)
+
+    @staticmethod
+    def _format(stdout: str, query: str) -> str:
+        """Turn recall_all's --json into a compact, source-labeled block the
+        model can ground on. Falls back to the raw stdout if the JSON shape ever
+        changes, so a parser drift degrades to 'still usable' not 'crash'."""
+        import json as _json
+
+        try:
+            data = _json.loads(stdout)
+        except (ValueError, TypeError):
+            return (stdout or "").strip() or "no output from recall"
+
+        hits = data.get("hits") or []
+        lines: list[str] = [f"recall results for: {query}"]
+
+        # Surface retrieval health so the model can caveat weak results rather
+        # than treat a keyword-only degrade as authoritative.
+        if data.get("degraded"):
+            lines.append("WARNING: vector search OFFLINE — keyword-only results "
+                         "(weaker; no semantic match). Treat as best-effort.")
+        elif data.get("fallback"):
+            lines.append(f"note: {data['fallback']}")
+
+        if not hits:
+            lines.append("no hits — try broader or different terms.")
+            return "\n".join(lines)
+
+        for i, h in enumerate(hits, 1):
+            src = h.get("source")
+            if src == "note":
+                label = "memory" if h.get("folder") == "memory" else "vault"
+                date = h.get("date") or "?"
+                title = h.get("rel") or h.get("title") or "?"
+                head = f"{i}. [{label} | {date}] {title}"
+                extra = h.get("title")
+                if extra and extra.lower() not in str(title).lower():
+                    head += f" - {extra}"
+            else:  # session
+                date = h.get("date") or "?"
+                fp = (h.get("first_prompt") or "").strip().replace("\n", " ")
+                head = f"{i}. [session | {date}] {fp[:110]}"
+            lines.append(head)
+            snip = (h.get("snippet") or "").strip().replace("\n", " ")
+            if snip:
+                lines.append(f"     > {snip}")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # file_read
 # ---------------------------------------------------------------------------
 

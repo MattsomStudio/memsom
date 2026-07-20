@@ -38,10 +38,13 @@ from memsom.providers.tools import ToolError, build_tools
 # Tight, voice-appropriate. Names the tools so the model reaches for recall
 # instead of guessing about his past work.
 _VOICE_SYSTEM = (
-    "You are Matt's voice assistant with tools to search his memsom memory "
-    "(memory_recall) and the web (web_search). When he asks about his past "
-    "work, decisions, projects, or anything you don't already know, CALL "
-    "memory_recall before answering — don't guess. Keep spoken answers to 1-3 "
+    "You are Matt's voice assistant with tools to search his knowledge base "
+    "(recall) and the web (web_search). The `recall` tool runs his full "
+    "bge-m3 retriever over his memory, his Obsidian vault notes, AND his past "
+    "Claude Code / desktop sessions. When he asks about his past work, "
+    "decisions, projects, vault notes, goals, or ANYTHING about him you don't "
+    "already know, CALL recall before answering — don't guess. If the first "
+    "results miss, reformulate and call it again. Keep spoken answers to 1-3 "
     "sentences unless he asks you to elaborate."
 )
 
@@ -58,16 +61,18 @@ _VOICE_LIMITS = {"max_turns": 6, "tool_timeout_s": 90,
 def _voice_tool_specs(adapter) -> list:
     """The EXPLICIT read-only allowlist for the voice brain — not "all builtins".
 
-    Only three abilities, all read-only: search his memsom memory, search the
-    web, and read a fenced file tree. shell is deliberately absent, as is any
-    mutating/agent-control tool — a spoken query must never be able to run a
-    destructive op. Adding a tool here is the only way the voice brain gains one.
+    Only three abilities, all read-only: deep recall over his knowledge base,
+    search the web, and read a fenced file tree. `recall` (the bge-m3 pipeline
+    behind /recall) REPLACES the old store-only `memory_recall` — one recall
+    tool, the good one, so the model can't reach for the thin one that missed
+    his central facts. shell is deliberately absent, as is any mutating/agent-
+    control tool — a spoken query must never be able to run a destructive op.
+    Adding a tool here is the only way the voice brain gains one.
     """
     root = getattr(adapter, "spec", {}).get("voice_file_read_root") \
         or str(_REPO_ROOT)
     return [
-        {"name": "memory_recall", "type": "memory_recall",
-         "options": {"mode": "retrieve", "k": 6}},
+        {"name": "recall", "type": "recall", "options": {"k": 8}},
         {"name": "web_search", "type": "web_search",
          "options": {"max_results": 5}},
         {"name": "file_read", "type": "file_read", "options": {"root": root}},
