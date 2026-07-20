@@ -38,7 +38,7 @@ from typing import Optional
 
 from memsom.providers.base import ProviderError, now
 from memsom.providers.session import (
-    FileSink, new_session_id, valid_session_id, _final_stats, _first_json,
+    AgentFileSink, new_session_id, valid_session_id, _final_stats, _first_json,
 )
 from memsom.providers.tools import (
     Tool, ToolContext, ToolError, build_tools, to_openai_tools,
@@ -178,11 +178,135 @@ def compile_graph(graph: dict, registry: dict, *,
     )
 
 
-class AgentFileSink(FileSink):
-    """FileSink plus free-form event lines (tool_call, turn, warmup...)."""
+def run_tool_loop(adapter, model: str, messages: list, params: dict,
+                  sink, *, tools: list, audit_path, limits: dict,
+                  final_answer_on_exhaust: bool = False) -> dict:
+    """The durable infer→execute-tools→infer loop, provider-agnostic.
 
-    def event(self, obj: dict, sync: bool = False) -> None:
-        self._write(obj, sync=sync)
+    Extracted from :class:`AgentRunner` so both the agent layer AND the voice
+    tool-loop drive ONE implementation (no reinvention). Semantics unchanged:
+    render *tools* into ``params['tools']`` (OpenAI wire), then each turn call
+    ``adapter.infer(model, messages, params, sink)``; a turn with no
+    ``stats['tool_calls']`` is the final answer and returns; otherwise execute
+    every call under the two-phase audit, feed results back, and loop. Emits
+    ``turn``/``tool_call``/``tool_result`` events onto *sink* (an
+    :class:`AgentFileSink`). *messages* is mutated in place — callers that
+    reuse a base message list must pass a copy.
+
+    Streaming: whether a turn streams tokens or returns them buffered is the
+    ADAPTER's call (claude.py streams text deltas AND tool_use when
+    ``params['stream']`` is set; without it, whole-turn text lands via
+    ``sink.token`` at the end). Either way every token reaches *sink*.
+    """
+    by_name = {t.name: t for t in tools}
+    ctx = ToolContext(
+        audit_path=audit_path,
+        timeout_s=limits["tool_timeout_s"],
+        max_output_bytes=limits["max_tool_output_bytes"],
+    )
+    params = dict(params)
+    if tools:
+        params["tools"] = to_openai_tools(tools)
+
+    started = now()
+    last_sig, strikes = None, 0
+    agg: dict = {}
+    tool_call_count = 0
+
+    for turn in range(1, limits["max_turns"] + 1):
+        if now() - started > limits["run_timeout_s"]:
+            raise ProviderError(f"run timeout after {limits['run_timeout_s']}s")
+        sink.event({"t": "turn", "n": turn, "ts": now()})
+        stats = adapter.infer(model, messages, params, sink) or {}
+        for k in ("prompt_tokens", "eval_count"):
+            if isinstance(stats.get(k), (int, float)):
+                agg[k] = agg.get(k, 0) + stats[k]
+        calls = stats.get("tool_calls") or []
+        if not calls:
+            agg["turns"] = turn
+            agg["tool_calls"] = tool_call_count
+            return agg
+
+        # loop detection: the same call(s), repeatedly
+        sig = json.dumps([(c.get("name"), c.get("arguments"))
+                          for c in calls], sort_keys=True, default=str)
+        strikes = strikes + 1 if sig == last_sig else 0
+        last_sig = sig
+        if strikes >= _LOOP_STRIKES - 1:
+            raise ProviderError(
+                f"tool loop detected: {_LOOP_STRIKES}x identical call(s)")
+
+        assistant_text = ""  # text already went to the sink; echo minimal
+        messages.append({"role": "assistant", "content": assistant_text,
+                         "tool_calls": calls})
+        for call in calls:
+            tool_call_count += 1
+            cid = call.get("id") or f"tc_{tool_call_count}"
+            name = call.get("name") or ""
+            arguments = call.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {"_raw": str(arguments)}
+            sink.event({"t": "tool_call", "turn": turn, "id": cid,
+                        "name": name, "arguments": arguments, "ts": now()})
+            t0 = now()
+            output, ok = _execute_tool(by_name.get(name), name, arguments, ctx,
+                                       audit_path, available=sorted(by_name))
+            text, truncated = truncate_output(
+                output, limits["max_tool_output_bytes"])
+            sink.event({"t": "tool_result", "turn": turn, "id": cid,
+                        "name": name, "ok": ok, "output": text,
+                        "bytes": len(output.encode("utf-8", "ignore")),
+                        "truncated": truncated,
+                        "elapsed_s": round(now() - t0, 3)})
+            messages.append({"role": "tool", "tool_call_id": cid,
+                             "name": name, "content": text})
+    if final_answer_on_exhaust:
+        # Voice must always speak SOMETHING. Instead of erroring with no answer
+        # when the model keeps reaching for tools, strip the tools and force one
+        # final text turn — it summarizes what it has (or says it came up empty).
+        sink.event({"t": "turn", "n": limits["max_turns"] + 1,
+                    "final": True, "ts": now()})
+        final_params = dict(params)
+        final_params.pop("tools", None)
+        stats = adapter.infer(model, messages, final_params, sink) or {}
+        for k in ("prompt_tokens", "eval_count"):
+            if isinstance(stats.get(k), (int, float)):
+                agg[k] = agg.get(k, 0) + stats[k]
+        agg["turns"] = limits["max_turns"] + 1
+        agg["tool_calls"] = tool_call_count
+        agg["exhausted"] = True
+        return agg
+    raise ProviderError(
+        f"max turns reached ({limits['max_turns']}) without a final answer")
+
+
+def _execute_tool(tool: Optional[Tool], name: str, arguments: dict,
+                  ctx: ToolContext, audit_path, *, available: list) -> tuple:
+    """Run one tool call under the two-phase audit. Model-level mistakes
+    (unknown tool, bad args, tool failure) come back as a failing result
+    string — the model gets to react; only audit unavailability kills the
+    run."""
+    from memsom.providers.handlers import _audit
+    intent = {"action": "tool", "tool": name,
+              "arguments": {k: str(v)[:200] for k, v in arguments.items()}}
+    try:
+        _audit(audit_path, {**intent, "result": "pending"}, gate=True)
+    except OSError as exc:
+        raise ProviderError(f"audit unavailable; refused: {exc}") from exc
+    if tool is None:
+        _audit(audit_path, {**intent, "result": "refused-unknown-tool"})
+        return (f"unknown tool {name!r}; available: "
+                f"{', '.join(available) or 'none'}", False)
+    try:
+        out = tool.run(arguments, ctx)
+    except ToolError as exc:
+        _audit(audit_path, {**intent, "result": f"failed: {exc}"})
+        return f"tool error: {exc}", False
+    except Exception as exc:
+        _audit(audit_path, {**intent, "result": f"error: {exc}"})
+        return f"tool internal error: {exc}", False
+    _audit(audit_path, {**intent, "result": "ok"})
+    return out, True
 
 
 class AgentRunner:
@@ -281,105 +405,13 @@ class AgentRunner:
     def _loop(self, adapter, spec: AgentSpec, run_id: str,
               sink: AgentFileSink) -> dict:
         tools = build_tools(spec.tool_specs)
-        by_name = {t.name: t for t in tools}
-        ctx = ToolContext(
-            audit_path=self.audit_path,
-            timeout_s=spec.limits["tool_timeout_s"],
-            max_output_bytes=spec.limits["max_tool_output_bytes"],
-        )
-        params = dict(spec.params)
-        if tools:
-            params["tools"] = to_openai_tools(tools)
-
         messages: list = []
         if spec.system:
             messages.append({"role": "system", "content": spec.system})
         messages.append({"role": "user", "content": spec.input or "Begin."})
-
-        started = now()
-        last_sig, strikes = None, 0
-        agg: dict = {}
-        tool_call_count = 0
-
-        for turn in range(1, spec.limits["max_turns"] + 1):
-            if now() - started > spec.limits["run_timeout_s"]:
-                raise ProviderError(
-                    f"run timeout after {spec.limits['run_timeout_s']}s")
-            sink.event({"t": "turn", "n": turn, "ts": now()})
-            stats = adapter.infer(spec.model, messages, params, sink) or {}
-            for k in ("prompt_tokens", "eval_count"):
-                if isinstance(stats.get(k), (int, float)):
-                    agg[k] = agg.get(k, 0) + stats[k]
-            calls = stats.get("tool_calls") or []
-            if not calls:
-                agg["turns"] = turn
-                agg["tool_calls"] = tool_call_count
-                return agg
-
-            # loop detection: the same single call, repeatedly
-            sig = json.dumps([(c.get("name"), c.get("arguments"))
-                              for c in calls], sort_keys=True, default=str)
-            strikes = strikes + 1 if sig == last_sig else 0
-            last_sig = sig
-            if strikes >= _LOOP_STRIKES - 1:
-                raise ProviderError(
-                    f"tool loop detected: {_LOOP_STRIKES}x identical call(s)")
-
-            assistant_text = ""  # text already went to the sink; echo minimal
-            messages.append({"role": "assistant", "content": assistant_text,
-                             "tool_calls": calls})
-            for call in calls:
-                tool_call_count += 1
-                cid = call.get("id") or f"tc_{tool_call_count}"
-                name = call.get("name") or ""
-                arguments = call.get("arguments")
-                if not isinstance(arguments, dict):
-                    arguments = {"_raw": str(arguments)}
-                sink.event({"t": "tool_call", "turn": turn, "id": cid,
-                            "name": name, "arguments": arguments, "ts": now()})
-                t0 = now()
-                output, ok = self._execute(by_name.get(name), name,
-                                           arguments, ctx,
-                                           available=sorted(by_name))
-                text, truncated = truncate_output(
-                    output, spec.limits["max_tool_output_bytes"])
-                sink.event({"t": "tool_result", "turn": turn, "id": cid,
-                            "name": name, "ok": ok, "output": text,
-                            "bytes": len(output.encode("utf-8", "ignore")),
-                            "truncated": truncated,
-                            "elapsed_s": round(now() - t0, 3)})
-                messages.append({"role": "tool", "tool_call_id": cid,
-                                 "name": name, "content": text})
-        raise ProviderError(
-            f"max turns reached ({spec.limits['max_turns']}) without a final answer")
-
-    def _execute(self, tool: Optional[Tool], name: str, arguments: dict,
-                 ctx: ToolContext, *, available: list) -> tuple:
-        """Run one tool call under the two-phase audit. Model-level mistakes
-        (unknown tool, bad args, tool failure) come back as a failing result
-        string — the model gets to react; only audit unavailability kills
-        the run."""
-        from memsom.providers.handlers import _audit
-        intent = {"action": "tool", "tool": name,
-                  "arguments": {k: str(v)[:200] for k, v in arguments.items()}}
-        try:
-            _audit(self.audit_path, {**intent, "result": "pending"}, gate=True)
-        except OSError as exc:
-            raise ProviderError(f"audit unavailable; refused: {exc}") from exc
-        if tool is None:
-            _audit(self.audit_path, {**intent, "result": "refused-unknown-tool"})
-            return (f"unknown tool {name!r}; available: "
-                    f"{', '.join(available) or 'none'}", False)
-        try:
-            out = tool.run(arguments, ctx)
-        except ToolError as exc:
-            _audit(self.audit_path, {**intent, "result": f"failed: {exc}"})
-            return f"tool error: {exc}", False
-        except Exception as exc:
-            _audit(self.audit_path, {**intent, "result": f"error: {exc}"})
-            return f"tool internal error: {exc}", False
-        _audit(self.audit_path, {**intent, "result": "ok"})
-        return out, True
+        return run_tool_loop(adapter, spec.model, messages, spec.params, sink,
+                             tools=tools, audit_path=self.audit_path,
+                             limits=spec.limits)
 
     # -- reads -------------------------------------------------------------
 

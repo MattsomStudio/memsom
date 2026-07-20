@@ -140,10 +140,10 @@ class ClaudeAdapter(Provider):
         if params.get("temperature") is not None:
             body["temperature"] = params["temperature"]
         # Streaming path for the voice tab: per-sentence TTS needs tokens as they
-        # arrive, not one blob at the end. Tools + streaming isn't wired (a tool
-        # turn has no useful token stream), so it falls through to the buffered
-        # request below.
-        if params.get("stream") and not tools:
+        # arrive, not one blob at the end. Streaming is tool-aware — the SSE
+        # parser also assembles tool_use blocks — so the voice tool-loop keeps
+        # streaming BOTH the (rare) tool-decision preamble and the final answer.
+        if params.get("stream"):
             return self._infer_api_stream(model, params, sink, body, key)
         try:
             req = urllib.request.Request(
@@ -181,15 +181,27 @@ class ClaudeAdapter(Provider):
         ``data:`` frame, and push the text delta of every content_block_delta to
         the sink. Usage counters ride the message_start / message_delta frames.
 
+        Tool-aware: when ``body['tools']`` is present the model may answer with
+        ``tool_use`` blocks INSTEAD of (or before) text. Those arrive across
+        three frames — ``content_block_start`` (id+name), ``input_json_delta``
+        (streamed partial JSON of the arguments), ``content_block_stop`` — so we
+        accumulate per block index and, at the end, emit the canonical
+        ``stats['tool_calls']`` shape the tool loop consumes (same shape the
+        non-streaming :meth:`_infer_api` returns). This is what lets the voice
+        tool-loop stream every turn: tool-decision turns stream any preamble +
+        the tool call; the final-answer turn streams per-sentence for TTS.
+
         Anthropic SSE frame shapes we care about:
           message_start        -> message.usage.input_tokens
-          content_block_delta  -> delta.type == "text_delta" -> delta.text
+          content_block_start  -> content_block.type == "tool_use" (id, name)
+          content_block_delta  -> delta.type "text_delta"       -> delta.text
+                               -> delta.type "input_json_delta" -> partial_json
           message_delta        -> usage.output_tokens (cumulative, terminal)
-        Other frame types (ping, content_block_start/stop, message_stop) are
-        ignored — we only need the text deltas and the two token counters.
+        Other frame types (ping, content_block_stop, message_stop) are ignored.
         """
         body["stream"] = True
         stats = {"transport": "api"}
+        tool_blocks: dict = {}  # block index -> {"id","name","json"}
         try:
             req = urllib.request.Request(
                 self.api_base + "/v1/messages",
@@ -213,8 +225,19 @@ class ClaudeAdapter(Provider):
                     etype = evt.get("type")
                     if etype == "content_block_delta":
                         delta = evt.get("delta") or {}
-                        if delta.get("type") == "text_delta" and delta.get("text"):
+                        dtype = delta.get("type")
+                        if dtype == "text_delta" and delta.get("text"):
                             sink.token(delta["text"])
+                        elif dtype == "input_json_delta":
+                            blk = tool_blocks.get(evt.get("index"))
+                            if blk is not None:
+                                blk["json"] += delta.get("partial_json", "")
+                    elif etype == "content_block_start":
+                        cb = evt.get("content_block") or {}
+                        if cb.get("type") == "tool_use":
+                            tool_blocks[evt.get("index")] = {
+                                "id": cb.get("id", ""),
+                                "name": cb.get("name", ""), "json": ""}
                     elif etype == "message_start":
                         usage = (evt.get("message") or {}).get("usage") or {}
                         if usage.get("input_tokens"):
@@ -228,6 +251,19 @@ class ClaudeAdapter(Provider):
         except (urllib.error.URLError, OSError, TimeoutError,
                 json.JSONDecodeError) as exc:
             raise ProviderError(f"anthropic API failed: {exc}") from exc
+        if tool_blocks:
+            calls = []
+            for idx in sorted(tool_blocks):
+                blk = tool_blocks[idx]
+                raw_json = (blk["json"] or "").strip()
+                try:
+                    args = json.loads(raw_json) if raw_json else {}
+                except json.JSONDecodeError:
+                    args = {}
+                calls.append({"id": blk["id"], "name": blk["name"],
+                              "arguments": args})
+            if calls:
+                stats["tool_calls"] = calls
         return stats
 
     # ---- HTTP plumbing (api transport) ----

@@ -24,9 +24,54 @@ import json
 import os
 from pathlib import Path
 
+from memsom.providers import agents
 from memsom.providers import handlers as provider_handlers
 from memsom.providers.base import ProviderError
 from memsom.providers.parakeet import decode_audio_b64
+from memsom.providers.tools import ToolError, build_tools
+
+
+# ---------------------------------------------------------------------------
+# voice brain — system prompt + CURATED read-only toolset
+# ---------------------------------------------------------------------------
+
+# Tight, voice-appropriate. Names the tools so the model reaches for recall
+# instead of guessing about his past work.
+_VOICE_SYSTEM = (
+    "You are Matt's voice assistant with tools to search his memsom memory "
+    "(memory_recall) and the web (web_search). When he asks about his past "
+    "work, decisions, projects, or anything you don't already know, CALL "
+    "memory_recall before answering — don't guess. Keep spoken answers to 1-3 "
+    "sentences unless he asks you to elaborate."
+)
+
+# Repo root — the default fence for file_read. Overridable per-profile via the
+# claude provider spec's ``voice_file_read_root`` (e.g. point it at his vault).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Voice runs are short: a couple of turns, bounded tool output (spoken answers
+# are 1-3 sentences, so the model doesn't need a huge recall dump).
+_VOICE_LIMITS = {"max_turns": 6, "tool_timeout_s": 90,
+                 "max_tool_output_bytes": 8192, "run_timeout_s": 240}
+
+
+def _voice_tool_specs(adapter) -> list:
+    """The EXPLICIT read-only allowlist for the voice brain — not "all builtins".
+
+    Only three abilities, all read-only: search his memsom memory, search the
+    web, and read a fenced file tree. shell is deliberately absent, as is any
+    mutating/agent-control tool — a spoken query must never be able to run a
+    destructive op. Adding a tool here is the only way the voice brain gains one.
+    """
+    root = getattr(adapter, "spec", {}).get("voice_file_read_root") \
+        or str(_REPO_ROOT)
+    return [
+        {"name": "memory_recall", "type": "memory_recall",
+         "options": {"mode": "retrieve", "k": 6}},
+        {"name": "web_search", "type": "web_search",
+         "options": {"max_results": 5}},
+        {"name": "file_read", "type": "file_read", "options": {"root": root}},
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -106,8 +151,20 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
 
     session_id = payload.get("session_id")
     model = payload.get("model") or getattr(adapter, "api_model", "") or ""
-    messages = [{"role": "user", "content": text}]
-    # api transport + streaming: per-sentence TTS needs the token stream. No
+
+    # Curated read-only toolset — the voice brain can search his memory + the
+    # web + read fenced files, and nothing else. Build now so a bad spec fails
+    # the request cleanly instead of mid-run on a background thread.
+    try:
+        tools = build_tools(_voice_tool_specs(adapter))
+    except ToolError as exc:
+        return 500, {"ok": False, "error": f"voice tool setup failed: {exc}"}
+
+    base_messages = [{"role": "system", "content": _VOICE_SYSTEM},
+                     {"role": "user", "content": text}]
+    # api transport + streaming: per-sentence TTS needs the token stream. The
+    # SSE parser is tool-aware, so EVERY turn streams — the (usually empty)
+    # tool-decision preamble and the final answer both stream for TTS. No
     # thinking param — non-thinking is already the default (do not add one).
     params = {"transport": "api", "stream": True}
     if payload.get("temperature") is not None:
@@ -119,8 +176,17 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
     except OSError as exc:
         return 503, {"ok": False, "error": f"audit unavailable; refused: {exc}"}
 
+    def loop_fn(sink):
+        # run_tool_loop mutates its message list — hand it a fresh copy so a
+        # retried/re-used session_id starts from the same base each run.
+        return agents.run_tool_loop(
+            adapter, model, list(base_messages), params, sink,
+            tools=tools, audit_path=audit_log_path, limits=_VOICE_LIMITS,
+            final_answer_on_exhaust=True)
+
     try:
-        sid = voice_runner.start(adapter, model, messages, params, session_id)
+        sid = voice_runner.start_agentic(adapter, model, params, session_id,
+                                         loop_fn)
     except ProviderError as exc:
         _audit(audit_log_path, {**intent, "result": f"failed: {exc}"})
         return 400, {"ok": False, "error": str(exc)}

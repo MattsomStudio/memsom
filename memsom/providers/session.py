@@ -97,6 +97,21 @@ class FileSink(Sink):
         return max(0.0, self.t_last - self.t_first)
 
 
+class AgentFileSink(FileSink):
+    """FileSink plus free-form event lines (turn, tool_call, tool_result…).
+
+    A single-infer session only ever emits ``tok``/``done``/``error``; a
+    tool-loop session ALSO needs to record the loop's structural events. They
+    share one file format — ``read_since`` parses every line as an event, so a
+    reader that only renders ``t=="tok"`` (the inference/voice frontend) simply
+    ignores the extra lines. Home is here beside :class:`FileSink` so both the
+    agent runner and the voice tool-loop can reuse it without importing across
+    the agents↔session boundary."""
+
+    def event(self, obj: dict, sync: bool = False) -> None:
+        self._write(obj, sync=sync)
+
+
 class SessionRunner:
     """Owns the inference sessions directory and spawns generation threads."""
 
@@ -141,6 +156,45 @@ class SessionRunner:
             adapter_stats = provider.infer(model, messages, params, sink) or {}
             stats = _final_stats(sink, adapter_stats)
             sink.done(stats)
+        except ProviderError as exc:
+            sink.error(str(exc))
+        except Exception as exc:  # defensive: never let a thread die silently
+            sink.error(f"internal error: {exc}")
+
+    def start_agentic(self, provider, model: str, params: dict,
+                      session_id: Optional[str], loop_fn) -> str:
+        """Like :meth:`start`, but the generation thread runs a caller-supplied
+        tool loop instead of one ``provider.infer`` call.
+
+        *loop_fn* is ``loop_fn(sink) -> stats`` and is injected by the caller
+        (voice_handlers) so session.py stays free of the tool layer — no
+        circular import back into agents.py. The thread uses an
+        :class:`AgentFileSink` so the loop can emit ``turn``/``tool_call``/
+        ``tool_result`` events beside the streamed ``tok`` lines; the file
+        format is otherwise identical, so :meth:`read_since` (and the frontend
+        cursor-poll) need no change. Returns the session id immediately."""
+        sid = session_id or new_session_id()
+        if not valid_session_id(sid):
+            raise ProviderError("invalid session_id")
+        path = self._path(sid)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "t": "start", "provider": provider.id, "model": model,
+                "turns": 1, "params": _safe_params(params), "ts": now(),
+            }, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        thread = threading.Thread(
+            target=self._run_agentic, args=(loop_fn, path),
+            name=f"voice-{sid}", daemon=True)
+        thread.start()
+        return sid
+
+    def _run_agentic(self, loop_fn, path) -> None:
+        sink = AgentFileSink(path)
+        try:
+            stats = loop_fn(sink) or {}
+            sink.done(_final_stats(sink, stats))
         except ProviderError as exc:
             sink.error(str(exc))
         except Exception as exc:  # defensive: never let a thread die silently
