@@ -6,9 +6,16 @@ JSON wrappers and this is directly unit-testable.
 
 The voice flow, end to end:
   1. mic -> POST /api/voice/stt        (Parakeet)  -> {text}
-  2. text -> POST /api/voice/chat      (Claude, STREAMED) -> {session_id}
+  2. text -> POST /api/voice/chat      (Claude, STREAMED) -> {session_id, conversation_id}
   3. GET  /api/voice/chat?session_id=&cursor=N  cursor-polls the transcript
   4. each finished sentence -> POST /api/voice/tts  (Kokoro) -> {audio_b64}
+
+CONVERSATION MEMORY (multi-turn): the chat is no longer amnesiac. POST accepts
+an optional ``conversation_id``; if omitted, one is MINTED and returned so the
+frontend can reuse it. Each turn threads that conversation's prior turns (a
+windowed tail — see :mod:`memsom.providers.voice_convo`) into the message list,
+so "how much VRAM does it have?" resolves "it" from the earlier turn. The
+``session_id`` is still the per-utterance generation/polling id — unchanged.
 
 AUDIT DISCIPLINE (load-bearing): every mutation is two-phase audited (an intent
 "pending" line gates the action, a result line follows) against the panel's
@@ -26,6 +33,7 @@ from pathlib import Path
 
 from memsom.providers import agents
 from memsom.providers import handlers as provider_handlers
+from memsom.providers import voice_convo
 from memsom.providers.base import ProviderError
 from memsom.providers.parakeet import decode_audio_b64
 from memsom.providers.tools import ToolError, build_tools
@@ -139,7 +147,8 @@ def handle_voice_stt(registry: dict, audit_log_path, payload: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# POST /api/voice/chat  — {text, session_id?} -> {session_id}  (STREAMED)
+# POST /api/voice/chat  — {text, conversation_id?, session_id?}
+#                      -> {session_id, conversation_id}  (STREAMED)
 # ---------------------------------------------------------------------------
 
 
@@ -157,6 +166,18 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
     session_id = payload.get("session_id")
     model = payload.get("model") or getattr(adapter, "api_model", "") or ""
 
+    # Conversation threading: reuse a valid id the frontend sent, else MINT one
+    # and hand it back so the frontend can reuse it on the next turn. A
+    # malformed id is rejected (surfaces a frontend bug rather than silently
+    # forking a new thread). Conversations persist under <voice_dir>/conversations/.
+    conversation_id = payload.get("conversation_id")
+    if conversation_id is not None:
+        if not voice_convo.valid_conversation_id(conversation_id):
+            return 400, {"ok": False, "error": "invalid 'conversation_id'"}
+    else:
+        conversation_id = voice_convo.new_conversation_id()
+    convo_dir = Path(voice_runner.dir) / "conversations"
+
     # Curated read-only toolset — the voice brain can search his memory + the
     # web + read fenced files, and nothing else. Build now so a bad spec fails
     # the request cleanly instead of mid-run on a background thread.
@@ -165,8 +186,13 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
     except ToolError as exc:
         return 500, {"ok": False, "error": f"voice tool setup failed: {exc}"}
 
-    base_messages = [{"role": "system", "content": _VOICE_SYSTEM},
-                     {"role": "user", "content": text}]
+    # messages = [system, ...windowed prior turns, new user turn]. The prior
+    # turns carry only USER + FINAL-ASSISTANT text (no tool transcript), tail-
+    # windowed so a long conversation can't balloon context/cost.
+    prior = voice_convo.load_window(convo_dir, conversation_id)
+    base_messages = ([{"role": "system", "content": _VOICE_SYSTEM}]
+                     + prior
+                     + [{"role": "user", "content": text}])
     # api transport + streaming: per-sentence TTS needs the token stream. The
     # SSE parser is tool-aware, so EVERY turn streams — the (usually empty)
     # tool-decision preamble and the final answer both stream for TTS. No
@@ -175,19 +201,31 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
     if payload.get("temperature") is not None:
         params["temperature"] = payload["temperature"]
 
-    intent = {"op": "chat", "model": model, "ctx_len": len(text)}
+    intent = {"op": "chat", "model": model, "ctx_len": len(text),
+              "conversation_id": conversation_id}
     try:
         _audit(audit_log_path, {**intent, "result": "pending"}, gate=True)
     except OSError as exc:
         return 503, {"ok": False, "error": f"audit unavailable; refused: {exc}"}
 
     def loop_fn(sink):
-        # run_tool_loop mutates its message list — hand it a fresh copy so a
-        # retried/re-used session_id starts from the same base each run.
-        return agents.run_tool_loop(
-            adapter, model, list(base_messages), params, sink,
+        # Wrap the sink so we can capture the FINAL answer text to persist into
+        # conversation history (run_tool_loop returns only stats, not the text).
+        # run_tool_loop mutates its message list — hand it a fresh copy.
+        cap = voice_convo.FinalTextCapture(sink)
+        stats = agents.run_tool_loop(
+            adapter, model, list(base_messages), params, cap,
             tools=tools, audit_path=audit_log_path, limits=_VOICE_LIMITS,
             final_answer_on_exhaust=True)
+        # Append {user, final-assistant} and persist. Best-effort: a storage
+        # failure must NOT error a turn that already streamed successfully — the
+        # user got their answer; only next-turn memory is lost.
+        try:
+            voice_convo.append_turn(convo_dir, conversation_id, text,
+                                    cap.final_text)
+        except Exception:
+            pass
+        return stats
 
     try:
         sid = voice_runner.start_agentic(adapter, model, params, session_id,
@@ -197,7 +235,8 @@ def handle_voice_chat_start(registry: dict, voice_runner, audit_log_path,
         return 400, {"ok": False, "error": str(exc)}
 
     _audit(audit_log_path, {**intent, "result": "started", "session_id": sid})
-    return 200, {"ok": True, "session_id": sid}
+    return 200, {"ok": True, "session_id": sid,
+                 "conversation_id": conversation_id}
 
 
 # ---------------------------------------------------------------------------
