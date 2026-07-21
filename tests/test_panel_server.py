@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memsom.interface import panel
+from memsom.interface import panel_auth
 
 
 def _write_profile(dirpath, *, knobs=None, tasks=None, contracts=None):
@@ -50,9 +51,20 @@ def _fake_memory_builder():
     }
 
 
+#: Sentinel for "send this server's real token" — distinct from None, which
+#: means "send no Authorization header at all".
+USE_REAL = object()
+
+
 class LiveServer:
     """Starts a real ThreadingHTTPServer on an ephemeral port in a background
-    thread; tears it down cleanly."""
+    thread; tears it down cleanly.
+
+    Requests authenticate by DEFAULT: build_config mints a token into the
+    per-test temp episodic dir, and `get`/`post` present it unless a test opts
+    out with `token=None` (no header) or `token="..."` (a wrong one). That
+    keeps every pre-auth test asserting exactly what it was written to assert,
+    and confines auth concerns to the tests that are about auth."""
 
     def __init__(self, profile_path, **build_kwargs):
         build_kwargs.setdefault("memory_builder", _fake_memory_builder)
@@ -67,15 +79,35 @@ class LiveServer:
         self.httpd.server_close()
         self.thread.join(timeout=5)
 
-    def get(self, path, host_header=None):
+    @property
+    def token(self):
+        """The token build_config minted into this server's temp episodic dir."""
+        return self.config.token
+
+    def _auth_headers(self, token, extra_headers):
+        """Resolve the Authorization header. `token=USE_REAL` (the default)
+        sends the server's real token so ordinary tests read as they always
+        did; `token=None` sends none; any string is sent verbatim."""
+        headers = {}
+        if token is USE_REAL:
+            headers["Authorization"] = f"Bearer {self.token}"
+        elif token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        headers.update(extra_headers or {})
+        return headers
+
+    def get(self, path, host_header=None, *, token=USE_REAL, extra_headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
+            headers = self._auth_headers(token, extra_headers)
             if host_header is not None:
                 conn.putrequest("GET", path, skip_host=True)
                 conn.putheader("Host", host_header)
+                for k, v in headers.items():
+                    conn.putheader(k, v)
                 conn.endheaders()
             else:
-                conn.request("GET", path)
+                conn.request("GET", path, headers=headers)
             resp = conn.getresponse()
             body = resp.read()
             return resp, body
@@ -83,10 +115,10 @@ class LiveServer:
             conn.close()
 
     def post(self, path, payload_bytes, *, content_type="application/json",
-             origin=None, host_header=None):
+             origin=None, host_header=None, token=USE_REAL, extra_headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            headers = {}
+            headers = self._auth_headers(token, extra_headers)
             if content_type is not None:
                 headers["Content-Type"] = content_type
             if origin is not None:
@@ -732,6 +764,217 @@ class NotFoundTests(unittest.TestCase):
             try:
                 resp, body = srv.post("/nope", b"{}")
                 self.assertEqual(resp.status, 404)
+            finally:
+                srv.close()
+
+
+class AuthTokenUnitTests(unittest.TestCase):
+    """The pure predicates in panel_auth — no server needed."""
+
+    def test_token_ok_rejects_empty_on_either_side(self):
+        # The important one: a falsy EXPECTED token must never authenticate a
+        # falsy PRESENTED token, or a panel that failed to mint would be open.
+        self.assertFalse(panel_auth.token_ok("", ""))
+        self.assertFalse(panel_auth.token_ok(None, None))
+        self.assertFalse(panel_auth.token_ok("abc", ""))
+        self.assertFalse(panel_auth.token_ok("", "abc"))
+        self.assertFalse(panel_auth.token_ok(None, "abc"))
+
+    def test_token_ok_matches_exactly(self):
+        self.assertTrue(panel_auth.token_ok("abc123", "abc123"))
+        self.assertFalse(panel_auth.token_ok("abc123", "abc124"))
+        self.assertFalse(panel_auth.token_ok("abc123 ", "abc123"))
+
+    def test_bearer_scheme_is_case_insensitive(self):
+        self.assertEqual(panel_auth.bearer_from_header("Bearer tok"), "tok")
+        self.assertEqual(panel_auth.bearer_from_header("bearer tok"), "tok")
+        self.assertEqual(panel_auth.bearer_from_header("BEARER tok"), "tok")
+
+    def test_bearer_rejects_other_schemes_and_junk(self):
+        self.assertIsNone(panel_auth.bearer_from_header("Basic tok"))
+        self.assertIsNone(panel_auth.bearer_from_header("Bearer"))
+        self.assertIsNone(panel_auth.bearer_from_header("Bearer   "))
+        self.assertIsNone(panel_auth.bearer_from_header(""))
+        self.assertIsNone(panel_auth.bearer_from_header(None))
+
+    def test_cookie_extraction(self):
+        name = panel_auth.COOKIE_NAME
+        self.assertEqual(panel_auth.token_from_cookie(f"{name}=tok"), "tok")
+        self.assertEqual(
+            panel_auth.token_from_cookie(f"other=x; {name}=tok; more=y"), "tok")
+        self.assertIsNone(panel_auth.token_from_cookie("other=x"))
+        self.assertIsNone(panel_auth.token_from_cookie(""))
+        self.assertIsNone(panel_auth.token_from_cookie(None))
+
+
+class TokenFileTests(unittest.TestCase):
+    """Minting, persistence, and the blank-file re-mint."""
+
+    def test_token_is_minted_once_and_reused(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = panel_auth.load_or_create_token(d)
+            second = panel_auth.load_or_create_token(d)
+            self.assertTrue(first)
+            self.assertEqual(first, second)
+            self.assertTrue(panel_auth.token_path(d).exists())
+
+    def test_blank_token_file_is_reminted(self):
+        # A truncated file must not yield "" — that would compare equal to a
+        # missing presented token if token_ok were ever written with ==.
+        with tempfile.TemporaryDirectory() as d:
+            panel_auth.token_path(d).write_text("   \n", encoding="utf-8")
+            token = panel_auth.load_or_create_token(d)
+            self.assertTrue(token.strip())
+
+    def test_build_config_puts_the_token_beside_the_audit_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile_path = _write_profile(d)
+            config = panel.build_config(profile_path, host="127.0.0.1", port=0,
+                                        memory_builder=_fake_memory_builder)
+            self.assertTrue(config.token)
+            expected = panel_auth.token_path(config.audit_log_path.parent)
+            self.assertTrue(expected.exists())
+            self.assertEqual(expected.read_text(encoding="utf-8").strip(),
+                             config.token)
+
+
+class AuthEnforcementTests(unittest.TestCase):
+    """The gate, over a real server."""
+
+    def _server(self, d):
+        return LiveServer(_write_profile(d))
+
+    def test_get_without_token_is_401(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, body = srv.get("/api/knobs", token=None)
+                self.assertEqual(resp.status, 401)
+                self.assertEqual(resp.getheader("WWW-Authenticate"), "Bearer")
+                # The rejection must not echo the secret back.
+                self.assertNotIn(srv.token.encode(), body)
+            finally:
+                srv.close()
+
+    def test_get_with_wrong_token_is_401(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, _ = srv.get("/api/knobs", token="not-the-token")
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+    def test_post_without_token_is_401(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, _ = srv.post("/api/knobs", b"{}", token=None)
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+    def test_post_without_token_is_denied_before_the_body_is_read(self):
+        # A no-Origin POST used to succeed; it must now be refused on auth
+        # alone, not on Origin — this is the curl/script/postinstall path that
+        # the Origin check never saw.
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, _ = srv.post("/api/knobs", b'{"id":"x","value":1}',
+                                   origin=None, token=None)
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+    def test_health_stays_public(self):
+        # Load-bearing: _cmd_panel's already-running probe and the desktop
+        # app's watchdog both read /health bare. Gating it breaks relaunch.
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, body = srv.get("/health", token=None)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(json.loads(body)["app"], "memsom-panel")
+            finally:
+                srv.close()
+
+    def test_health_discloses_no_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                _, body = srv.get("/health", token=None)
+                self.assertNotIn(srv.token.encode(), body)
+            finally:
+                srv.close()
+
+    def test_root_without_token_is_401(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, _ = srv.get("/", token=None)
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+    def test_unknown_path_is_401_not_404_when_unauthenticated(self):
+        # Auth runs before routing, so an unauthenticated caller cannot use
+        # 404-vs-401 to map which routes exist.
+        with tempfile.TemporaryDirectory() as d:
+            srv = self._server(d)
+            try:
+                resp, _ = srv.get("/api/does-not-exist", token=None)
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+
+class CookieBootstrapTests(unittest.TestCase):
+    """`GET /?k=<token>` — the browser path used by /dash."""
+
+    def test_bootstrap_redirects_and_sets_httponly_cookie(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get(f"/?k={srv.token}", token=None)
+                self.assertEqual(resp.status, 302)
+                self.assertEqual(resp.getheader("Location"), "/")
+                cookie = resp.getheader("Set-Cookie")
+                self.assertIn(f"{panel_auth.COOKIE_NAME}={srv.token}", cookie)
+                self.assertIn("HttpOnly", cookie)
+                self.assertIn("SameSite=Strict", cookie)
+            finally:
+                srv.close()
+
+    def test_bootstrap_with_wrong_token_is_401_and_sets_no_cookie(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get("/?k=wrong", token=None)
+                self.assertEqual(resp.status, 401)
+                self.assertIsNone(resp.getheader("Set-Cookie"))
+            finally:
+                srv.close()
+
+    def test_cookie_authenticates_without_an_authorization_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get(
+                    "/api/knobs", token=None,
+                    extra_headers={"Cookie": f"{panel_auth.COOKIE_NAME}={srv.token}"})
+                self.assertEqual(resp.status, 200)
+            finally:
+                srv.close()
+
+    def test_wrong_cookie_is_401(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get(
+                    "/api/knobs", token=None,
+                    extra_headers={"Cookie": f"{panel_auth.COOKIE_NAME}=nope"})
+                self.assertEqual(resp.status, 401)
             finally:
                 srv.close()
 

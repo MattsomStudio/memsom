@@ -68,6 +68,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from memsom.interface import dashboard
+from memsom.interface import panel_auth
 from memsom.interface import saveall as saveall_runner
 from memsom.interface import telemetry
 from memsom.lifecycle import forget
@@ -100,6 +101,14 @@ except ImportError:  # pragma: no cover - importlib.metadata ships with 3.12
 
 _ALLOWED_BIND_HOSTS = ("127.0.0.1", "localhost", "::1")
 _ALLOWED_HOST_HEADER_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+#: Paths answerable without a token. Deliberately just /health, which discloses
+#: only {app, version, ok}. Three liveness paths depend on it staying bare:
+#: this module's own already-running probe in `_cmd_panel`, the desktop app's
+#: 5s watchdog (it must be able to tell a real panel from a foreign server
+#: squatting the port), and any plain port check. Gate it and every relaunch
+#: misreads the live panel as a foreign process and exits 1.
+_PUBLIC_PATHS = frozenset({"/health"})
 
 
 def enforce_bind_policy(host: str) -> None:
@@ -1642,6 +1651,11 @@ class PanelConfig:
     # direct, uncached path.
     task_cache: MemoryCache = None
     providers_cache: MemoryCache = None
+    # Bearer token (see panel_auth). Defaulted to None like every other late
+    # addition, but the request gate treats a falsy token as DENY, not as
+    # "auth off" — a config that somehow reached the serve loop without one
+    # should fail loudly, never fail open. build_config always sets it.
+    token: str = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
@@ -1712,6 +1726,9 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     kernel_store = KernelStore(Path(profile["audit_log"]).parent / "kernels")
     kernel_runner = KernelRunner(kernel_store, inference_dir, claude_dir)
     kernel_runner.reconcile_on_boot()
+    # Minted on first boot beside the audit log; every later boot reads it back.
+    # Deliberately not under any Syncthing-replicated tree — see panel_auth.
+    token = panel_auth.load_or_create_token(Path(profile["audit_log"]).parent)
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
@@ -1725,6 +1742,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         scheduler=scheduler,
         kernel_store=kernel_store, kernel_runner=kernel_runner,
         task_cache=task_cache, providers_cache=providers_cache,
+        token=token,
     )
 
 
@@ -2231,11 +2249,62 @@ def make_handler(config: PanelConfig):
             self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                        extra_headers=extra_headers)
 
-        def _reject(self, status, obj):
+        def _reject(self, status, obj, extra_headers=None):
             # Pre-body-consumption rejection: close the connection rather than
             # risk a desynced keep-alive stream.
             self.close_connection = True
-            self._send_json(status, obj)
+            self._send_json(status, obj, extra_headers=extra_headers)
+
+        # ---- auth (see panel_auth) ----
+
+        def _presented_token(self):
+            """Token from the Authorization header, else the bootstrap cookie."""
+            tok = panel_auth.bearer_from_header(self.headers.get("Authorization"))
+            if tok:
+                return tok
+            return panel_auth.token_from_cookie(self.headers.get("Cookie"))
+
+        def _authorized(self, path) -> bool:
+            """True if *path* is public or the request carries the right token.
+
+            A falsy `config.token` denies everything non-public rather than
+            waving requests through: build_config always mints one, so a
+            missing token means something is wrong and should fail loudly.
+            """
+            if path in _PUBLIC_PATHS:
+                return True
+            return panel_auth.token_ok(self._presented_token(), config.token)
+
+        def _deny(self):
+            self._reject(401, {"error": "unauthorized"},
+                         extra_headers={"WWW-Authenticate": "Bearer"})
+
+        def _try_cookie_bootstrap(self, query) -> bool:
+            """`GET /?k=<token>` -> set an HttpOnly cookie and 302 to `/`.
+
+            Why a cookie at all: the served page's getJSON/postJSON (below) use
+            relative URLs, so a cookie rides every request automatically and
+            PAGE_SCRIPT needs no edit — which matters because editing it would
+            change the CSP script hash the page is served with. Redirecting
+            instead of serving the page inline keeps the token out of the URL
+            bar, the history, and any Referer header.
+
+            Returns True if the request was handled here.
+            """
+            supplied = (query.get("k") or [None])[0]
+            if supplied is None:
+                return False
+            if not panel_auth.token_ok(supplied, config.token):
+                self._deny()
+                return True
+            # No `Secure`: this is plain http on loopback, and Secure would stop
+            # the cookie being stored at all. SameSite=Strict plus the existing
+            # Origin allowlist is what covers CSRF here.
+            cookie = (f"{panel_auth.COOKIE_NAME}={config.token}; Path=/; "
+                      f"HttpOnly; SameSite=Strict; Max-Age=86400")
+            self._send(302, b"", ctype="text/plain",
+                       extra_headers={"Location": "/", "Set-Cookie": cookie})
+            return True
 
         def _split_path(self):
             if "?" in self.path:
@@ -2249,6 +2318,12 @@ def make_handler(config: PanelConfig):
         def do_GET(self):  # noqa: N802
             if not _host_header_allowed(self.headers.get("Host"), config.port):
                 self._reject(403, {"error": "host not allowed"})
+                return
+            path, query = self._split_path()
+            if path == "/" and self._try_cookie_bootstrap(query):
+                return
+            if not self._authorized(path):
+                self._deny()
                 return
             try:
                 self._route_get()
@@ -2359,6 +2434,10 @@ def make_handler(config: PanelConfig):
         def do_POST(self):  # noqa: N802
             if not _host_header_allowed(self.headers.get("Host"), config.port):
                 self._reject(403, {"error": "host not allowed"})
+                return
+            path, _query = self._split_path()
+            if not self._authorized(path):
+                self._deny()
                 return
             try:
                 self._route_post()
@@ -2592,10 +2671,17 @@ def _cmd_panel(args):
               f"retry with --port", file=sys.stderr)
         return 1
 
-    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    port = httpd.server_address[1]
+    url = f"http://127.0.0.1:{port}/"
+    # The browser has no way to send an Authorization header for a URL you
+    # type, so `?k=` exchanges the token for an HttpOnly cookie and redirects
+    # to the bare URL. Print the bootstrap form — pasting the plain URL into a
+    # cold browser is a 401, and that should not be a mystery.
+    bootstrap = f"{url}?k={config.token}"
     print(f"panel: {url}")
+    print(f"panel: first visit (sets the session cookie): {bootstrap}")
     if not args.no_open:
-        webbrowser.open(url)
+        webbrowser.open(bootstrap)
     if config.scheduler is not None:
         config.scheduler.start()
     # Warm the slow caches off the request path so the FIRST visit to
