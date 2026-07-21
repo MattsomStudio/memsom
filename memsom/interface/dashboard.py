@@ -254,6 +254,72 @@ def build_graph(mem_dir, rows):
     return {"nodes": nodes, "links": links, "sections": order}
 
 
+def build_code_graph(mem_dir, memory_ids):
+    """Parallel graph for the code-RAG index, merged into the same view as the
+    memory graph. Repo hubs, their files (sized by chunk count), and — the
+    "linked" part — a cross-edge from a memory to any indexed code file whose
+    basename it names verbatim in its body ('this memory documents this code').
+
+    Read-only, and returns empty when the code index is absent or unused, so a
+    store without code-RAG renders exactly the memory graph it did before."""
+    empty = {"nodes": [], "links": [], "repos": []}
+    db = _memsom_db()
+    if not db.exists():
+        return empty
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return empty
+    try:
+        has = con.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='code_chunks'"
+        ).fetchone()[0]
+        rows = con.execute(
+            "SELECT repo, path, COUNT(*) FROM code_chunks GROUP BY repo, path"
+        ).fetchall() if has else []
+    except sqlite3.Error:
+        return empty
+    finally:
+        con.close()
+    if not rows:
+        return empty
+
+    nodes, links, repos = [], [], []
+    seen_repo = set()
+    base_to_file = {}   # distinctive basename -> file node id, for cross-links
+    for repo, path, cnt in rows:
+        rid = "repo:" + repo
+        if repo not in seen_repo:
+            seen_repo.add(repo)
+            repos.append(repo)
+            nodes.append({"id": rid, "label": repo, "kind": "repo"})
+        fid = "file:" + repo + "::" + path
+        nodes.append({"id": fid, "label": path, "kind": "file",
+                      "repo": repo, "count": int(cnt)})
+        links.append({"source": rid, "target": fid, "kind": "codetree"})
+        base = path.rsplit("/", 1)[-1]
+        # __init__.py etc. are too generic to be a real reference; skip them.
+        # First file wins a basename (ambiguous only across repos — precision
+        # over recall, since prose naming a bare basename can't disambiguate).
+        if not base.startswith("__"):
+            base_to_file.setdefault(base, fid)
+
+    # Cross-links: scan each memory body for an indexed file basename, bounded so
+    # 'code.py' can't match 'mycode.py' or a URL path segment. Word-ish edges only.
+    if mem_dir and base_to_file:
+        bases = sorted(base_to_file, key=len, reverse=True)
+        pat = re.compile(r"(?<![\w./])(" +
+                         "|".join(re.escape(b) for b in bases) + r")(?![\w])")
+        for p in mem_dir.glob("*.md"):
+            if p.name == "MEMORY.md" or p.stem not in memory_ids:
+                continue
+            body = p.read_text(encoding="utf-8", errors="ignore")
+            for fid in {base_to_file[m.group(1)] for m in pat.finditer(body)}:
+                links.append({"source": p.stem, "target": fid, "kind": "codelink"})
+    return {"nodes": nodes, "links": links, "repos": repos}
+
+
 def build_telemetry():
     rows = load_weights()
     now = datetime.now(timezone.utc)
@@ -309,6 +375,17 @@ def build_telemetry():
 
     # MEMORY.md budget + thresholds — live params, same file the panel tunes
     mem_dir = default_memory_dir()
+
+    # One graph payload = memory relationship graph + the code-RAG graph, joined
+    # by memory->code cross-links. build_code_graph is empty when code-RAG is
+    # unused, so this is a no-op for a plain memory store.
+    graph = build_graph(mem_dir, rows)
+    mem_ids = {n["id"] for n in graph["nodes"] if n["kind"] == "memory"}
+    code = build_code_graph(mem_dir, mem_ids)
+    graph["nodes"].extend(code["nodes"])
+    graph["links"].extend(code["links"])
+    graph["repos"] = code["repos"]
+
     params, _ = forget.load_params(
         (mem_dir / ".weights" / "canonical.json") if mem_dir else None)
     budget = None
@@ -335,7 +412,7 @@ def build_telemetry():
         "sessions": session_count(),
         "thresholds": {"demote_below": params["demote_below"],
                         "promote_at": params["promote_at"]},
-        "graph": build_graph(mem_dir, rows),
+        "graph": graph,
     }
 
 
@@ -419,9 +496,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div class="box span4"><h2>Most-accessed</h2><canvas id="top"></canvas></div>
   <div class="box span12">
     <h2>Relationship graph
-      <small>§ = section (parent) · dot = memory (sibling, sized by uses) · line = [[wikilink]]</small>
+      <small>§ = section · dot = memory (sized by uses) · ◆ = repo · square dot = code file · line = [[wikilink]] · dashed = memory↔code</small>
       <label style="margin-left:auto;font-weight:400;font-size:11px;color:var(--dim);cursor:pointer;user-select:none">
-        <input type="checkbox" id="wlToggle" checked> show wikilinks</label>
+        <input type="checkbox" id="wlToggle" checked> wikilinks</label>
+      <label style="font-weight:400;font-size:11px;color:var(--dim);cursor:pointer;user-select:none;margin-left:14px">
+        <input type="checkbox" id="codeToggle" checked> code</label>
     </h2>
     <div id="graph" style="width:100%;height:600px;position:relative"></div>
     <div class="legend" id="graphLegend" style="display:flex;flex-wrap:wrap;gap:14px;margin-top:12px"></div>
@@ -530,7 +609,11 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
                    '#4dd0e1','#a3be8c','#d08770','#88c0d0'];
   const sections = G.sections;
   const color = s => palette[Math.max(0, sections.indexOf(s)) % palette.length];
-  const nodeR = d => d.kind==='section' ? 9 : 3 + Math.sqrt(d.count||0) * 0.85;
+  // code world = amber, its cross-link to a memory = magenta (a visible bridge)
+  const CODE = '#f0883e', CODE_DIM = '#c9763a', XLINK = '#ff5c72';
+  const isHub = d => d.kind==='section' || d.kind==='repo';
+  const fillOf = d => d.kind==='repo' ? CODE : d.kind==='file' ? CODE_DIM : color(d.section);
+  const nodeR = d => isHub(d) ? 9 : 3 + Math.sqrt(d.count||0) * 0.82;
 
   const svg = d3.select('#graph').append('svg')
     .attr('width', W).attr('height', H)
@@ -538,13 +621,19 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
   const root = svg.append('g');
   svg.call(d3.zoom().scaleExtent([0.2,4]).on('zoom', e => root.attr('transform', e.transform)));
 
+  const linkStroke = d => d.kind==='codelink' ? XLINK : d.kind==='codetree' ? CODE
+                        : d.kind==='link' ? '#6aa9ff' : col('--grid');
+  const linkOpacity = d => d.kind==='codelink' ? 0.75 : d.kind==='codetree' ? 0.32
+                        : d.kind==='link' ? 0.45 : 0.6;
   const link = root.append('g').selectAll('line').data(G.links).join('line')
-    .attr('stroke', d => d.kind==='link' ? '#6aa9ff' : col('--grid'))
-    .attr('stroke-opacity', d => d.kind==='link' ? 0.45 : 0.6)
-    .attr('stroke-width', d => d.kind==='link' ? 1.1 : 1)
+    .attr('stroke', linkStroke)
+    .attr('stroke-opacity', linkOpacity)
+    .attr('stroke-width', d => d.kind==='codelink' ? 1.5 : d.kind==='link' ? 1.1 : 1)
+    .attr('stroke-dasharray', d => d.kind==='codelink' ? '4,3' : null)
     .attr('class', d => 'edge-'+d.kind);
 
   const node = root.append('g').selectAll('g').data(G.nodes).join('g')
+    .attr('class', d => 'node-'+d.kind)
     .call(d3.drag()
       .on('start', (e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
       .on('drag',  (e,d)=>{ d.fx=e.x; d.fy=e.y; })
@@ -552,13 +641,13 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
 
   node.append('circle')
     .attr('r', nodeR)
-    .attr('fill', d => color(d.section))
-    .attr('fill-opacity', d => d.kind==='section' ? 1 : (d.tier==='cold'?0.4:0.9))
-    .attr('stroke', d => d.kind==='section' ? '#fff' : (d.pinned ? col('--pin') : 'transparent'))
-    .attr('stroke-width', d => d.kind==='section' ? 1.5 : (d.pinned ? 1.5 : 0));
+    .attr('fill', fillOf)
+    .attr('fill-opacity', d => isHub(d) ? 1 : d.kind==='file' ? 0.85 : (d.tier==='cold'?0.4:0.9))
+    .attr('stroke', d => isHub(d) ? '#fff' : (d.pinned ? col('--pin') : 'transparent'))
+    .attr('stroke-width', d => isHub(d) ? 1.5 : (d.pinned ? 1.5 : 0));
 
-  // section labels always shown
-  node.filter(d=>d.kind==='section').append('text')
+  // hub labels (memory sections + code repos) always shown
+  node.filter(isHub).append('text')
     .text(d=>d.label).attr('x',12).attr('y',4)
     .attr('fill', col('--ink')).attr('font-size','11px').attr('font-weight','600')
     .attr('paint-order','stroke').attr('stroke',col('--bg')).attr('stroke-width','3px');
@@ -567,8 +656,10 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
   node.on('mousemove', (e,d) => {
       tip.style.opacity = 1;
       tip.style.left = (e.clientX+14)+'px'; tip.style.top = (e.clientY+14)+'px';
-      tip.innerHTML = d.kind==='section'
-        ? `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">section (parent)</span>`
+      tip.innerHTML =
+          d.kind==='section' ? `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">section (parent)</span>`
+        : d.kind==='repo'    ? `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">code repo</span>`
+        : d.kind==='file'    ? `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">${esc(d.repo)} · ${d.count} chunks</span>`
         : `<b>${esc(d.label)}</b><br><span style="color:var(--dim)">${esc(d.section)} · ${d.tier}${d.pinned?' · pinned':''} · ${d.count} uses</span>`;
     })
     .on('mouseleave', () => tip.style.opacity = 0)
@@ -583,12 +674,12 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
       e.stopPropagation();
     });
   svg.on('click', () => { node.attr('opacity',1);
-    link.attr('stroke-opacity', l => l.kind==='link'?0.45:0.6); });
+    link.attr('stroke-opacity', linkOpacity); });
 
   const sim = d3.forceSimulation(G.nodes)
     .force('link', d3.forceLink(G.links).id(d=>d.id)
-      .distance(d => d.kind==='tree' ? 38 : 80)
-      .strength(d => d.kind==='tree' ? 0.8 : 0.12))
+      .distance(d => d.kind==='tree' ? 38 : d.kind==='codetree' ? 34 : d.kind==='codelink' ? 92 : 80)
+      .strength(d => d.kind==='tree' ? 0.8 : d.kind==='codetree' ? 0.85 : d.kind==='codelink' ? 0.07 : 0.12))
     .force('charge', d3.forceManyBody().strength(-130))
     .force('center', d3.forceCenter(W/2, H/2))
     .force('collide', d3.forceCollide().radius(d => nodeR(d)+3))
@@ -602,12 +693,26 @@ new Chart(top, {type:'bar', data:{labels:D.top_access.map(t=>t.stem.replace(/^(u
   document.getElementById('wlToggle').addEventListener('change', e => {
     root.selectAll('.edge-link').style('display', e.target.checked ? null : 'none');
   });
+  // code-layer toggle: hide repos, files, and both code edge kinds together
+  document.getElementById('codeToggle').addEventListener('change', e => {
+    const show = e.target.checked ? null : 'none';
+    root.selectAll('.node-repo, .node-file, .edge-codetree, .edge-codelink')
+      .style('display', show);
+  });
 
   // legend
+  const codeLegend = (G.repos && G.repos.length) ? `
+    <span style="display:flex;align-items:center;gap:6px">
+      <i style="width:11px;height:11px;border-radius:3px;background:${CODE};display:inline-block"></i>
+      <span style="color:var(--dim);font-size:11px">code (repo · file)</span></span>
+    <span style="display:flex;align-items:center;gap:6px">
+      <i style="width:16px;border-top:2px dashed ${XLINK};display:inline-block"></i>
+      <span style="color:var(--dim);font-size:11px">memory ↔ code</span></span>` : '';
   document.getElementById('graphLegend').innerHTML = sections.map(s =>
     `<span style="display:flex;align-items:center;gap:6px">
       <i style="width:11px;height:11px;border-radius:3px;background:${color(s)};display:inline-block"></i>
       <span style="color:var(--dim);font-size:11px">${esc(s)}</span></span>`).join('') +
+    codeLegend +
     `<span style="color:var(--dim);font-size:11px">· ring = pinned · faded = cold · click a node to isolate</span>`;
 })();
 </script>

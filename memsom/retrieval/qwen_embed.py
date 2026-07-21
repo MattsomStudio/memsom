@@ -80,7 +80,17 @@ def qwen_available(force: bool = False) -> bool:
         return _AVAILABLE
     try:
         with urllib.request.urlopen(_health_url(), timeout=3) as r:
-            _AVAILABLE = (r.status == 200)
+            ok = (r.status == 200)
+            # The supervisor reports "enabled": false when the panel has toggled the
+            # embedder OFF. Treat that as unavailable so the code index degrades to
+            # BM25-only cleanly, instead of firing embed requests that get refused.
+            if ok:
+                try:
+                    if json.loads(r.read()).get("enabled") is False:
+                        ok = False
+                except Exception:
+                    pass  # older supervisor with no `enabled` key -> 200 means available
+            _AVAILABLE = ok
     except Exception:
         _AVAILABLE = False
     _AVAILABLE_AT = now
