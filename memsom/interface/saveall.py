@@ -3,7 +3,7 @@
 Normally /saveall runs inside a live Claude session. This runs it OUT OF BAND:
 it finds the most-recently-active session transcript, then spawns
 
-    claude --resume <sid> --model claude-opus-4-8 --effort high -p /saveall
+    claude --resume <sid> --model claude-sonnet-5 --effort high -p /saveall
 
 fully DETACHED, logging to a file. Because the transcript is captured at spawn
 and the process is detached from the panel + the source chat, the save survives
@@ -60,12 +60,18 @@ def find_latest_session(claude_dir) -> "dict | None":
     return {"session_id": newest[0].stem, "path": str(newest[0]), "mtime": newest[1]}
 
 
-def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-opus-4-8",
-          effort: str = "high") -> dict:
-    latest = find_latest_session(claude_dir)
-    if not latest:
-        raise RuntimeError("no session transcript found to save")
-    sid = latest["session_id"]
+def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-sonnet-5",
+          effort: str = "high", session_id: "str | None" = None,
+          resume_cwd: "str | None" = None) -> dict:
+    # Explicit session_id (hook-driven auto-save of a cloned/original transcript)
+    # takes precedence; otherwise fall back to newest session (DECK button).
+    if session_id:
+        sid = session_id
+    else:
+        latest = find_latest_session(claude_dir)
+        if not latest:
+            raise RuntimeError("no session transcript found to save")
+        sid = latest["session_id"]
     runs = _runs_dir(claude_dir)
     runs.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
@@ -77,7 +83,11 @@ def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-opus-4-8
         proc = subprocess.Popen(
             argv, stdout=logfh, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, creationflags=_DETACHED,
-            cwd=os.environ.get("USERPROFILE") or None, close_fds=True)
+            cwd=resume_cwd or os.environ.get("USERPROFILE") or None,
+            close_fds=True,
+            # POSIX: new session (setsid) so the save survives a SessionEnd
+            # /clear teardown that would otherwise kill the hook's children.
+            start_new_session=(sys.platform != "win32"))
     except (FileNotFoundError, OSError) as exc:
         logfh.close()
         raise RuntimeError(f"failed to launch claude: {exc}") from exc
