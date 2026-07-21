@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from memsom.interface import panel
@@ -492,6 +493,223 @@ class Tier3ContractTests(unittest.TestCase):
                 self.assertEqual(len(data["contracts"]), 1)
                 self.assertEqual(data["contracts"][0]["id"], "dense_dim")
                 self.assertEqual(data["contracts"][0]["tier"], 3)
+            finally:
+                srv.close()
+
+
+class MemoryTouchTests(unittest.TestCase):
+    """_read_memory_touches: the live feed behind the DASHBOARD mesh glow.
+
+    The contract that matters is NEGATIVE — every heuristic in there scans free
+    text, so the tests exist mainly to prove a touch can never name a node the
+    memory dir doesn't actually contain."""
+
+    SESSION = "aaaaaaaa-1111-2222-3333-444444444444"
+
+    def _fixture(self, d, records, *, stems=("project_alpha", "user_beta"),
+                 index="", activity=()):
+        """Build a fake ~/.claude + memory dir. Records are written with a
+        timestamp of `now` unless they carry their own."""
+        root = Path(d)
+        claude = root / ".claude"
+        mem = root / "memory"
+        (claude / "projects" / "proj").mkdir(parents=True)
+        (claude / "episodic").mkdir(parents=True)
+        mem.mkdir()
+        for stem in stems:
+            (mem / f"{stem}.md").write_text("x", encoding="utf-8")
+        (mem / "MEMORY.md").write_text(index, encoding="utf-8")
+
+        now = datetime.now(timezone.utc)
+        iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        lines = []
+        for rec in records:
+            rec.setdefault("timestamp", iso)
+            rec.setdefault("sessionId", self.SESSION)
+            lines.append(json.dumps(rec))
+        (claude / "projects" / "proj" / f"{self.SESSION}.jsonl").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8")
+        if activity:
+            (claude / "episodic" / "memory_activity.jsonl").write_text(
+                "\n".join(json.dumps(dict(e, ts=e.get("ts", iso)))
+                          for e in activity) + "\n", encoding="utf-8")
+        return claude, mem, now
+
+    @staticmethod
+    def _assistant(*blocks):
+        return {"message": {"role": "assistant", "content": list(blocks)}}
+
+    def _stems(self, payload):
+        return sorted(t["stem"] for t in payload["touches"] if t["stem"])
+
+    def test_read_tool_on_memory_file_is_a_touch(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "project_alpha.md")}})])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(self._stems(out), ["project_alpha"])
+            self.assertEqual(out["touches"][0]["source"], "read")
+            self.assertEqual(out["chats"][0]["short"], self.SESSION[:8])
+
+    def test_bash_cat_of_a_memory_file_is_a_touch(self):
+        # Memories get read through Bash at least as often as through Read.
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "cat /c/x/memory/user_beta.md | head -5"}})])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(self._stems(out), ["user_beta"])
+            self.assertEqual(out["touches"][0]["source"], "bash")
+
+    def test_unknown_stem_is_never_emitted(self):
+        # The whole safety property: a path/token that looks like a memory but
+        # has no file behind it must not reach the graph as a node id.
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "not_a_real_memory.md")}},
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "cat memory/also_fake.md"}})])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(out["touches"], [])
+
+    def test_memory_index_itself_is_not_a_node(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "MEMORY.md")}})])
+            self.assertEqual(panel._read_memory_touches(claude, mem, now=now)["touches"], [])
+
+    def test_file_outside_the_memory_dir_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(Path(d) / "elsewhere" / "project_alpha.md")}})])
+            self.assertEqual(panel._read_memory_touches(claude, mem, now=now)["touches"], [])
+
+    def test_memsom_id_arg_names_the_node_directly(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "mcp__memsom__explain",
+                 "input": {"id": "user_beta"}})])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(self._stems(out), ["user_beta"])
+
+    def test_memsom_query_emits_a_stemless_marker_then_result_stems(self):
+        # retrieve/ask can't name a memory up front — the marker keeps the mesh
+        # reacting, and the RESULT is what resolves to actual nodes.
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(d, [
+                self._assistant({"type": "tool_use", "id": "toolu_1",
+                                 "name": "mcp__memsom__retrieve",
+                                 "input": {"query": "what does he lift"}}),
+                {"message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1",
+                     "content": "1. project_alpha (0.81)\n2. nonexistent_thing (0.4)"}]}},
+            ])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(self._stems(out), ["project_alpha"])
+            self.assertTrue(any(t["stem"] is None and t["source"] == "memsom"
+                                for t in out["touches"]))
+
+    def test_result_of_a_non_memsom_tool_is_not_scanned(self):
+        # A Read of some unrelated file that merely MENTIONS a stem is not a
+        # touch of that memory — and scanning every result would be the
+        # expensive path this feed deliberately avoids.
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(d, [
+                self._assistant({"type": "tool_use", "id": "toolu_9", "name": "Read",
+                                 "input": {"file_path": str(Path(d) / "notes.txt")}}),
+                {"message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_9",
+                     "content": "see project_alpha for details"}]}},
+            ])
+            self.assertEqual(panel._read_memory_touches(claude, mem, now=now)["touches"], [])
+
+    def test_records_older_than_the_window_are_dropped(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = (datetime.now(timezone.utc) - timedelta(seconds=600)
+                   ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [dict(self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "project_alpha.md")}}), timestamp=old)])
+            self.assertEqual(
+                panel._read_memory_touches(claude, mem, window_s=90, now=now)["touches"], [])
+            # …and the same record IS found with a window that covers it.
+            self.assertEqual(
+                len(panel._read_memory_touches(claude, mem, window_s=900, now=now)["touches"]), 1)
+
+    def test_recall_event_titles_resolve_through_the_memory_index(self):
+        # memory_activity.jsonl records a MIX of stems and human titles; only
+        # MEMORY.md can map the titled half back to a node id.
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(
+                d, [],
+                index="- [Beta Facts](user_beta.md) - hook\n",
+                activity=[{"session_id": "s1", "source": "askq_recall",
+                           "memories": ["project_alpha", "Beta Facts",
+                                        "session 68d319d4"]}])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            # the episodic session title has no node and must simply vanish
+            self.assertEqual(self._stems(out), ["project_alpha", "user_beta"])
+            self.assertTrue(all(t["source"] == "recall" for t in out["touches"]))
+
+    def test_voice_recall_is_its_own_chat(self):
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(
+                d, [], activity=[{"session_id": "voice", "source": "voice_recall",
+                                  "memories": ["project_alpha"]}])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(out["chats"][0]["kind"], "voice")
+            self.assertEqual(out["chats"][0]["short"], "VOICE")
+            self.assertEqual(out["touches"][0]["source"], "voice")
+
+    def test_repeat_touches_collapse_to_the_newest_per_chat_and_stem(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "project_alpha.md")}})
+                for _ in range(5)])
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(len(out["touches"]), 1)
+
+    def test_malformed_lines_never_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            mem = Path(d) / "memory"
+            claude, _, now = self._fixture(d, [self._assistant(
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": str(mem / "project_alpha.md")}})])
+            path = claude / "projects" / "proj" / f"{self.SESSION}.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write("{not json at all\n[]\n\n")
+            self.assertEqual(
+                self._stems(panel._read_memory_touches(claude, mem, now=now)),
+                ["project_alpha"])
+
+    def test_empty_memory_dir_returns_an_empty_feed(self):
+        with tempfile.TemporaryDirectory() as d:
+            claude, mem, now = self._fixture(d, [], stems=())
+            out = panel._read_memory_touches(claude, mem, now=now)
+            self.assertEqual(out["touches"], [])
+            self.assertEqual(out["chats"], [])
+
+    def test_route_serves_the_feed(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile_path = _write_profile(d)
+            srv = LiveServer(profile_path)
+            try:
+                resp, body = srv.get("/api/memory/touches")
+                self.assertEqual(resp.status, 200)
+                payload = json.loads(body)
+                for key in ("now", "window_s", "chats", "touches"):
+                    self.assertIn(key, payload)
             finally:
                 srv.close()
 

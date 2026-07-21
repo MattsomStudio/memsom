@@ -22,6 +22,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from memsom.providers.base import run_no_window
@@ -385,7 +386,46 @@ class DeepRecall(Tool):
             tail = (proc.stderr or "").strip()[-500:]
             raise ToolError(f"recall exited {proc.returncode}: {tail}")
 
+        self._log_touches(proc.stdout or "", query)
         return _cap(self._format(proc.stdout or "", query), ctx.max_output_bytes)
+
+    @staticmethod
+    def _log_touches(stdout: str, query: str) -> None:
+        """Append the memory files this recall surfaced to
+        episodic/memory_activity.jsonl, under session id ``voice``.
+
+        Why here: askq_recall.py already writes this file for /recall, and the
+        panel's touch feed reads it — so logging in the same shape is what makes
+        the DASHBOARD mesh light up while you're TALKING to the voice brain,
+        with no second pipeline. Best-effort by design: a telemetry line must
+        never be able to fail a recall the user is waiting on."""
+        import json as _json
+
+        try:
+            hits = (_json.loads(stdout) or {}).get("hits") or []
+            names = []
+            for h in hits:
+                if not isinstance(h, dict) or h.get("folder") != "memory":
+                    continue
+                rel = str(h.get("rel") or h.get("title") or "")
+                stem = rel.replace("\\", "/").rsplit("/", 1)[-1]
+                if stem.endswith(".md"):
+                    stem = stem[:-3]
+                if stem and stem not in names:
+                    names.append(stem)
+            if not names:
+                return
+            path = Path.home() / ".claude" / "episodic" / "memory_activity.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(_json.dumps({
+                    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "session_id": "voice",
+                    "source": "voice_recall",
+                    "memories": names,
+                    "query_preview": query[:160],
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     @staticmethod
     def _format(stdout: str, query: str) -> str:

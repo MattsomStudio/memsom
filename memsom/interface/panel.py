@@ -63,7 +63,7 @@ import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1108,6 +1108,284 @@ def _read_memory_activity(claude_dir: Path, limit: int = 100) -> dict:
     return {"events": events, "sessions": sessions[:15]}
 
 
+# ---------------------------------------------------------------------------
+# Live memory touches — "which memories is anything reading RIGHT NOW, and who"
+#
+# This feeds the DASHBOARD mesh glow. It exists because nothing else answers the
+# question: memdag's `query_log` is empty and only stores an answer node, and
+# `.weights/usage/*.jsonl` is a batched cumulative snapshot written at
+# consolidation time, not a live retrieval log. So the touches are derived from
+# what chats actually leave on disk as they run.
+#
+# SCOPE, stated honestly: Claude Code writes transcripts under
+# ~/.claude/projects/<cwd-slug>/, and the slug encodes a machine-local path, so
+# transcripts NEVER cross machines. Each machine's panel therefore lights up for
+# the chats running on THAT machine. `memory_activity.jsonl` lives under
+# episodic/ and is Syncthing-mirrored, so recall + voice touches do cross.
+#
+# Every candidate stem is intersected against the real .md files in the memory
+# dir before it leaves this module: the text-scanning heuristics below can
+# under-report, but they can never invent a node id the graph doesn't have.
+# ---------------------------------------------------------------------------
+
+_TOUCH_WINDOW_S = 90
+# Enough to cover a busy chat's last ~90s. Deliberately smaller than
+# _tail_jsonl's default: this runs every ~1.5s, per live transcript.
+_TOUCH_TAIL_BYTES = 96 * 1024
+# A tool_result can be an entire file. Only memsom results are scanned at all
+# (see _read_memory_touches), and only this much of one.
+_TOUCH_RESULT_SCAN_BYTES = 16 * 1024
+_TOUCH_MAX = 240
+
+# `cat .../memory/project_voice_spine.md` — memories get read through Bash at
+# least as often as through the Read tool, so the command string is scanned too.
+_MEM_PATH_RE = re.compile(r"memory[\\/]([A-Za-z0-9][\w.-]{0,79})\.md")
+# Candidate stems inside a memsom tool result. One pass, then set-intersected —
+# NOT a substring search per known stem (that is O(stems x bytes) per result).
+_STEM_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{3,79}")
+# MEMORY.md index line: `- [Title](file.md) — hook`. The only title->stem map
+# there is, and what lets a recall event naming a human title reach a node id.
+_INDEX_LINK_RE = re.compile(r"\[([^\]]+)\]\(([A-Za-z0-9][\w.-]*)\.md\)")
+
+# memsom tools whose ARGUMENTS already name the memory. The query tools
+# (ask/retrieve/code_search) don't — their stems only exist in the output.
+_MEMSOM_ID_ARG_TOOLS = {"explain", "blame", "neighborhood", "profile",
+                        "check_action", "recompute", "revoke", "redact"}
+
+_TOOL_SOURCE = {"Read": "read", "NotebookEdit": "edit",
+                "Edit": "edit", "Write": "edit"}
+
+
+def _parse_ts(value) -> "datetime | None":
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _memory_stems(memory_dir: Path) -> set:
+    """The authoritative node-id set: one stem per memory file. MEMORY.md is the
+    index, not a memory, and is excluded — the graph has no node for it."""
+    try:
+        return {p.stem for p in memory_dir.glob("*.md") if p.name != "MEMORY.md"}
+    except OSError:
+        return set()
+
+
+def _title_to_stem(memory_dir: Path) -> dict:
+    """{lowercased index title: stem} from MEMORY.md.
+
+    `memory_activity.jsonl` records what a recall INJECTED, and those names are a
+    mix of stems and human titles ("Quitting nightly weed"). Without this map the
+    titled half is unmappable and silently drops."""
+    out = {}
+    try:
+        text = (memory_dir / "MEMORY.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for title, stem in _INDEX_LINK_RE.findall(text):
+        out[title.strip().lower()] = stem
+    return out
+
+
+def _stem_of_path(raw, memory_dir: Path) -> "str | None":
+    """Stem for a file path that points INTO the memory dir, else None.
+
+    Compared on the resolved parent, so `..` games and a same-named `memory/`
+    directory somewhere else in the tree both fail closed."""
+    if not isinstance(raw, str) or not raw.endswith(".md"):
+        return None
+    try:
+        p = Path(raw)
+        if p.parent.resolve() != memory_dir.resolve():
+            return None
+    except (OSError, ValueError):
+        return None
+    return None if p.name == "MEMORY.md" else p.stem
+
+
+def _blocks(rec) -> list:
+    msg = rec.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    return content if isinstance(content, list) else []
+
+
+def _result_text(block) -> str:
+    """Flatten a tool_result's content (string, or a list of typed parts)."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return content[:_TOUCH_RESULT_SCAN_BYTES]
+    if isinstance(content, list):
+        parts = []
+        size = 0
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+                size += len(part["text"])
+                if size >= _TOUCH_RESULT_SCAN_BYTES:
+                    break
+        return "".join(parts)[:_TOUCH_RESULT_SCAN_BYTES]
+    return ""
+
+
+def _touches_from_transcript(path: Path, stems: set, memory_dir: Path,
+                             cutoff: datetime, out: list) -> None:
+    """Append this transcript's in-window touches to `out`.
+
+    Result scanning is keyed on tool_use_id: only the reply to a memsom tool is
+    scanned. Scanning every result would mean regexing whole file contents
+    several times a second for the sake of the two tools that need it."""
+    memsom_calls = {}  # tool_use_id -> session id
+    for rec in _tail_jsonl(path, window_bytes=_TOUCH_TAIL_BYTES):
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        sid = rec.get("sessionId") or path.stem
+        iso = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        for b in _blocks(rec):
+            if not isinstance(b, dict):
+                continue
+            btype = b.get("type")
+
+            if btype == "tool_use":
+                name = b.get("name") or ""
+                args = b.get("input") if isinstance(b.get("input"), dict) else {}
+
+                source = _TOOL_SOURCE.get(name)
+                if source:
+                    stem = _stem_of_path(args.get("file_path"), memory_dir)
+                    if stem in stems:
+                        out.append({"stem": stem, "ts": iso, "chat": sid,
+                                    "source": source})
+                elif name == "Bash":
+                    cmd = args.get("command")
+                    if isinstance(cmd, str):
+                        for stem in set(_MEM_PATH_RE.findall(cmd)):
+                            if stem in stems:
+                                out.append({"stem": stem, "ts": iso,
+                                            "chat": sid, "source": "bash"})
+                elif name.startswith("mcp__memsom__"):
+                    tool = name[len("mcp__memsom__"):]
+                    named = str(args.get("id") or "")
+                    if tool in _MEMSOM_ID_ARG_TOOLS and named in stems:
+                        out.append({"stem": named, "ts": iso, "chat": sid,
+                                    "source": "memsom"})
+                    else:
+                        # memsom IS working, we just don't know on what yet. A
+                        # stemless touch lights the section hubs rather than
+                        # guessing a node (see the frontend decay engine).
+                        out.append({"stem": None, "ts": iso, "chat": sid,
+                                    "source": "memsom"})
+                        if b.get("id"):
+                            memsom_calls[b["id"]] = sid
+
+            elif btype == "tool_result" and b.get("tool_use_id") in memsom_calls:
+                text = _result_text(b)
+                hit = {t for t in _STEM_TOKEN_RE.findall(text)} & stems
+                for stem in sorted(hit)[:12]:
+                    out.append({"stem": stem, "ts": iso,
+                                "chat": memsom_calls[b["tool_use_id"]],
+                                "source": "memsom"})
+
+
+def _touches_from_activity(claude_dir: Path, stems: set, titles: dict,
+                           cutoff: datetime, out: list) -> None:
+    """Recall injections (askq_recall) + the voice brain's deep-recall, both of
+    which already append to episodic/memory_activity.jsonl."""
+    # 64 KB is ~400 events — far more than a 90s window can hold, and it keeps
+    # this bounded as the log grows (it is append-only and never rotated).
+    for ev in _tail_jsonl(claude_dir / "episodic" / "memory_activity.jsonl",
+                          window_bytes=64 * 1024):
+        ts = _parse_ts(ev.get("ts"))
+        if ts is None or ts < cutoff:
+            continue
+        raw_source = ev.get("source") or "recall"
+        voice = "voice" in raw_source
+        sid = "voice" if voice else (ev.get("session_id") or "recall")
+        iso = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+        names = ev.get("memories")
+        if not isinstance(names, list):
+            continue
+        for name in names:
+            if not isinstance(name, str):
+                continue
+            stem = name if name in stems else titles.get(name.strip().lower())
+            if stem in stems:
+                out.append({"stem": stem, "ts": iso, "chat": sid,
+                            "source": "voice" if voice else "recall"})
+
+
+def _read_memory_touches(claude_dir: Path, memory_dir=None,
+                         window_s: int = _TOUCH_WINDOW_S, now=None) -> dict:
+    """Touch events from the last `window_s` seconds, newest per (chat, stem)."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=window_s)
+    empty = {"now": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "window_s": window_s,
+             "chats": [], "touches": []}
+
+    if memory_dir is None:
+        try:
+            memory_dir = dashboard.default_memory_dir()
+        except Exception:
+            return empty
+    memory_dir = Path(memory_dir)
+    stems = _memory_stems(memory_dir)
+    if not stems:
+        return empty
+
+    raw = []
+    # mtime gate: on a quiet minute this opens nothing at all, which is what
+    # keeps a 1.5s poll free. The slack covers a transcript written just before
+    # the window opened whose last records are still inside it.
+    file_cutoff = now.timestamp() - window_s - 30
+    try:
+        for transcript in (claude_dir / "projects").glob("*/*.jsonl"):
+            try:
+                if transcript.stat().st_mtime < file_cutoff:
+                    continue
+            except OSError:
+                continue
+            if not _SESSION_ID_RE.match(transcript.stem):
+                continue
+            _touches_from_transcript(transcript, stems, memory_dir, cutoff, raw)
+    except OSError:
+        pass
+
+    _touches_from_activity(claude_dir, stems, _title_to_stem(memory_dir),
+                           cutoff, raw)
+
+    # One entry per (chat, stem) — the newest. The client only needs "when was
+    # this last touched" to drive a decay curve; the repeats are noise.
+    newest = {}
+    for t in raw:
+        key = (t["chat"], t["stem"])
+        if key not in newest or t["ts"] >= newest[key]["ts"]:
+            newest[key] = t
+    touches = sorted(newest.values(), key=lambda t: t["ts"], reverse=True)[:_TOUCH_MAX]
+
+    chats = {}
+    for t in touches:
+        c = chats.setdefault(t["chat"], {
+            "id": t["chat"],
+            "short": "VOICE" if t["chat"] == "voice" else t["chat"][:8],
+            "kind": "voice" if t["chat"] == "voice" else "chat",
+            "last_ts": t["ts"], "n": 0,
+        })
+        c["n"] += 1
+        if t["ts"] > c["last_ts"]:
+            c["last_ts"] = t["ts"]
+
+    return {
+        "now": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_s": window_s,
+        "chats": sorted(chats.values(), key=lambda c: c["last_ts"], reverse=True)[:8],
+        "touches": touches,
+    }
+
+
 def _audit_inject_result(config: "PanelConfig", session_id: str, result: str) -> None:
     """Best-effort RESULT line for an inject (same contract as _audit_result:
     only the INTENT line gates the write)."""
@@ -1343,6 +1621,10 @@ class PanelConfig:
     memories_cache: MemoryCache
     # local-AI control plane (defaulted so existing constructors don't break)
     registry: dict = None
+    # DASHBOARD mesh glow. Defaulted to None like the other late additions, so a
+    # hand-built PanelConfig in a test doesn't have to know about it; the route
+    # falls back to a direct read.
+    touches_cache: MemoryCache = None
     session_runner: "SessionRunner" = None
     # voice tab: its own durable-session dir (beside inference/) for streamed chat
     voice_runner: "SessionRunner" = None
@@ -1386,6 +1668,11 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         builder=lambda: _read_agent_activity(claude_dir), ttl=3.0)
     memories_cache = MemoryCache(
         builder=lambda: _read_memory_activity(claude_dir), ttl=3.0)
+    # The mesh polls this every ~1.5s while the DASHBOARD is on screen. stale_ok
+    # so a scan that hits a slow disk serves the last snapshot instead of
+    # stalling the frame — a touch feed is a snapshot either way.
+    touches_cache = MemoryCache(
+        builder=lambda: _read_memory_touches(claude_dir), ttl=1.5, stale_ok=True)
     # local-AI control plane: adapters + durable inference sessions live next to
     # the audit log (episodic/inference/). servers.json tracks detached model
     # servers' PIDs so start/stop survives a panel restart.
@@ -1431,6 +1718,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         memory_cache=memory_cache, telemetry=sys_telemetry,
         claude_dir=claude_dir, workflows_cache=workflows_cache,
         agents_cache=agents_cache, memories_cache=memories_cache,
+        touches_cache=touches_cache,
         registry=registry, session_runner=session_runner,
         voice_runner=voice_runner,
         graph_store=graph_store, agent_runner=agent_runner,
@@ -1989,6 +2277,10 @@ def make_handler(config: PanelConfig):
                 self._send_json(200, config.agents_cache.get())
             elif path == "/api/activity/memories":
                 self._send_json(200, config.memories_cache.get())
+            elif path == "/api/memory/touches":
+                self._send_json(200, config.touches_cache.get()
+                                if config.touches_cache is not None
+                                else _read_memory_touches(config.claude_dir))
             elif path == "/api/providers":
                 self._send_json(200, config.providers_cache.get()
                                 if config.providers_cache is not None
