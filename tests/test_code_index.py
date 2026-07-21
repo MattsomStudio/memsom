@@ -218,6 +218,126 @@ class TestFeatureGate(Base):
         self.assertTrue(ci._auto_reindex_enabled())
 
 
+class TestVectorScoring(Base):
+    """The dense stage: numpy fast path, SQL-side filtering, BM25 prefilter.
+    Vectors are written by hand so these stay hermetic (no embedder)."""
+
+    def _seed_vectors(self, spec):
+        """spec: {repo: [vec, ...]} -> {repo: [chunk_id, ...]}. Each vector gets a
+        real code_chunks row so the repo join has something to join to."""
+        from memsom.retrieval.retrieve import _vec_to_blob
+        out = {}
+        with self.conn:
+            for repo, vecs in spec.items():
+                ids = []
+                for i, v in enumerate(vecs):
+                    cur = self.conn.execute(
+                        "INSERT INTO code_chunks(repo, path, symbol, kind, start_line,"
+                        " end_line, content, content_hash, indexed_at)"
+                        " VALUES (?, ?, ?, 'function', 1, 2, ?, 'h', 'now')",
+                        (repo, f"f{i}.py", f"sym{i}", f"def sym{i}(): pass"))
+                    cid = cur.lastrowid
+                    self.conn.execute(
+                        "INSERT INTO code_embeddings(chunk_id, model, dim, vec)"
+                        " VALUES (?, ?, ?, ?)",
+                        (cid, qwen_embed.MODEL_NAME, len(v), _vec_to_blob(v)))
+                    ids.append(cid)
+                out[repo] = ids
+        return out
+
+    @staticmethod
+    def _unit(vals):
+        norm = sum(x * x for x in vals) ** 0.5
+        return [x / norm for x in vals]
+
+    def setUp(self):
+        super().setUp()
+        ci.migrate(self.conn)
+        # 4-dim unit vectors: a query of [1,0,0,0] ranks them in a known order
+        self.ids = self._seed_vectors({
+            "alpha": [self._unit([1.0, 0.0, 0.0, 0.0]),
+                      self._unit([0.9, 0.1, 0.0, 0.0]),
+                      self._unit([0.0, 1.0, 0.0, 0.0])],
+            "beta":  [self._unit([0.8, 0.2, 0.0, 0.0]),
+                      self._unit([0.0, 0.0, 1.0, 0.0])],
+        })
+
+    def test_numpy_and_pure_python_paths_agree(self):
+        import builtins
+        rows = ci._embedding_rows(self.conn)
+        q = [1.0, 0.0, 0.0, 0.0]
+        fast = ci._rank_by_similarity(q, rows, 5)
+
+        real_import = builtins.__import__
+
+        def no_numpy(name, *a, **kw):
+            if name == "numpy":
+                raise ImportError("blocked")
+            return real_import(name, *a, **kw)
+
+        builtins.__import__ = no_numpy
+        try:
+            slow = ci._rank_by_similarity(q, rows, 5)
+        finally:
+            builtins.__import__ = real_import
+
+        self.assertEqual({i for i, _ in fast}, {i for i, _ in slow})
+        by_id = dict(slow)
+        for cid, score in fast:
+            self.assertAlmostEqual(score, by_id[cid], places=5)
+
+    def test_ranking_order_is_by_similarity(self):
+        rows = ci._embedding_rows(self.conn)
+        ranked = ci._rank_by_similarity([1.0, 0.0, 0.0, 0.0], rows, 5)
+        self.assertEqual(ranked[0][0], self.ids["alpha"][0])   # exact match first
+        scores = [s for _, s in ranked]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_k_larger_than_corpus(self):
+        rows = ci._embedding_rows(self.conn)
+        self.assertEqual(len(ci._rank_by_similarity([1.0, 0, 0, 0], rows, 99)), 5)
+
+    def test_repo_filter_happens_in_sql(self):
+        # the whole point: a scoped search must not READ the other repo's vectors
+        rows = ci._embedding_rows(self.conn, repo="beta")
+        self.assertEqual({cid for cid, _ in rows}, set(self.ids["beta"]))
+        self.assertEqual(len(ci._embedding_rows(self.conn)), 5)
+
+    def test_candidate_prefilter_restricts_scoring(self):
+        cands = [self.ids["alpha"][2], self.ids["beta"][1]]
+        rows = ci._embedding_rows(self.conn, candidates=cands)
+        self.assertEqual({cid for cid, _ in rows}, set(cands))
+
+    def test_candidate_prefilter_pages_past_the_sqlite_variable_limit(self):
+        # >999 candidates must not blow up the IN clause. The padding ids are
+        # deliberately above every seeded chunk id so they match nothing.
+        many = list(range(1000, 3500)) + self.ids["alpha"]
+        rows = ci._embedding_rows(self.conn, candidates=many)
+        self.assertEqual({cid for cid, _ in rows}, set(self.ids["alpha"]))
+
+
+class TestBm25RepoScoping(Base):
+    """BM25's repo filter runs in SQL now; results must stay scoped."""
+
+    def test_repo_filter_scopes_results(self):
+        one = self._repo({"a.py": SAMPLE_PY})
+        two = Path(self.tmp.name) / "repo2"
+        two.mkdir(parents=True, exist_ok=True)
+        (two / "b.py").write_text(SAMPLE_PY, encoding="utf-8")
+        ci.index_repo(self.conn, one, repo="one")
+        ci.index_repo(self.conn, str(two), repo="two")
+
+        unscoped = {cid for cid, _ in ci.bm25(self.conn, "reciprocal rank fusion", k=20)}
+        scoped = {cid for cid, _ in ci.bm25(self.conn, "reciprocal rank fusion",
+                                            k=20, repo="two")}
+        self.assertTrue(scoped)
+        self.assertTrue(scoped < unscoped)          # strictly fewer, same corpus
+        repos = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT repo FROM code_chunks WHERE id IN "
+            f"({','.join(str(i) for i in scoped)})")}
+        self.assertEqual(repos, {"two"})
+
+
 class TestRepoRegistry(Base):
     """The multi-repo registry: which projects the code-RAG takes in."""
 

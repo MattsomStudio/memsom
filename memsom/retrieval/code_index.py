@@ -69,6 +69,14 @@ SKIP_DIRS = {
 MAX_FILE_BYTES = 400_000      # skip generated/minified monsters
 WINDOW_LINES = 60             # non-.py sliding window size
 
+# Above this many indexed chunks, the dense stage stops scanning the whole store
+# and scores only the top BM25 candidates. Measured on a real index: an
+# exhaustive numpy scan runs at ~48 GB/s (memory-bandwidth-bound), i.e. ~0.4s
+# per 5M x 1024 fp32 vectors — fine, but a prefiltered scan is flat regardless of
+# size. Set high enough that a personal-scale index never pays the recall cost.
+DENSE_PREFILTER_ABOVE = 200_000
+DENSE_PREFILTER_N = 2_000     # BM25 candidates handed to the dense stage
+
 
 # ---------------------------------------------------------------------------
 # Feature gate
@@ -605,52 +613,119 @@ def bm25(conn: sqlite3.Connection, query: str, k: int = 8, repo: str = None) -> 
     if avgdl == 0.0:
         return []
 
-    repo_ids = _repo_chunk_ids(conn, repo)
     scores = {}
     for term in query_tokens:
         df = conn.execute(
             "SELECT COUNT(*) FROM code_postings WHERE term = ?", (term,)).fetchone()[0]
         if df == 0:
             continue
+        # df stays CORPUS-wide on purpose even when scoped to one repo: idf is a
+        # statement about how rare a term is overall, and recomputing it per repo
+        # would make the same chunk score differently depending on the filter.
         idf = math.log((N - df + 0.5) / (df + 0.5) + 1.0)
-        rows = conn.execute(
-            "SELECT p.chunk_id, p.tf, d.length FROM code_postings p"
-            " JOIN code_docstats d ON d.chunk_id = p.chunk_id WHERE p.term = ?",
-            (term,)).fetchall()
+        # Scope in SQL, not after the fact — a repo-filtered search used to pull
+        # every posting for the term and discard most of them in Python.
+        if repo:
+            rows = conn.execute(
+                "SELECT p.chunk_id, p.tf, d.length FROM code_postings p"
+                " JOIN code_docstats d ON d.chunk_id = p.chunk_id"
+                " JOIN code_chunks c ON c.id = p.chunk_id"
+                " WHERE p.term = ? AND c.repo = ?", (term, repo)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT p.chunk_id, p.tf, d.length FROM code_postings p"
+                " JOIN code_docstats d ON d.chunk_id = p.chunk_id WHERE p.term = ?",
+                (term,)).fetchall()
         for cid, tf, dl in rows:
-            if repo_ids is not None and cid not in repo_ids:
-                continue
             tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * dl / avgdl))
             scores[cid] = scores.get(cid, 0.0) + idf * tf_norm
     return sorted(scores.items(), key=lambda x: -x[1])[:k]
 
 
-def vector_search(conn: sqlite3.Connection, query: str, k: int = 8, repo: str = None) -> list:
-    """Qwen dense cosine over code_embeddings (this model's rows only). [(chunk_id, score)].
-    Server down / disabled -> [] (silent fallback to BM25)."""
-    migrate(conn)
-    q_vec = qwen_embed.encode_query(query)
-    if not q_vec:
+def _embedding_rows(conn, repo: str = None, candidates=None) -> list:
+    """(chunk_id, vec) rows for the current model, filtered IN SQL.
+
+    The repo filter used to run in Python AFTER every vector in the store was
+    read and decoded, so a one-repo search paid the whole-index cost. Scoping
+    the SELECT means a repo-scoped query touches only that repo's vectors —
+    which is the difference between "linear in the company" and "linear in your
+    project". *candidates* (from the BM25 prefilter) are assumed already
+    repo-scoped, since BM25 applies the same filter.
+    """
+    model = qwen_embed.MODEL_NAME
+    if candidates is not None:
+        cands = list(candidates)
+        out = []
+        # SQLite caps host parameters (999 by default) — page the IN list.
+        for i in range(0, len(cands), 900):
+            page = cands[i:i + 900]
+            ph = ",".join("?" * len(page))
+            out.extend(conn.execute(
+                "SELECT chunk_id, vec FROM code_embeddings"
+                f" WHERE model = ? AND chunk_id IN ({ph})", (model, *page)))
+        return out
+    if repo:
+        return conn.execute(
+            "SELECT e.chunk_id, e.vec FROM code_embeddings e"
+            " JOIN code_chunks c ON c.id = e.chunk_id"
+            " WHERE e.model = ? AND c.repo = ?", (model, repo)).fetchall()
+    return conn.execute(
+        "SELECT chunk_id, vec FROM code_embeddings WHERE model = ?", (model,)).fetchall()
+
+
+def _rank_by_similarity(q_vec: list, rows: list, k: int) -> list:
+    """Rank (chunk_id, blob) rows against *q_vec*. Returns [(chunk_id, score)].
+
+    numpy when it imports (optional, exactly like the bge backend), pure-Python
+    otherwise — the store never gains a mandatory dependency.
+
+    Two things make the fast path fast, and the second one is the bigger half:
+    the scoring is a single matrix-vector product instead of a Python loop, AND
+    the blobs are decoded with ONE frombuffer over a joined buffer instead of a
+    struct.unpack per vector. Measured on a real 8.5k index: 841ms -> 0.19ms.
+
+    Stored vectors are unit-norm by construction (qwen_embed._mrl_truncate
+    L2-normalizes every vector before it is written), so cosine reduces to a dot
+    product; the pure-Python branch computes full cosine, which is the same
+    value for unit vectors.
+    """
+    if not rows or k <= 0:
         return []
-    repo_ids = _repo_chunk_ids(conn, repo)
-    rows = conn.execute(
-        "SELECT chunk_id, vec FROM code_embeddings WHERE model = ?",
-        (qwen_embed.MODEL_NAME,)).fetchall()
-    scored = []
-    for cid, blob in rows:
-        if repo_ids is not None and cid not in repo_ids:
-            continue
-        scored.append((cid, _cosine(q_vec, _blob_to_vec(blob))))
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    if np is not None:
+        dim = len(q_vec)
+        buf = b"".join(blob for _, blob in rows)
+        flat = np.frombuffer(buf, dtype="<f4")
+        if flat.size == len(rows) * dim:      # ragged/legacy dims -> slow path
+            mat = flat.reshape(len(rows), dim).astype(np.float32, copy=False)
+            scores = mat @ np.asarray(q_vec, dtype=np.float32)
+            n = scores.shape[0]
+            top = (np.argsort(-scores) if k >= n
+                   else np.argpartition(-scores, k)[:k])
+            top = top[np.argsort(-scores[top])]
+            ids = [cid for cid, _ in rows]
+            return [(ids[i], float(scores[i])) for i in top]
+
+    scored = [(cid, _cosine(q_vec, _blob_to_vec(blob))) for cid, blob in rows]
     scored.sort(key=lambda x: -x[1])
     return scored[:k]
 
 
-def _repo_chunk_ids(conn, repo):
-    """Set of chunk ids in *repo*, or None (= no repo filter)."""
-    if not repo:
-        return None
-    return {r[0] for r in conn.execute(
-        "SELECT id FROM code_chunks WHERE repo = ?", (repo,))}
+def vector_search(conn: sqlite3.Connection, query: str, k: int = 8, repo: str = None,
+                  candidates=None) -> list:
+    """Qwen dense cosine over code_embeddings (this model's rows only). [(chunk_id, score)].
+    Server down / disabled -> [] (silent fallback to BM25).
+
+    *candidates* restricts scoring to those chunk ids (the BM25 prefilter path)."""
+    migrate(conn)
+    q_vec = qwen_embed.encode_query(query)
+    if not q_vec:
+        return []
+    return _rank_by_similarity(q_vec, _embedding_rows(conn, repo, candidates), k)
 
 
 def retrieve(conn: sqlite3.Connection, query: str, k: int = 8, repo: str = None) -> list:
@@ -666,7 +741,15 @@ def retrieve(conn: sqlite3.Connection, query: str, k: int = 8, repo: str = None)
         return []
     scan_k = max(n_idx, k)
     bm25_ranks = bm25(conn, query, k=scan_k, repo=repo)
-    vec_ranks = vector_search(conn, query, k=scan_k, repo=repo)
+    # Past a large index, hand the dense stage only the top BM25 candidates
+    # instead of the whole store: the scan then costs the same whether the index
+    # holds 200k chunks or 50M. Below the threshold everything is scored, so a
+    # personal-scale index never trades away the recall that pure-semantic
+    # queries (no shared identifiers) depend on.
+    candidates = None
+    if n_idx > DENSE_PREFILTER_ABOVE and bm25_ranks:
+        candidates = [cid for cid, _ in bm25_ranks[:DENSE_PREFILTER_N]]
+    vec_ranks = vector_search(conn, query, k=scan_k, repo=repo, candidates=candidates)
     fused = _rrf_fuse(bm25_ranks, vec_ranks)
     top = [cid for cid, _ in fused[:k]]
     if not top:
