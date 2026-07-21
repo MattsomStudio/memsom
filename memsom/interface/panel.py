@@ -61,6 +61,7 @@ import traceback
 import urllib.parse
 import urllib.request
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -693,6 +694,10 @@ def _perform_knob_write(config: "PanelConfig", knob: dict, value):
             _audit_result(config, knob_id, "failed: degraded (elevated command required)")
             return 200, result
         _audit_result(config, knob_id, "ok")
+        # the task's trigger just changed — drop the cached snapshot so the
+        # follow-up GET /api/knobs reports the new interval, not the old one
+        if getattr(config, "task_cache", None) is not None:
+            config.task_cache.invalidate()
         return 200, {"ok": True, "current": result.get("current", value)}
 
     try:
@@ -775,9 +780,49 @@ def _evidence_for(config: "PanelConfig", knob: dict, current):
     return None
 
 
+def _profile_task_names(profile: dict) -> list:
+    """Every scheduled-task name the knobs payload will need, deduped in
+    profile order: the `tasks` block plus any schtasks-provider knob key."""
+    names, seen = [], set()
+    for t in profile.get("tasks", []):
+        n = t.get("name")
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    for k in profile.get("knobs", []):
+        if k.get("provider") == "schtasks" and k.get("key") and k["key"] not in seen:
+            seen.add(k["key"])
+            names.append(k["key"])
+    return names
+
+
+def _read_task_statuses(provider, names) -> dict:
+    """name -> status, every Get-ScheduledTask fired concurrently. Each one
+    spawns PowerShell and costs ~1s wall-clock; serially that WAS the whole
+    cost of GET /api/knobs."""
+    def one(name):
+        try:
+            return provider.read({"key": name})
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    names = list(names)
+    if not names:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(16, len(names))) as pool:
+        return dict(zip(names, pool.map(one, names)))
+
+
 def _task_status(config: "PanelConfig", name):
+    if not name:
+        return {"error": "schtasks provider unavailable"}
+    cache = getattr(config, "task_cache", None)
+    if cache is not None:
+        status = cache.get().get(name)
+        if status is not None:
+            return status
     provider = config.providers.get("schtasks")
-    if provider is None or not name:
+    if provider is None:
         return {"error": "schtasks provider unavailable"}
     try:
         return provider.read({"key": name})
@@ -841,7 +886,8 @@ class MemoryCache:
     render, so a fixed TTL is plenty. `builder`/`clock` are injectable so
     tests never touch real files or real time."""
 
-    def __init__(self, *, builder=None, ttl: float = 30.0, clock=None, now=None):
+    def __init__(self, *, builder=None, ttl: float = 30.0, clock=None, now=None,
+                 stale_ok: bool = False):
         self._builder = builder or dashboard.build_telemetry
         self._ttl = ttl
         self._clock = clock or time.monotonic
@@ -853,18 +899,70 @@ class MemoryCache:
         self._data = None
         self._at = None
         self._at_iso = None
+        # stale-while-revalidate: an expired entry is served IMMEDIATELY and
+        # rebuilt on a background thread. For the payloads whose build cost is
+        # dominated by probing things that may be down (scheduled tasks,
+        # provider health), a blocking rebuild is what the UI felt as a
+        # multi-second tab stall — and the data is a snapshot either way.
+        self._stale_ok = stale_ok
+        self._refreshing = False
 
     def get(self, *, refresh: bool = False) -> dict:
         with self._lock:
             now = self._clock()
             stale = self._data is None or self._at is None or (now - self._at) >= self._ttl
-            if refresh or stale:
+            if refresh or self._data is None:
                 self._data = self._builder()
                 self._at = now
                 self._at_iso = self._now()
+            elif stale:
+                if self._stale_ok:
+                    self._kick_refresh()
+                else:
+                    self._data = self._builder()
+                    self._at = now
+                    self._at_iso = self._now()
             payload = dict(self._data)
             payload["cached_at"] = self._at_iso
             return payload
+
+    def _kick_refresh(self) -> None:
+        """Caller holds the lock. At most one rebuild in flight."""
+        if self._refreshing:
+            return
+        self._refreshing = True
+        threading.Thread(target=self._refresh_bg, daemon=True).start()
+
+    def _refresh_bg(self) -> None:
+        data = None
+        try:
+            data = self._builder()
+        except Exception:
+            print(f"[memsom-panel] background cache refresh failed:\n"
+                  f"{traceback.format_exc()}", file=sys.stderr)
+        with self._lock:
+            if data is not None:
+                self._data = data
+                self._at_iso = self._now()
+            # stamp the time either way: a failing builder must not be retried
+            # on every single request.
+            self._at = self._clock()
+            self._refreshing = False
+
+    def invalidate(self) -> None:
+        """Force the next get() to rebuild synchronously — used after a write
+        so the UI never reads back a pre-write snapshot."""
+        with self._lock:
+            self._data = None
+            self._at = None
+
+    def prime(self) -> None:
+        """Warm the cache off the request path (called at server start)."""
+        try:
+            self.get()
+        except Exception:
+            print(f"[memsom-panel] cache prime failed:\n{traceback.format_exc()}",
+                  file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -1256,6 +1354,12 @@ class PanelConfig:
     # scheduler is constructed here but only started by the serve loop (_cmd_panel)
     # so tests that build_config/build_server never spawn the background thread.
     scheduler: "Scheduler" = None
+    # Stale-while-revalidate caches for the two payloads that used to block the
+    # UI for seconds (scheduled-task queries; provider health probes). Both
+    # default to None so hand-built PanelConfigs in tests fall back to the
+    # direct, uncached path.
+    task_cache: MemoryCache = None
+    providers_cache: MemoryCache = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
@@ -1287,6 +1391,18 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     # servers' PIDs so start/stop survives a panel restart.
     inference_dir = Path(profile["audit_log"]).parent / "inference"
     registry = build_registry(profile, servers_path=inference_dir / "servers.json")
+    # Scheduled-task state changes only when a task is rewritten (which busts
+    # this cache explicitly), so 60s is generous; the probe itself is ~1s of
+    # PowerShell per task.
+    task_names = _profile_task_names(profile)
+    task_cache = MemoryCache(
+        builder=lambda: _read_task_statuses(providers["schtasks"], task_names),
+        ttl=60.0, stale_ok=True)
+    # Matches the UI's 4s providers poll: a request is served from the last
+    # snapshot while the next probe round runs behind it.
+    providers_cache = MemoryCache(
+        builder=lambda: provider_handlers.build_providers_payload(registry, run=run),
+        ttl=3.0, stale_ok=True)
     session_runner = SessionRunner(inference_dir)
     # voice chat streams into its own sessions dir (sibling of inference/) so the
     # voice tab's transcripts stay separate from the INFERENCE tab's history.
@@ -1320,6 +1436,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         graph_store=graph_store, agent_runner=agent_runner,
         scheduler=scheduler,
         kernel_store=kernel_store, kernel_runner=kernel_runner,
+        task_cache=task_cache, providers_cache=providers_cache,
     )
 
 
@@ -1369,6 +1486,14 @@ th{color:var(--dim);font-weight:500;text-transform:uppercase;font-size:10px;lett
   border-radius:6px;padding:4px 8px;font:inherit;width:130px;}
 .knob-row button{background:var(--panel2);border:1px solid var(--line);color:var(--dim);
   border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer;}
+.switch{position:relative;display:inline-block;width:40px;height:22px;flex:0 0 auto;}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;}
+.switch .slider{position:absolute;inset:0;background:var(--panel2);border:1px solid var(--line);
+  border-radius:22px;transition:background .15s,border-color .15s;}
+.switch .slider::before{content:"";position:absolute;left:2px;top:2px;width:16px;height:16px;
+  border-radius:50%;background:var(--dim);transition:transform .15s,background .15s;}
+.switch input:checked+.slider{background:rgba(106,169,255,.28);border-color:var(--accent);}
+.switch input:checked+.slider::before{transform:translateX(18px);background:var(--accent);}
 .knob-row .err{color:var(--bad);font-size:11px;flex-basis:100%;}
 .knob-row .evidence{color:var(--dim);font-size:11px;flex-basis:100%;}
 .knob-row.contract{opacity:.55;}
@@ -1611,6 +1736,31 @@ PAGE_SCRIPT = r"""
       return row;
     }
 
+    if (k.type === 'bool') {
+      // A real on/off switch. Text inputs for bools were unusable (you had to TYPE
+      // "true"); the toggle POSTs a genuine boolean, which the fail-closed validator
+      // requires. On error, revert the switch and surface the reason inline.
+      var errB = el('span', { class: 'err' });
+      var cb = el('input', { type: 'checkbox' });
+      cb.checked = (k.current === true);
+      var sw = el('label', { class: 'switch' }, cb, el('span', { class: 'slider' }));
+      cb.addEventListener('change', function () {
+        errB.textContent = '';
+        var want = cb.checked;
+        postJSON('/api/knobs', { id: k.id, value: want }).then(function (res) {
+          if (!res.body.ok) { errB.textContent = res.body.error || ('HTTP ' + res.status); cb.checked = !want; }
+          loadKnobs();
+        });
+      });
+      row.appendChild(sw);
+      row.appendChild(el('span', { class: 'stale' }, cb.checked ? 'on' : 'off'));
+      if (k.dirty) row.appendChild(el('span', { class: 'pill dirty' }, 'dirty'));
+      if (k.requires) row.appendChild(el('span', { class: 'pill tier2' }, 'requires: ' + k.requires));
+      if (k.note) row.appendChild(el('span', { class: 'evidence' }, k.note));
+      row.appendChild(errB);
+      return row;
+    }
+
     var input = el('input', { type: 'text', value: displayValue(k, k.current) });
     row.appendChild(input);
     if (k.dirty) row.appendChild(el('span', { class: 'pill dirty' }, 'dirty'));
@@ -1840,8 +1990,9 @@ def make_handler(config: PanelConfig):
             elif path == "/api/activity/memories":
                 self._send_json(200, config.memories_cache.get())
             elif path == "/api/providers":
-                self._send_json(200,
-                    provider_handlers.build_providers_payload(config.registry))
+                self._send_json(200, config.providers_cache.get()
+                                if config.providers_cache is not None
+                                else provider_handlers.build_providers_payload(config.registry))
             elif path == "/api/providers/vram-estimate":
                 st, body = provider_handlers.handle_vram_estimate(
                     config.registry, _q1(query, "provider"), _q1(query, "model"),
@@ -1979,6 +2130,10 @@ def make_handler(config: PanelConfig):
                 status, result = provider_handlers.handle_provider_action(
                     config.registry, config.audit_log_path,
                     payload.get("action"), payload)
+                # a load/unload/start/stop just changed what the next probe
+                # would report — never serve the pre-action snapshot back
+                if config.providers_cache is not None:
+                    config.providers_cache.invalidate()
                 self._send_json(status, result)
             elif path == "/api/inference/start":
                 payload = self._read_post_json()
@@ -2074,7 +2229,10 @@ def make_handler(config: PanelConfig):
                     _audit_append(config.audit_log_path, {
                         "ts": forget.now_iso(), "action": "saveall",
                         "result": "pending"})
-                    result = saveall_runner.start(config.claude_dir, cli_path=cli)
+                    result = saveall_runner.start(
+                        config.claude_dir, cli_path=cli,
+                        session_id=(payload or {}).get("session_id"),
+                        resume_cwd=(payload or {}).get("cwd"))
                     _audit_append(config.audit_log_path, {
                         "ts": forget.now_iso(), "action": "saveall",
                         "session_id": result.get("session_id"), "result": "started"})
@@ -2148,6 +2306,12 @@ def _cmd_panel(args):
         webbrowser.open(url)
     if config.scheduler is not None:
         config.scheduler.start()
+    # Warm the slow caches off the request path so the FIRST visit to
+    # SETTINGS/SERVICES/INFERENCE is served from a snapshot too, not just
+    # subsequent ones. Daemon threads: never delays serve_forever().
+    for cache in (config.task_cache, config.providers_cache, config.memory_cache):
+        if cache is not None:
+            threading.Thread(target=cache.prime, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

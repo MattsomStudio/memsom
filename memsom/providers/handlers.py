@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from memsom.interface import telemetry
@@ -28,26 +29,45 @@ _SERVICE_ACTIONS = {"start", "stop"}
 
 
 def build_providers_payload(registry: dict, *, run=None) -> dict:
+    """Fan every probe out concurrently. Serially this cost the SUM of every
+    adapter's timeouts — a single down provider on a filtered port burns its
+    full HTTP timeout twice (status, then list_models re-probing), and the
+    SERVICES/INFERENCE tabs waited on all of it. Concurrent, the payload costs
+    the SLOWEST probe instead. Every call is a read-only status/list/metrics
+    probe, so there is nothing to serialize for correctness.
+    """
     run = run or run_no_window  # no flashing console on the 4s GPU poll
-    gpu = telemetry._read_gpu(run)
+    jobs = {"gpu": lambda: telemetry._read_gpu(run)}
+    for pid, adapter in registry.items():
+        jobs[(pid, "status")] = lambda a=adapter: a.status().as_dict()
+        jobs[(pid, "models")] = lambda a=adapter: [m.as_dict() for m in a.list_models()]
+        jobs[(pid, "metrics")] = lambda a=adapter: a.metrics()
+
+    results = {}
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(32, len(jobs))) as pool:
+            futures = {pool.submit(fn): key for key, fn in jobs.items()}
+            for fut, key in futures.items():
+                try:
+                    results[key] = fut.result()
+                except Exception:
+                    results[key] = None
+
     providers = []
     for pid, adapter in registry.items():
-        caps = adapter.capabilities()
-        status = _safe(lambda: adapter.status().as_dict(),
-                       {"state": "down", "detail": "status failed"})
-        models = _safe(lambda: [m.as_dict() for m in adapter.list_models()], [])
-        metrics = _safe(lambda: adapter.metrics(), {})
+        status = results.get((pid, "status"))
         providers.append({
             "id": pid,
             "kind": adapter.kind,
             "label": adapter.label,
             "transport": getattr(adapter, "transport", None),
-            "capabilities": caps.as_dict(),
-            "status": status,
-            "models": models,
-            "metrics": metrics,
+            "capabilities": adapter.capabilities().as_dict(),
+            "status": status if status is not None
+                      else {"state": "down", "detail": "status failed"},
+            "models": results.get((pid, "models")) or [],
+            "metrics": results.get((pid, "metrics")) or {},
         })
-    return {"providers": providers, "gpu": gpu}
+    return {"providers": providers, "gpu": results.get("gpu")}
 
 
 # ---------------------------------------------------------------------------

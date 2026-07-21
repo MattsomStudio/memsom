@@ -54,7 +54,9 @@ class LlamaCppAdapter(Provider):
     def status(self) -> ProviderStatus:
         t0 = now()
         try:
-            with urllib.request.urlopen(self.base + "/health", timeout=2):
+            with urllib.request.urlopen(
+                    self.base + "/health",
+                    timeout=self.spec.get("status_timeout_s", 0.75)):
                 pass
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,
                 TimeoutError) as exc:
