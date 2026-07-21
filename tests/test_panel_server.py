@@ -6,13 +6,17 @@ port. Never touches live memsom state — synthetic profiles in temp dirs only.
 Run:  python -m pytest tests/test_panel_server.py -q
 """
 
+import contextlib
 import http.client
+import io
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -84,6 +88,12 @@ class LiveServer:
     def token(self):
         """The token build_config minted into this server's temp episodic dir."""
         return self.config.token
+
+    @property
+    def cookie_secret(self):
+        """The per-process browser-session secret. Deliberately NOT the token —
+        see panel._authorized."""
+        return self.config.cookie_secret
 
     def _auth_headers(self, token, extra_headers):
         """Resolve the Authorization header. `token=USE_REAL` (the default)
@@ -830,9 +840,9 @@ class TokenFileTests(unittest.TestCase):
     def test_harden_permissions_succeeds_on_this_platform(self):
         # Regression (found in deployment, not in test): harden_permissions
         # used to build a DOMAIN\\USER principal out of USERDOMAIN. Run over
-        # SSH, USERDOMAIN reads WORKGROUP while the account is really
-        # MattSom\\user, so icacls failed with 1332 "no mapping between
-        # account names and security IDs" and the token file silently kept its
+        # SSH, USERDOMAIN reads WORKGROUP while the account really lives on the
+        # machine-account domain, so icacls failed with 1332 "no mapping
+        # between account names and security IDs" and the token file kept its
         # inherited ACL (SYSTEM + Administrators + user) while the panel booted
         # happily. It resolves the SID now, which always maps.
         with tempfile.TemporaryDirectory() as d:
@@ -949,6 +959,84 @@ class AuthEnforcementTests(unittest.TestCase):
                 srv.close()
 
 
+class TokenLeakTests(unittest.TestCase):
+    """The 2026-07-21 finding: the token file was ACL'd and kept off every
+    synced tree, then the VALUE was printed to stdout and echoed into the
+    request log — which put it in a session transcript, the episodic DB, and a
+    Syncthing folder replicating to a public-IP device. These tests pin the
+    channels shut."""
+
+    def test_request_line_query_is_redacted_in_the_log(self):
+        line = "GET /?k=SECRETVALUE HTTP/1.1"
+        out = panel_auth.redact_query(line)
+        self.assertNotIn("SECRETVALUE", out)
+        self.assertIn("GET /", out)
+        self.assertIn("HTTP/1.1", out)
+
+    def test_redaction_leaves_non_request_lines_alone(self):
+        # log_message is also used for error strings that may contain a '?'.
+        msg = "code 400, message Bad request syntax? really"
+        self.assertEqual(panel_auth.redact_query(msg), msg)
+
+    def test_bootstrap_request_does_not_write_the_token_to_stderr(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(buf):
+                    srv.get(f"/?k={srv.token}", token=None)
+                    time.sleep(0.05)  # the handler logs from its own thread
+            finally:
+                srv.close()
+            self.assertNotIn(srv.token, buf.getvalue())
+
+    def test_bootstrap_link_file_is_written_instead_of_printed(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buf):
+                    path = panel._write_bootstrap_link(
+                        srv.config, f"http://127.0.0.1:{srv.port}/?k={srv.token}")
+                self.assertIsNotNone(path)
+                self.assertNotIn(srv.token, buf.getvalue())
+                self.assertIn(srv.token, Path(path).read_text(encoding="utf-8"))
+                if os.name != "nt":
+                    self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
+            finally:
+                srv.close()
+
+
+class SaveallValidationTests(unittest.TestCase):
+    """POST /api/saveall/start took session_id/cwd straight through to a child
+    process's argv and working directory while /api/inject validated the same
+    field. Both are now on the validated side."""
+
+    def test_bad_session_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, body = srv.post(
+                    "/api/saveall/start",
+                    json.dumps({"session_id": "../../etc/passwd"}).encode())
+                self.assertEqual(resp.status, 400)
+                self.assertIn("session_id", json.loads(body).get("error", ""))
+            finally:
+                srv.close()
+
+    def test_nonexistent_cwd_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, body = srv.post(
+                    "/api/saveall/start",
+                    json.dumps({"cwd": os.path.join(d, "nope")}).encode())
+                self.assertEqual(resp.status, 400)
+                self.assertIn("cwd", json.loads(body).get("error", ""))
+            finally:
+                srv.close()
+
+
 class CookieBootstrapTests(unittest.TestCase):
     """`GET /?k=<token>` — the browser path used by /dash."""
 
@@ -960,9 +1048,42 @@ class CookieBootstrapTests(unittest.TestCase):
                 self.assertEqual(resp.status, 302)
                 self.assertEqual(resp.getheader("Location"), "/")
                 cookie = resp.getheader("Set-Cookie")
-                self.assertIn(f"{panel_auth.COOKIE_NAME}={srv.token}", cookie)
+                self.assertIn(f"{panel_auth.COOKIE_NAME}={srv.cookie_secret}", cookie)
                 self.assertIn("HttpOnly", cookie)
                 self.assertIn("SameSite=Strict", cookie)
+                # The credential the browser stores must not be the credential
+                # that also unlocks sessiond and the other machine's panel.
+                self.assertNotIn(srv.token, cookie)
+            finally:
+                srv.close()
+
+    def test_cookie_secret_is_not_the_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                self.assertTrue(srv.cookie_secret)
+                self.assertNotEqual(srv.cookie_secret, srv.token)
+            finally:
+                srv.close()
+
+    def test_the_real_token_is_rejected_as_a_cookie(self):
+        """The two credentials are not interchangeable in either direction."""
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get(
+                    "/api/knobs", token=None,
+                    extra_headers={"Cookie": f"{panel_auth.COOKIE_NAME}={srv.token}"})
+                self.assertEqual(resp.status, 401)
+            finally:
+                srv.close()
+
+    def test_the_cookie_secret_is_rejected_as_a_bearer_token(self):
+        with tempfile.TemporaryDirectory() as d:
+            srv = LiveServer(_write_profile(d))
+            try:
+                resp, _ = srv.get("/api/knobs", token=srv.cookie_secret)
+                self.assertEqual(resp.status, 401)
             finally:
                 srv.close()
 
@@ -982,7 +1103,7 @@ class CookieBootstrapTests(unittest.TestCase):
             try:
                 resp, _ = srv.get(
                     "/api/knobs", token=None,
-                    extra_headers={"Cookie": f"{panel_auth.COOKIE_NAME}={srv.token}"})
+                    extra_headers={"Cookie": f"{panel_auth.COOKIE_NAME}={srv.cookie_secret}"})
                 self.assertEqual(resp.status, 200)
             finally:
                 srv.close()

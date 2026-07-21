@@ -9,10 +9,17 @@ hand-rolled dark-theme page with zero external requests.
 
 Security posture (lead with the threats — this is a local dev tool, not a
 public service, and the design leans entirely on that):
-  - Loopback-only, no TLS story, no auth. `build_config`/`build_server` REFUSE
-    to bind anything outside {127.0.0.1, localhost, ::1} — that's the whole
-    trust boundary. There is deliberately no bearer/session layer: the box
-    itself is the credential.
+  - Loopback-only, no TLS story. `build_config`/`build_server` REFUSE to bind
+    anything outside {127.0.0.1, localhost, ::1}.
+  - A bearer token is required on every route but /health (see panel_auth).
+    It does NOT stop malware running as this user — that process reads the
+    token file exactly like the app does. It stops blind port probes, anything
+    that cannot read the file, and a process that raced us to the port. The
+    consent gate that WOULD close the same-user case is not built; do not
+    reason as though it is.
+  - The token value never reaches stdout or a log line (`redact_query`, and the
+    CLI writes the bootstrap URL to a 0600 file). Protecting the file is not
+    protecting the secret — see panel_auth's handling note for what went wrong.
   - DNS-rebinding defence anyway: every request's Host header is checked
     against an exact allowlist (loopback names + the RUNTIME port) before any
     routing happens, so a malicious page in a browser tab that's *already* on
@@ -1656,6 +1663,11 @@ class PanelConfig:
     # "auth off" — a config that somehow reached the serve loop without one
     # should fail loudly, never fail open. build_config always sets it.
     token: str = None
+    # Browser-session secret for the `?k=` bootstrap cookie. Minted per process,
+    # never persisted, never equal to `token` — see _authorized. A hand-built
+    # PanelConfig that leaves it None simply has no working cookie path, which
+    # is the safe direction to fail.
+    cookie_secret: str = None
 
 
 def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
@@ -1729,6 +1741,8 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     # Minted on first boot beside the audit log; every later boot reads it back.
     # Deliberately not under any Syncthing-replicated tree — see panel_auth.
     token = panel_auth.load_or_create_token(Path(profile["audit_log"]).parent)
+    # Distinct browser-session secret, memory-only (see PanelConfig.cookie_secret).
+    cookie_secret = panel_auth.mint_cookie_secret()
     return PanelConfig(
         host=host, port=port, profile_path=Path(profile_path), profile=profile,
         audit_log_path=Path(profile["audit_log"]), providers=providers,
@@ -1742,7 +1756,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         scheduler=scheduler,
         kernel_store=kernel_store, kernel_runner=kernel_runner,
         task_cache=task_cache, providers_cache=providers_cache,
-        token=token,
+        token=token, cookie_secret=cookie_secret,
     )
 
 
@@ -2224,12 +2238,198 @@ _MAX_VOICE_BODY_BYTES = 8 * 1024 * 1024
 def make_handler(config: PanelConfig):
     """Build a BaseHTTPRequestHandler bound to *config* (closure, no globals)."""
 
+    # ---- POST route table -------------------------------------------------
+    #
+    # path -> (handler, max_body_bytes). Each handler takes the parsed payload
+    # and returns (status, body); everything before and after it — the
+    # Content-Type check, the Origin allowlist, the bounded read, the JSON
+    # parse, and crucially the "the gate already answered, stop here" guard —
+    # happens exactly once, in _route_post.
+    #
+    # It used to be a twelve-branch elif chain in which every branch re-typed:
+    #
+    #     payload = self._read_post_json()
+    #     if payload is None:
+    #         return
+    #
+    # Six of those lines are boilerplate and one of them is load-bearing: drop
+    # the `return` and the route runs its handler on None AFTER the gate has
+    # already sent a 403, which desyncs the keep-alive stream. A table cannot
+    # forget it.
+    def _provider_action(payload):
+        status, result = provider_handlers.handle_provider_action(
+            config.registry, config.audit_log_path,
+            payload.get("action"), payload)
+        # a load/unload/start/stop just changed what the next probe would
+        # report — never serve the pre-action snapshot back
+        if config.providers_cache is not None:
+            config.providers_cache.invalidate()
+        return status, result
+
+    def _saveall_start(payload):
+        # Same validation /api/inject applies. Neither field reaches a shell
+        # (saveall.start spawns argv-style), but an unchecked session_id becomes
+        # a `claude --resume` argument and an unchecked cwd becomes a child
+        # process's working directory — both belong on the validated side of
+        # the boundary.
+        payload = payload or {}
+        sid = payload.get("session_id")
+        if sid is not None and (not isinstance(sid, str)
+                                or not _SESSION_ID_RE.match(sid)):
+            return 400, {"ok": False, "error": "invalid session_id"}
+        cwd = payload.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str)
+                                or not os.path.isdir(cwd)):
+            return 400, {"ok": False, "error": "cwd is not a directory"}
+        claude_adapter = config.registry.get("claude")
+        cli = getattr(claude_adapter, "cli_path", "claude") if claude_adapter else "claude"
+        try:
+            _audit_append(config.audit_log_path, {
+                "ts": forget.now_iso(), "action": "saveall",
+                "result": "pending"})
+            result = saveall_runner.start(
+                config.claude_dir, cli_path=cli,
+                session_id=sid, resume_cwd=cwd)
+            _audit_append(config.audit_log_path, {
+                "ts": forget.now_iso(), "action": "saveall",
+                "session_id": result.get("session_id"), "result": "started"})
+            return 200, result
+        except Exception as exc:
+            _audit_append(config.audit_log_path, {
+                "ts": forget.now_iso(), "action": "saveall",
+                "result": f"failed: {exc}"})
+            return 500, {"ok": False, "error": str(exc)}
+
+    def _kernel_verb(path, payload):
+        """POST /api/kernels/<id>/<prompt|kill|archive>."""
+        parts = path.split("/")  # ['', 'api', 'kernels', <id>, <verb>]
+        if len(parts) != 5:
+            return 404, {"error": "not found"}
+        kid, verb = parts[3], parts[4]
+        if verb == "prompt":
+            return kernel_handlers.handle_kernel_prompt(
+                config.kernel_store, config.kernel_runner,
+                config.audit_log_path, kid, payload)
+        if verb == "kill":
+            return kernel_handlers.handle_kernel_kill(
+                config.kernel_store, config.kernel_runner,
+                config.audit_log_path, kid)
+        if verb == "archive":
+            return kernel_handlers.handle_kernel_archive(
+                config.kernel_store, config.audit_log_path, kid)
+        return 404, {"error": "not found"}
+
+    # ---- GET route table --------------------------------------------------
+    #
+    # path -> handler(query) -> (status, body). Same rationale as the POST
+    # table: the twenty-odd branches it replaces were `st, body = X(...)`
+    # followed by `self._send_json(st, body)`, twenty times over, which buried
+    # the three routes that actually behave differently. Those three stay
+    # explicit in _route_get: `/` serves HTML (not JSON), and `/api/memory`
+    # turns a SystemExit from the telemetry builder into a 503.
+    #
+    # Everything is called INSIDE the lambda, per request — several of these
+    # sample live state (telemetry, caches) and must not be evaluated once at
+    # table-construction time.
+    _GET_ROUTES = {
+        "/health": lambda q: (200, {"app": "memsom-panel",
+                                    "version": _MEMSOM_VERSION, "ok": True}),
+        "/api/system": lambda q: (200, config.telemetry.sample()),
+        "/api/knobs": lambda q: (200, build_knobs_payload(config)),
+        "/api/activity/workflows": lambda q: (200, config.workflows_cache.get()),
+        "/api/activity/agents": lambda q: (200, config.agents_cache.get()),
+        "/api/activity/memories": lambda q: (200, config.memories_cache.get()),
+        # The caches are late additions defaulted to None, so a hand-built
+        # PanelConfig in a test falls back to the direct read.
+        "/api/memory/touches": lambda q: (
+            200, config.touches_cache.get() if config.touches_cache is not None
+            else _read_memory_touches(config.claude_dir)),
+        "/api/providers": lambda q: (
+            200, config.providers_cache.get() if config.providers_cache is not None
+            else provider_handlers.build_providers_payload(config.registry)),
+        "/api/providers/vram-estimate": lambda q: provider_handlers.handle_vram_estimate(
+            config.registry, _q1(q, "provider"), _q1(q, "model"),
+            _qint(q, "ctx", 0), _q1(q, "kv") or "fp16"),
+        "/api/inference/sessions": lambda q: provider_handlers.handle_inference_sessions(
+            config.session_runner),
+        "/api/inference": lambda q: provider_handlers.handle_inference_read(
+            config.session_runner, _q1(q, "session_id"), _qint(q, "cursor", 0)),
+        "/api/voice/chat": lambda q: voice_handlers.handle_voice_chat_read(
+            config.voice_runner, _q1(q, "session_id"), _qint(q, "cursor", 0)),
+        "/api/saveall/status": lambda q: (200, saveall_runner.status(config.claude_dir)),
+        "/api/session-status": lambda q: (200, _read_session_status(config.claude_dir)),
+        "/api/agents/graphs": lambda q: agent_handlers.handle_graphs_list(
+            config.graph_store),
+        "/api/agents/graph": lambda q: agent_handlers.handle_graph_get(
+            config.graph_store, _q1(q, "id")),
+        "/api/agents/tools": lambda q: agent_handlers.handle_tool_catalog(),
+        "/api/agents/run": lambda q: agent_handlers.handle_run_read(
+            config.agent_runner, _q1(q, "run_id"), _qint(q, "cursor", 0)),
+        "/api/agents/runs": lambda q: agent_handlers.handle_runs_list(config.agent_runner),
+        "/api/agents/scheduler": lambda q: agent_handlers.handle_scheduler_status(
+            config.scheduler),
+        "/api/kernels": lambda q: kernel_handlers.handle_kernels_list(
+            config.kernel_store, config.kernel_runner,
+            include_archived=_q1(q, "all") in ("1", "true")),
+    }
+
+    # STT is the one route with a raised body ceiling — it ships base64 audio.
+    _POST_ROUTES = {
+        "/api/knobs": (lambda p: handle_knob_write(config, p), _MAX_BODY_BYTES),
+        "/api/inject": (lambda p: handle_inject(config, p), _MAX_BODY_BYTES),
+        "/api/providers/action": (_provider_action, _MAX_BODY_BYTES),
+        "/api/inference/start": (
+            lambda p: provider_handlers.handle_inference_start(
+                config.registry, config.session_runner,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/voice/stt": (
+            lambda p: voice_handlers.handle_voice_stt(
+                config.registry, config.audit_log_path, p),
+            _MAX_VOICE_BODY_BYTES),
+        "/api/voice/chat": (
+            lambda p: voice_handlers.handle_voice_chat_start(
+                config.registry, config.voice_runner,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/voice/tts": (
+            lambda p: voice_handlers.handle_voice_tts(
+                config.registry, config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/agents/graph": (
+            lambda p: agent_handlers.handle_graph_save(
+                config.graph_store, config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/agents/graph/delete": (
+            lambda p: agent_handlers.handle_graph_delete(
+                config.graph_store, config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/agents/run": (
+            lambda p: agent_handlers.handle_run_start(
+                config.graph_store, config.agent_runner, config.registry,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/kernels": (
+            lambda p: kernel_handlers.handle_kernel_create(
+                config.kernel_store, config.profile,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/saveall/start": (_saveall_start, _MAX_BODY_BYTES),
+    }
+
     class PanelHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"memsom-panel/{_MEMSOM_VERSION}"
 
         def log_message(self, fmt, *args):  # noqa: N802 (stdlib signature)
-            print(f"[memsom-panel] {self.address_string()} - {fmt % args}", file=sys.stderr)
+            # stdlib `log_request` hands us `self.requestline` verbatim, which
+            # on the bootstrap route is `GET /?k=<TOKEN> HTTP/1.1`. Redact every
+            # query string before it reaches stderr: this stream gets captured
+            # into terminal scrollback, session transcripts and log files, none
+            # of which have the token file's ACL. See panel_auth's handling note.
+            safe = tuple(panel_auth.redact_query(a) if isinstance(a, str) else a
+                         for a in args)
+            print(f"[memsom-panel] {self.address_string()} - {fmt % safe}", file=sys.stderr)
 
         # ---- response helpers ----
 
@@ -2257,23 +2457,30 @@ def make_handler(config: PanelConfig):
 
         # ---- auth (see panel_auth) ----
 
-        def _presented_token(self):
-            """Token from the Authorization header, else the bootstrap cookie."""
-            tok = panel_auth.bearer_from_header(self.headers.get("Authorization"))
-            if tok:
-                return tok
-            return panel_auth.token_from_cookie(self.headers.get("Cookie"))
-
         def _authorized(self, path) -> bool:
-            """True if *path* is public or the request carries the right token.
+            """True if *path* is public or the request carries a valid credential.
 
-            A falsy `config.token` denies everything non-public rather than
-            waving requests through: build_config always mints one, so a
-            missing token means something is wrong and should fail loudly.
+            TWO credentials, deliberately not the same value:
+              * `Authorization: Bearer <token>` — the real, on-disk token; what
+                the desktop app and any scripted client present.
+              * the bootstrap cookie — a per-process secret minted at boot and
+                never written anywhere, for the browser path only.
+
+            Keeping them separate means a browser cookie jar (plaintext on
+            disk, backed up, sync-able) never holds the credential that also
+            unlocks sessiond and the Mac's panel.
+
+            A falsy expected value on either side denies rather than waving the
+            request through (`token_ok` fails closed on empty): build_config
+            always mints both, so a missing one means something is wrong.
             """
             if path in _PUBLIC_PATHS:
                 return True
-            return panel_auth.token_ok(self._presented_token(), config.token)
+            header_tok = panel_auth.bearer_from_header(self.headers.get("Authorization"))
+            if panel_auth.token_ok(header_tok, config.token):
+                return True
+            cookie_tok = panel_auth.token_from_cookie(self.headers.get("Cookie"))
+            return panel_auth.token_ok(cookie_tok, config.cookie_secret)
 
         def _deny(self):
             self._reject(401, {"error": "unauthorized"},
@@ -2300,7 +2507,12 @@ def make_handler(config: PanelConfig):
             # No `Secure`: this is plain http on loopback, and Secure would stop
             # the cookie being stored at all. SameSite=Strict plus the existing
             # Origin allowlist is what covers CSRF here.
-            cookie = (f"{panel_auth.COOKIE_NAME}={config.token}; Path=/; "
+            #
+            # The cookie carries `config.cookie_secret`, NOT the token: a value
+            # that lives only in this process's memory, so a browser profile on
+            # disk never holds the real credential and closing the panel logs
+            # every browser out.
+            cookie = (f"{panel_auth.COOKIE_NAME}={config.cookie_secret}; Path=/; "
                       f"HttpOnly; SameSite=Strict; Max-Age=86400")
             self._send(302, b"", ctype="text/plain",
                        extra_headers={"Location": "/", "Set-Cookie": cookie})
@@ -2336,90 +2548,27 @@ def make_handler(config: PanelConfig):
 
         def _route_get(self):
             path, query = self._split_path()
+            # The two routes that don't fit the (status, json) shape.
             if path == "/":
                 self._serve_page()
-            elif path == "/health":
-                self._serve_health()
-            elif path == "/api/memory":
+                return
+            if path == "/api/memory":
                 self._serve_memory(query)
-            elif path == "/api/system":
-                self._serve_system()
-            elif path == "/api/knobs":
-                self._send_json(200, build_knobs_payload(config))
-            elif path == "/api/activity/workflows":
-                self._send_json(200, config.workflows_cache.get())
-            elif path == "/api/activity/agents":
-                self._send_json(200, config.agents_cache.get())
-            elif path == "/api/activity/memories":
-                self._send_json(200, config.memories_cache.get())
-            elif path == "/api/memory/touches":
-                self._send_json(200, config.touches_cache.get()
-                                if config.touches_cache is not None
-                                else _read_memory_touches(config.claude_dir))
-            elif path == "/api/providers":
-                self._send_json(200, config.providers_cache.get()
-                                if config.providers_cache is not None
-                                else provider_handlers.build_providers_payload(config.registry))
-            elif path == "/api/providers/vram-estimate":
-                st, body = provider_handlers.handle_vram_estimate(
-                    config.registry, _q1(query, "provider"), _q1(query, "model"),
-                    _qint(query, "ctx", 0), _q1(query, "kv") or "fp16")
-                self._send_json(st, body)
-            elif path == "/api/inference/sessions":
-                st, body = provider_handlers.handle_inference_sessions(
-                    config.session_runner)
-                self._send_json(st, body)
-            elif path == "/api/inference":
-                st, body = provider_handlers.handle_inference_read(
-                    config.session_runner, _q1(query, "session_id"),
-                    _qint(query, "cursor", 0))
-                self._send_json(st, body)
-            elif path == "/api/voice/chat":
-                st, body = voice_handlers.handle_voice_chat_read(
-                    config.voice_runner, _q1(query, "session_id"),
-                    _qint(query, "cursor", 0))
-                self._send_json(st, body)
-            elif path == "/api/saveall/status":
-                self._send_json(200, saveall_runner.status(config.claude_dir))
-            elif path == "/api/session-status":
-                self._send_json(200, _read_session_status(config.claude_dir))
-            elif path == "/api/agents/graphs":
-                st, body = agent_handlers.handle_graphs_list(config.graph_store)
-                self._send_json(st, body)
-            elif path == "/api/agents/graph":
-                st, body = agent_handlers.handle_graph_get(
-                    config.graph_store, _q1(query, "id"))
-                self._send_json(st, body)
-            elif path == "/api/agents/tools":
-                st, body = agent_handlers.handle_tool_catalog()
-                self._send_json(st, body)
-            elif path == "/api/agents/run":
-                st, body = agent_handlers.handle_run_read(
-                    config.agent_runner, _q1(query, "run_id"),
-                    _qint(query, "cursor", 0))
-                self._send_json(st, body)
-            elif path == "/api/agents/runs":
-                st, body = agent_handlers.handle_runs_list(config.agent_runner)
-                self._send_json(st, body)
-            elif path == "/api/kernels":
-                include_archived = _q1(query, "all") in ("1", "true")
-                st, body = kernel_handlers.handle_kernels_list(
-                    config.kernel_store, config.kernel_runner,
-                    include_archived=include_archived)
-                self._send_json(st, body)
-            elif path == "/api/agents/scheduler":
-                st, body = agent_handlers.handle_scheduler_status(config.scheduler)
-                self._send_json(st, body)
-            else:
+                return
+            handler = _GET_ROUTES.get(path)
+            if handler is None:
                 self._send_json(404, {"error": "not found"})
+                return
+            status, body = handler(query)
+            self._send_json(status, body)
 
         def _serve_page(self):
             self._send(200, PAGE_HTML_BYTES, ctype="text/html; charset=utf-8")
 
-        def _serve_health(self):
-            self._send_json(200, {"app": "memsom-panel", "version": _MEMSOM_VERSION, "ok": True})
-
         def _serve_memory(self, query):
+            """Not in the table: the builder can raise SystemExit (a missing
+            store, a bad profile), which has to become a 503 rather than the
+            generic 500 the do_GET wrapper would produce."""
             refresh = any(v in ("1", "true") for v in query.get("refresh", []))
             try:
                 data = config.memory_cache.get(refresh=refresh)
@@ -2427,9 +2576,6 @@ def make_handler(config: PanelConfig):
                 self._send_json(503, {"error": f"memory telemetry unavailable: {exc}"})
                 return
             self._send_json(200, data)
-
-        def _serve_system(self):
-            self._send_json(200, config.telemetry.sample())
 
         def do_POST(self):  # noqa: N802
             if not _host_header_allowed(self.headers.get("Host"), config.port):
@@ -2482,139 +2628,20 @@ def make_handler(config: PanelConfig):
 
         def _route_post(self):
             path, _query = self._split_path()
-            if path == "/api/knobs":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = handle_knob_write(config, payload)
-                self._send_json(status, result)
-            elif path == "/api/inject":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = handle_inject(config, payload)
-                self._send_json(status, result)
-            elif path == "/api/providers/action":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = provider_handlers.handle_provider_action(
-                    config.registry, config.audit_log_path,
-                    payload.get("action"), payload)
-                # a load/unload/start/stop just changed what the next probe
-                # would report — never serve the pre-action snapshot back
-                if config.providers_cache is not None:
-                    config.providers_cache.invalidate()
-                self._send_json(status, result)
-            elif path == "/api/inference/start":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = provider_handlers.handle_inference_start(
-                    config.registry, config.session_runner,
-                    config.audit_log_path, payload)
-                self._send_json(status, result)
-            elif path == "/api/voice/stt":
-                # STT ships base64 audio — raise the body cap for this route only.
-                payload = self._read_post_json(_MAX_VOICE_BODY_BYTES)
-                if payload is None:
-                    return
-                status, result = voice_handlers.handle_voice_stt(
-                    config.registry, config.audit_log_path, payload)
-                self._send_json(status, result)
-            elif path == "/api/voice/chat":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = voice_handlers.handle_voice_chat_start(
-                    config.registry, config.voice_runner,
-                    config.audit_log_path, payload)
-                self._send_json(status, result)
-            elif path == "/api/voice/tts":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                status, result = voice_handlers.handle_voice_tts(
-                    config.registry, config.audit_log_path, payload)
-                self._send_json(status, result)
-            elif path == "/api/agents/graph":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                st, body = agent_handlers.handle_graph_save(
-                    config.graph_store, config.audit_log_path, payload)
-                self._send_json(st, body)
-            elif path == "/api/agents/graph/delete":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                st, body = agent_handlers.handle_graph_delete(
-                    config.graph_store, config.audit_log_path, payload)
-                self._send_json(st, body)
-            elif path == "/api/agents/run":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                st, body = agent_handlers.handle_run_start(
-                    config.graph_store, config.agent_runner, config.registry,
-                    config.audit_log_path, payload)
-                self._send_json(st, body)
-            elif path == "/api/kernels":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                st, body = kernel_handlers.handle_kernel_create(
-                    config.kernel_store, config.profile,
-                    config.audit_log_path, payload)
-                self._send_json(st, body)
+            route = _POST_ROUTES.get(path)
+            if route is not None:
+                handler, max_bytes = route
             elif path.startswith("/api/kernels/"):
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                parts = path.split("/")  # ['', 'api', 'kernels', <id>, <verb>]
-                if len(parts) != 5:
-                    self._send_json(404, {"error": "not found"})
-                    return
-                kid, verb = parts[3], parts[4]
-                if verb == "prompt":
-                    st, body = kernel_handlers.handle_kernel_prompt(
-                        config.kernel_store, config.kernel_runner,
-                        config.audit_log_path, kid, payload)
-                elif verb == "kill":
-                    st, body = kernel_handlers.handle_kernel_kill(
-                        config.kernel_store, config.kernel_runner,
-                        config.audit_log_path, kid)
-                elif verb == "archive":
-                    st, body = kernel_handlers.handle_kernel_archive(
-                        config.kernel_store, config.audit_log_path, kid)
-                else:
-                    st, body = 404, {"error": "not found"}
-                self._send_json(st, body)
-            elif path == "/api/saveall/start":
-                payload = self._read_post_json()
-                if payload is None:
-                    return
-                claude_adapter = config.registry.get("claude")
-                cli = getattr(claude_adapter, "cli_path", "claude") if claude_adapter else "claude"
-                try:
-                    _audit_append(config.audit_log_path, {
-                        "ts": forget.now_iso(), "action": "saveall",
-                        "result": "pending"})
-                    result = saveall_runner.start(
-                        config.claude_dir, cli_path=cli,
-                        session_id=(payload or {}).get("session_id"),
-                        resume_cwd=(payload or {}).get("cwd"))
-                    _audit_append(config.audit_log_path, {
-                        "ts": forget.now_iso(), "action": "saveall",
-                        "session_id": result.get("session_id"), "result": "started"})
-                    self._send_json(200, result)
-                except Exception as exc:
-                    _audit_append(config.audit_log_path, {
-                        "ts": forget.now_iso(), "action": "saveall",
-                        "result": f"failed: {exc}"})
-                    self._send_json(500, {"ok": False, "error": str(exc)})
+                handler = lambda p: _kernel_verb(path, p)  # noqa: E731
+                max_bytes = _MAX_BODY_BYTES
             else:
                 self._send_json(404, {"error": "not found"})
+                return
+            payload = self._read_post_json(max_bytes)
+            if payload is None:
+                return  # the gate already sent the error response
+            status, body = handler(payload)
+            self._send_json(status, body)
 
     return PanelHandler
 
@@ -2637,6 +2664,27 @@ def build_server(config: PanelConfig) -> ThreadingHTTPServer:
 # ---------------------------------------------------------------------------
 # CLI entry point: `memsom panel`
 # ---------------------------------------------------------------------------
+
+def _write_bootstrap_link(config: PanelConfig, bootstrap: str):
+    """Drop the `?k=<token>` URL beside the token file, ACL'd the same way.
+
+    Returns the path written, or None if it could not be written (which is a
+    usability problem, never a reason to refuse to serve). Same protection as
+    `panel_token` itself — this file holds the same secret, so it must not be
+    the weak copy that undoes the ACL on the strong one.
+    """
+    try:
+        path = Path(config.audit_log_path).parent / "panel_bootstrap_url.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # O_TRUNC: the port can change between boots, so this is a rewrite.
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(bootstrap + "\n")
+        panel_auth.harden_permissions(path)
+        return path
+    except OSError:
+        return None
+
 
 def _cmd_panel(args):
     try:
@@ -2675,11 +2723,21 @@ def _cmd_panel(args):
     url = f"http://127.0.0.1:{port}/"
     # The browser has no way to send an Authorization header for a URL you
     # type, so `?k=` exchanges the token for an HttpOnly cookie and redirects
-    # to the bare URL. Print the bootstrap form — pasting the plain URL into a
-    # cold browser is a 401, and that should not be a mystery.
+    # to the bare URL.
+    #
+    # This URL is NEVER printed. stdout here ends up in terminal scrollback, in
+    # Claude Code session transcripts, and from there in the episodic DB and a
+    # Syncthing-replicated Vault folder — which is exactly how a live token
+    # reached a public-IP device on 2026-07-21. It goes to a 0600 file instead;
+    # the operator reads it from there when they actually need it.
     bootstrap = f"{url}?k={config.token}"
+    link_path = _write_bootstrap_link(config, bootstrap)
     print(f"panel: {url}")
-    print(f"panel: first visit (sets the session cookie): {bootstrap}")
+    if link_path is not None:
+        print(f"panel: browser bootstrap URL written to {link_path} (contains the token — do not paste it into a shell)")
+    else:
+        print("panel: could not write the bootstrap link file; "
+              "read the token from <episodic>/panel_token and visit /?k=<token>")
     if not args.no_open:
         webbrowser.open(bootstrap)
     if config.scheduler is not None:

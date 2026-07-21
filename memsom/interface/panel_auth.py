@@ -29,8 +29,10 @@ What it DOES buy, and why it is still worth having:
   * a client can distinguish the real server from something that raced to bind
     the port (impostor/port-squatting), since the impostor cannot produce it.
 
-The layer a same-user attacker genuinely cannot cross is the human-presence
-consent gate that sits on TOP of this one.  Auth is the floor, not the fix.
+The layer that WOULD close a same-user compromise is a human-presence consent
+gate on the shell-granting routes.  It is NOT BUILT.  Until it is, auth is the
+only layer, and it is a floor, not a fix — do not read this module as though
+something above it is catching what it misses.  Tracked as the known gap.
 
 Storage
 -------
@@ -40,14 +42,32 @@ file is deliberately NOT placed anywhere Syncthing replicates: the only synced
 tree here reaches a lighthouse device on a public IP.  The Mac's copy is
 provisioned out-of-band over scp.
 
+HANDLING THE VALUE (learned the hard way, 2026-07-21)
+-----------------------------------------------------
+Protecting the FILE is not protecting the SECRET.  The first build of this
+layer ACL'd the file correctly and kept it off every synced tree, then printed
+`http://…/?k=<token>` to stdout on every boot and echoed the same query string
+into the request log.  Started from a Claude Code shell, that put the live
+token in a session transcript, in the episodic DB, and in a Vault folder
+Syncthing replicates to a public-IP device — the exact outcome the storage
+rules above exist to prevent.
+
+So: the token value must never reach stdout, a log line, a request line, or
+any other channel that gets archived.  `redact_query` exists for that, the CLI
+writes the bootstrap URL to a 0600 file instead of printing it, and the browser
+cookie carries a SEPARATE per-process secret (`mint_cookie_secret`) so a
+cookie jar on disk never holds the real credential.
+
 Public API
 ----------
   token_path(episodic_dir)             -> Path
   load_or_create_token(episodic_dir)   -> str
+  mint_cookie_secret()                 -> str    (per-process, never persisted)
   harden_permissions(path)             -> str | None   (reason on failure)
   token_ok(presented, expected)        -> bool
   bearer_from_header(value)            -> str | None
   token_from_cookie(value)             -> str | None
+  redact_query(request_line)           -> str    (log-safe request line)
   COOKIE_NAME
 
 stdlib only.  Never prints from a library path — `harden_permissions` returns a
@@ -59,10 +79,14 @@ from __future__ import annotations
 import hmac
 import http.cookies
 import os
+import re
 import secrets
 import subprocess
 import sys
 from pathlib import Path
+
+#: `METHOD path HTTP/x.y` — the shape `redact_query` is allowed to rewrite.
+_REQUEST_LINE_RE = re.compile(r"^[A-Z]+ \S+ HTTP/\d\.\d$")
 
 #: Name of the cookie the browser bootstrap sets.  Distinct from any header so
 #: the two presentation paths can be told apart in the audit log.
@@ -129,6 +153,42 @@ def load_or_create_token(episodic_dir) -> str:
     return token
 
 
+def mint_cookie_secret() -> str:
+    """A fresh browser-session secret, held in memory for this process only.
+
+    The browser bootstrap used to hand the REAL token to the cookie jar, which
+    left a working credential sitting in a browser profile on disk for a day.
+    A separate value costs nothing, is never written anywhere, and dies with
+    the panel — so closing the panel invalidates every browser session, and a
+    stolen cookie is worthless against the Authorization-header path the app
+    uses.
+    """
+    return secrets.token_urlsafe(_TOKEN_BYTES)
+
+
+def redact_query(request_line) -> str:
+    """Strip the query string off an HTTP request line so it is safe to log.
+
+    `BaseHTTPRequestHandler.log_request` passes `self.requestline` verbatim,
+    which for the bootstrap route reads `GET /?k=<TOKEN> HTTP/1.1`.  Anything
+    after the first `?` in the path is replaced with `?<redacted>` — the
+    method, path and version stay readable, which is all a log needs.
+
+    Deliberately conservative: `log_message` is also used for error strings
+    that may legitimately contain a `?`, so anything that does not look like
+    `METHOD path HTTP/x.y` is returned untouched rather than truncated.
+    """
+    line = str(request_line or "")
+    if not _REQUEST_LINE_RE.match(line):
+        return line
+    head, sep, rest = line.partition("?")
+    if not sep:
+        return line
+    # Keep the trailing " HTTP/1.1" so a redacted line still parses as one.
+    version = rest[rest.rfind(" "):] if " " in rest else ""
+    return f"{head}?<redacted>{version}"
+
+
 def _read_token(path: Path) -> str:
     """Read and strip the token file; '' if absent, unreadable, or blank."""
     try:
@@ -182,10 +242,10 @@ def _current_user_sid() -> str | None:
     """The current user's SID in icacls form (`*S-1-5-21-…`), or None.
 
     A SID always resolves in an ACL; a *name* may not. This matters in exactly
-    the case that bit us: run over SSH, `USERDOMAIN` is `WORKGROUP` while the
-    account is really `MattSom\\user`, so granting `WORKGROUP\\user` fails
-    with "No mapping between account names and security IDs" (1332) and the
-    file silently keeps its inherited ACL.
+    the case that bit us: run over SSH, `USERDOMAIN` reads as `WORKGROUP` while
+    the account really lives on the machine-account domain, so granting
+    `WORKGROUP\\<user>` fails with "No mapping between account names and
+    security IDs" (1332) and the file silently keeps its inherited ACL.
     """
     try:
         proc = subprocess.run(
