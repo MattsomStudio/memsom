@@ -44,6 +44,42 @@ def _is_author() -> bool:
     return os.environ.get("MEMDAG_BRIDGE_AUTHOR", "1") != "0"
 
 
+def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes) -> None:
+    """Record which memories this render left OUT of MEMORY.md, and why.
+
+    `.weights/shed.json` is the receipt for every index exclusion memsom decides
+    (cold / unsectioned / budget).  Consumers (mem_audit) treat a listed stem as
+    a tracked, explained absence rather than an orphan.  Always rewritten in
+    full — it describes the LAST render only, so a memory that comes back into
+    the index drops out of it on its own with no reconciliation step.
+
+    Best-effort by construction: the manifest is diagnostic, and a render that
+    already wrote MEMORY.md successfully must never be reported as failed
+    because a side-file could not be written.
+    """
+    import json
+    try:
+        weights = Path(memory_dir) / ".weights"
+        weights.mkdir(parents=True, exist_ok=True)
+        by_reason = {}
+        for e in excluded:
+            by_reason[e.get("reason", "?")] = by_reason.get(e.get("reason", "?"), 0) + 1
+        payload = {
+            "version": 2,
+            "rendered_at": forget.now_iso(),
+            "budget": budget,
+            "rendered_bytes": rendered_bytes,
+            "count": len(excluded),
+            "by_reason": by_reason,
+            "excluded": excluded,
+        }
+        tmp = weights / "shed.json.tmp"
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(weights / "shed.json")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[bridge] shed manifest skipped: {exc!r}")
+
+
 def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     """Run import -> forget -> (verify-stale) -> write_live over *memory_dir*.
 
@@ -83,6 +119,17 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     # moves the render threshold and the digest cap together, atomically.
     ok, info = digest.write_live(conn, str(memory_dir),
                                  budget=params["memory_budget"])
+
+    # Budget eviction is a real removal from the always-loaded index, but it is
+    # NOT the forgetting layer's hot->cold demote and it never reaches
+    # canonical.json (memsom only READS that file; mem_weights.py owns it). Left
+    # unrecorded it produced 86 memories that were on disk, absent from
+    # MEMORY.md, and unexplainable — the audit could not tell a budget drop from
+    # a corrupted index. So the render publishes its own manifest: single-author
+    # (this code path only), so no writer ever contends with the weights layer.
+    if ok:
+        _write_shed_manifest(memory_dir, info.get("excluded") or [],
+                             params["memory_budget"], info.get("bytes"))
 
     # Keep the CLAUDE.md managed block current in the same pass (idempotent: a
     # second run is a no-op). Best-effort — a CLAUDE.md problem must never stop the

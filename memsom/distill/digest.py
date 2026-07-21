@@ -218,12 +218,40 @@ def _assemble(title, entries, *, include_reverify=True):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_digest(conn, *, title=None, budget=None):
-    """Render the MEMORY.md digest string from the live bridge nodes."""
+def render_digest(conn, *, title=None, budget=None, excluded_out=None):
+    """Render the MEMORY.md digest string from the live bridge nodes.
+
+    `excluded_out`: pass a list to learn WHICH memories this render left out of
+    MEMORY.md and why.  Extended with {"stem", "reason", "rs"} dicts, where
+    reason is one of:
+      "cold"        — the forgetting layer demoted it (_select_hot skipped it)
+      "unsectioned" — no section:, so there is nowhere in the index to put it
+      "budget"      — it fit the rules but not the byte cap (lowest RS evicted
+                      first; these are listed in the order they were dropped)
+    Default None keeps the old behaviour byte-for-byte.
+
+    Why this exists: memsom RENDERS MEMORY.md but never writes canonical.json
+    (`~/.claude/episodic/mem_weights.py` is its sole author), so every exclusion
+    decided here was invisible to the weights layer the audit reads.  The result
+    was 86 memories on disk, absent from the index, with no record anywhere of
+    why — indistinguishable from a corrupted index.  Reporting exclusions lets
+    the caller persist a receipt, so "not in MEMORY.md" is always explainable.
+    """
     if budget is None:
         budget = BUDGET
     title = title or os.environ.get("MEMDAG_DIGEST_TITLE", DEFAULT_TITLE)
-    hot = _select_hot([_entry(*r) for r in _rows(conn)])
+    all_entries = [_entry(*r) for r in _rows(conn)]
+    hot = _select_hot(all_entries)
+    if excluded_out is not None:
+        # Everything _select_hot filtered out, with the rule that filtered it.
+        # Literals always render, so only files can appear here.
+        live_ids = {id(e) for e in hot}
+        for e in all_entries:
+            if e["kind"] != "file" or id(e) in live_ids:
+                continue
+            reason = "cold" if e["section"] else "unsectioned"
+            excluded_out.append({"stem": e["stem"], "reason": reason,
+                                 "rs": e["rs"]})
     # Read-time fact resolution (docs/facts-design.md Phase 2): substitute
     # [[fact_*]] in hooks and literal lines with the CURRENT value. Must happen
     # BEFORE the budget loop below — resolved values change line length, and
@@ -243,6 +271,12 @@ def render_digest(conn, *, title=None, budget=None):
         live = [e for e in hot if id(e) not in dropped]
         text = _assemble(title, live, include_reverify=include_reverify)
         if len(text.encode("utf-8")) <= budget:
+            if excluded_out is not None:
+                # droppable order == drop order, so these read lowest-RS-first:
+                # exactly the eviction sequence that ran.
+                excluded_out.extend(
+                    {"stem": e["stem"], "reason": "budget", "rs": e["rs"]}
+                    for e in droppable if id(e) in dropped)
             return text
         if include_reverify:
             # the worklist is redundant with the inline ⚠ markers, so it sheds
@@ -360,13 +394,18 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
     problems = validate(conn, budget=budget, title=title, prior_text=prior_text)
     if problems:
         return False, problems
-    text = render_digest(conn, title=title, budget=budget)
+    excluded = []
+    text = render_digest(conn, title=title, budget=budget,
+                         excluded_out=excluded)
     tmp = path.with_suffix(path.suffix + ".tmp")
     # write_bytes (not write_text): keep LF on Windows so on-disk size == the
     # validated budget and the file's line endings match the original MEMORY.md.
     tmp.write_bytes(text.encode("utf-8"))
     tmp.replace(path)
-    return True, {"bytes": len(text.encode("utf-8")), "path": str(path)}
+    # `excluded` is every memory THIS render left out of MEMORY.md, with the
+    # reason — the caller persists it so an absent memory is always explainable.
+    return True, {"bytes": len(text.encode("utf-8")), "path": str(path),
+                  "excluded": excluded}
 
 
 # --- verification (the cutover GO check) -------------------------------------
