@@ -10,6 +10,7 @@ import http.client
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -825,6 +826,25 @@ class TokenFileTests(unittest.TestCase):
             panel_auth.token_path(d).write_text("   \n", encoding="utf-8")
             token = panel_auth.load_or_create_token(d)
             self.assertTrue(token.strip())
+
+    def test_harden_permissions_succeeds_on_this_platform(self):
+        # Regression (found in deployment, not in test): harden_permissions
+        # used to build a DOMAIN\\USER principal out of USERDOMAIN. Run over
+        # SSH, USERDOMAIN reads WORKGROUP while the account is really
+        # MattSom\\user, so icacls failed with 1332 "no mapping between
+        # account names and security IDs" and the token file silently kept its
+        # inherited ACL (SYSTEM + Administrators + user) while the panel booted
+        # happily. It resolves the SID now, which always maps.
+        with tempfile.TemporaryDirectory() as d:
+            panel_auth.load_or_create_token(d)
+            reason = panel_auth.harden_permissions(panel_auth.token_path(d))
+            self.assertIsNone(reason, f"permission hardening failed: {reason}")
+
+    @unittest.skipUnless(sys.platform == "win32", "SID lookup is Windows-only")
+    def test_current_user_sid_is_in_icacls_form(self):
+        sid = panel_auth._current_user_sid()
+        self.assertIsNotNone(sid)
+        self.assertTrue(sid.startswith("*S-1-"), f"unexpected SID form: {sid!r}")
 
     def test_build_config_puts_the_token_beside_the_audit_log(self):
         with tempfile.TemporaryDirectory() as d:

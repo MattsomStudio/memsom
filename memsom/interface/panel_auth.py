@@ -154,11 +154,16 @@ def harden_permissions(path) -> str | None:
         except OSError as exc:
             return f"chmod failed: {exc}"
 
-    user = os.environ.get("USERNAME") or ""
-    if not user:
-        return "USERNAME not set; left inherited ACL in place"
-    domain = os.environ.get("USERDOMAIN") or ""
-    principal = f"{domain}\\{user}" if domain else user
+    principal = _current_user_sid()
+    if principal is None:
+        # Name fallback. Bare USERNAME, never DOMAIN\\USERNAME: over SSH
+        # USERDOMAIN reads as WORKGROUP while the account actually lives on the
+        # machine account domain, and "WORKGROUP\\user" fails to map (icacls
+        # 1332). A bare local name resolves in both contexts.
+        user = os.environ.get("USERNAME") or ""
+        if not user:
+            return "cannot resolve current user; left inherited ACL in place"
+        principal = user
     try:
         proc = subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:F"],
@@ -170,6 +175,32 @@ def harden_permissions(path) -> str | None:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return f"icacls exited {proc.returncode}: {detail[0] if detail else 'no output'}"
+    return None
+
+
+def _current_user_sid() -> str | None:
+    """The current user's SID in icacls form (`*S-1-5-21-…`), or None.
+
+    A SID always resolves in an ACL; a *name* may not. This matters in exactly
+    the case that bit us: run over SSH, `USERDOMAIN` is `WORKGROUP` while the
+    account is really `MattSom\\user`, so granting `WORKGROUP\\user` fails
+    with "No mapping between account names and security IDs" (1332) and the
+    file silently keeps its inherited ACL.
+    """
+    try:
+        proc = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for field in (proc.stdout or "").replace('"', "").split(","):
+        field = field.strip()
+        if field.upper().startswith("S-1-"):
+            return f"*{field}"
     return None
 
 
