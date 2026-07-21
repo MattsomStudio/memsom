@@ -55,6 +55,7 @@ from memsom.integrity import corroborate as memsom_corroborate
 from memsom.interface import ingest as memsom_ingest
 from memsom.retrieval import retrieve as memsom_retrieve
 from memsom.retrieval import embed as memsom_embed
+from memsom.retrieval import code_index as memsom_code_index
 from memsom.lifecycle import compact as memsom_compact
 from memsom.lifecycle import reflex as memsom_reflex
 from memsom.bridge import chats as memsom_chats
@@ -104,6 +105,7 @@ def migrate_all(conn):
     memsom_ingest.migrate(conn)
     memsom_retrieve.migrate(conn)
     memsom_embed.migrate(conn)
+    memsom_code_index.migrate(conn)
     memsom_compact.migrate(conn)
     memsom_obsidian.migrate(conn)
     memsom_rederive.migrate(conn)
@@ -642,6 +644,7 @@ def main(argv=None):
     memsom_corroborate.register(sub)
     memsom_ingest.register(sub)
     memsom_retrieve.register(sub)
+    memsom_code_index.register(sub)
     memsom_compact.register(sub)
     memsom_reflex.register(sub)
     memsom_chats.register(sub)

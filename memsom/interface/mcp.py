@@ -27,7 +27,7 @@ import traceback
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "memsom"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 
 TOOLS = [
     {
@@ -191,6 +191,19 @@ TOOLS = [
         },
     },
     {
+        "name": "code_search",
+        "description": "Semantic + BM25 search over the code-RAG index (separate from the fact store; opt-in via MEMSOM_CODE_RAG).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer", "description": "max results (default 8)"},
+                "repo": {"type": "string", "description": "restrict to one indexed repo"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "ingest_text",
         "description": "Stamp and store raw text at a declared channel (channel set by transport, never inferred).",
         "inputSchema": {
@@ -342,6 +355,14 @@ def _tool_argv(name, arguments):
             argv += ["--k", str(arguments["k"])]
         if arguments.get("clearance"):
             argv += ["--clearance", str(arguments["clearance"])]
+        return argv
+
+    if name == "code_search":
+        argv = ["code-search", arguments["query"]]
+        if arguments.get("k") is not None:
+            argv += ["--k", str(arguments["k"])]
+        if arguments.get("repo"):
+            argv += ["--repo", str(arguments["repo"])]
         return argv
 
     if name == "ingest_text":
