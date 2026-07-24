@@ -9,6 +9,7 @@ looking fine, on flags nobody asked for.
 
 from __future__ import annotations
 
+import json
 import struct
 
 import pytest
@@ -17,7 +18,9 @@ from memsom.providers import gguf
 from memsom.providers.base import (
     Capabilities,
     LaunchOption,
+    ListSink,
     ProviderError,
+    Sink,
     coerce_launch_options,
 )
 from memsom.providers.handlers import handle_provider_action
@@ -139,6 +142,30 @@ def test_none_and_empty_values_mean_engine_default(adapter, model_file):
 # ---------------------------------------------------------------------------
 
 
+def test_thinking_toggle_reaches_the_command_line(adapter, model_file):
+    adapter.start(model_file.name, {"reasoning": "off"})
+    argv = adapter._pm.argv
+    assert argv[argv.index("--reasoning") + 1] == "off"
+
+
+def test_thinking_budget_caps_the_scratchpad_not_the_answer(adapter, model_file):
+    adapter.start(model_file.name, {"reasoning": "on", "reasoning_budget": 512})
+    argv = adapter._pm.argv
+    assert argv[argv.index("--reasoning-budget") + 1] == "512"
+    assert argv[argv.index("--reasoning") + 1] == "on"
+
+
+@pytest.mark.parametrize("value", ["yes", "ON", "true", "enabled", ""])
+def test_select_refuses_anything_off_the_declared_list(adapter, model_file, value):
+    if value == "":
+        adapter.start(model_file.name, {"reasoning": ""})
+        assert "--reasoning" not in adapter._pm.argv  # blank = engine default
+        return
+    with pytest.raises(ProviderError, match="must be one of"):
+        adapter.start(model_file.name, {"reasoning": value})
+    assert adapter._pm.argv is None
+
+
 def test_start_without_a_model_still_errors_clearly(adapter):
     with pytest.raises(ProviderError, match="requires a model"):
         adapter.start()
@@ -200,8 +227,13 @@ def test_capabilities_serialize_launch_options(adapter):
     assert d["can_start"] is True
     keys = [o["key"] for o in d["launch_options"]]
     assert keys == ["ctx", "n_predict", "temp", "n_gpu_layers",
-                    "cpu_moe", "n_cpu_moe", "override_tensor"]
+                    "cpu_moe", "n_cpu_moe", "override_tensor",
+                    "reasoning", "reasoning_budget"]
     by_key = {o["key"]: o for o in d["launch_options"]}
+    # the UI builds its dropdown from exactly this list, so it can never offer
+    # a value the server would refuse
+    assert by_key["reasoning"]["type"] == "select"
+    assert by_key["reasoning"]["choices"] == ["auto", "on", "off"]
     # the MoE knobs must announce that they only apply to MoE models, and
     # --n-cpu-moe must announce its ceiling — the UI has no other way to know.
     assert by_key["n_cpu_moe"]["requires_meta"] == "n_experts"
@@ -345,6 +377,129 @@ def test_reader_is_quiet_about_files_it_cannot_understand(tmp_path):
 ])
 def test_quant_is_read_off_the_filename(name, quant):
     assert gguf.quant_from_name(name) == quant
+
+
+# ---------------------------------------------------------------------------
+# reasoning: the answer and the scratchpad are different things
+#
+# Regression cover for a MEASURED bug (Ornith-35B, 2026-07-24): a reasoning
+# model streamed 553 chars into `reasoning_content` and 4 into `content`, and
+# the reader looked at `content` alone. With a tight token budget `content` came
+# back EMPTY and the chat rendered a blank bubble with nothing to explain it.
+# ---------------------------------------------------------------------------
+
+
+def _sse(chunks) -> bytes:
+    return b"".join(b"data: " + json.dumps(c).encode() + b"\n\n"
+                    for c in chunks) + b"data: [DONE]\n\n"
+
+
+class _FakeResp:
+    def __init__(self, payload: bytes) -> None:
+        self._lines = payload.splitlines(keepends=True)
+
+    def __iter__(self):
+        return iter(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _stream(monkeypatch, chunks):
+    from memsom.providers import oai
+    monkeypatch.setattr(oai.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeResp(_sse(chunks)))
+    sink = ListSink()
+    stats = oai.chat_stream("http://x", "m", [{"role": "user", "content": "hi"}],
+                            {}, sink)
+    return sink, stats
+
+
+def test_reasoning_and_answer_land_on_separate_channels(monkeypatch):
+    sink, _ = _stream(monkeypatch, [
+        {"choices": [{"delta": {"reasoning_content": "let me think. "}}]},
+        {"choices": [{"delta": {"reasoning_content": "2+2 is 4. "}}]},
+        {"choices": [{"delta": {"content": "Four"}}]},
+    ])
+    assert sink.text() == "Four"
+    assert sink.thinking() == "let me think. 2+2 is 4. "
+
+
+def test_a_thought_only_stream_is_not_silently_empty(monkeypatch):
+    """The exact failure: budget exhausted mid-thought. The answer IS empty —
+    but the thinking has to survive so the UI can say why."""
+    sink, stats = _stream(monkeypatch, [
+        {"choices": [{"delta": {"reasoning_content": "still working"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
+    ])
+    assert sink.text() == ""
+    assert sink.thinking() == "still working"
+    assert stats["finish_reason"] == "length"
+
+
+def test_sampling_params_ride_every_request_so_they_change_mid_chat(monkeypatch):
+    """Temperature is a PER-REQUEST field, not a launch-time one — changing it
+    between turns must take effect with no relaunch.
+
+    Asserted on the outgoing body rather than on model output: llama.cpp's
+    default top_k/min_p truncate the distribution before temperature is applied,
+    so generated text stays coherent even at absurd temperatures and cannot
+    distinguish "forwarded" from "silently dropped".
+    """
+    from memsom.providers import oai
+    sent = {}
+
+    def fake_urlopen(req, timeout=None):
+        sent.update(json.loads(req.data.decode()))
+        return _FakeResp(_sse([{"choices": [{"delta": {"content": "ok"}}]}]))
+
+    monkeypatch.setattr(oai.urllib.request, "urlopen", fake_urlopen)
+    oai.chat_stream("http://x", "m", [{"role": "user", "content": "hi"}],
+                    {"temperature": 1.75, "top_p": 0.4, "max_tokens": 99},
+                    ListSink())
+    assert sent["temperature"] == 1.75
+    assert sent["top_p"] == 0.4
+    assert sent["max_tokens"] == 99
+
+
+def test_a_model_with_no_reasoning_is_unaffected(monkeypatch):
+    sink, _ = _stream(monkeypatch, [
+        {"choices": [{"delta": {"content": "plain "}}]},
+        {"choices": [{"delta": {"content": "answer"}}]},
+    ])
+    assert sink.text() == "plain answer"
+    assert sink.thinking() == ""
+
+
+def test_default_sink_ignores_reasoning_rather_than_crashing():
+    """Every existing Sink predates this channel; the base must no-op."""
+    class OldSink(Sink):
+        def __init__(self):
+            self.got = []
+
+        def token(self, text):
+            self.got.append(text)
+
+    s = OldSink()
+    s.reasoning("thinking")      # must not raise
+    assert s.got == []
+
+
+def test_file_sink_writes_thinking_as_its_own_event(tmp_path):
+    from memsom.providers.session import FileSink
+    f = FileSink(tmp_path / "s.jsonl")
+    f.reasoning("thought")
+    f.token("answer")
+    f.done({})
+    recs = [json.loads(l) for l in
+            (tmp_path / "s.jsonl").read_text(encoding="utf-8").splitlines()]
+    kinds = [r["t"] for r in recs]
+    assert kinds == ["think", "tok", "done"]
+    # counted apart: calling a thought an answer token overstates the reply
+    assert f.count == 1 and f.think_count == 1
 
 
 # ---------------------------------------------------------------------------

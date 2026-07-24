@@ -104,11 +104,18 @@ def chat_once(base: str, model: str, messages: list, params: dict, sink: Sink,
             TimeoutError, json.JSONDecodeError) as exc:
         raise ProviderError(f"chat/completions failed: {exc}") from exc
 
-    message = (data.get("choices") or [{}])[0].get("message") or {}
+    choice0 = (data.get("choices") or [{}])[0]
+    message = choice0.get("message") or {}
+    # thinking first, then the answer — same split as the streaming path
+    think = message.get("reasoning_content")
+    if think:
+        sink.reasoning(think)
     content = message.get("content")
     if content:
         sink.token(content)
     stats: dict = {}
+    if choice0.get("finish_reason"):
+        stats["finish_reason"] = choice0["finish_reason"]
     u = data.get("usage") or {}
     if u:
         stats["prompt_tokens"] = u.get("prompt_tokens")
@@ -165,6 +172,18 @@ def chat_stream(base: str, model: str, messages: list, params: dict, sink: Sink,
                     piece = delta.get("content")
                     if piece:
                         sink.token(piece)
+                    # A reasoning model streams its scratchpad here and its
+                    # actual reply in `content`. Reading only `content` made a
+                    # thinking model look like it answered instantly with
+                    # nothing — and when the token budget ran out mid-thought,
+                    # `content` stayed EMPTY and the reply was a blank bubble
+                    # with no explanation. MEASURED on Ornith-35B 2026-07-24:
+                    # 553 chars of reasoning_content, 4 chars of content.
+                    think = delta.get("reasoning_content")
+                    if think:
+                        sink.reasoning(think)
+                    if choice.get("finish_reason"):
+                        stats["finish_reason"] = choice["finish_reason"]
                 if chunk.get("usage"):
                     u = chunk["usage"]
                     stats["prompt_tokens"] = u.get("prompt_tokens")

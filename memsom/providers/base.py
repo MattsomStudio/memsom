@@ -67,7 +67,7 @@ class LaunchOption:
 
     key: str
     label: str
-    type: str = "int"           # "int" | "float" | "bool" | "text"
+    type: str = "int"           # "int" | "float" | "bool" | "text" | "select"
     default: Any = None         # None = "leave it to the backend's own default"
     min: Optional[float] = None
     max: Optional[float] = None
@@ -77,6 +77,9 @@ class LaunchOption:
     #: rather than in the adapter's code so the same rule serves as the server's
     #: gate and the UI's input hint — one source of truth.
     pattern: Optional[str] = None
+    #: for type="select": the only accepted values. The UI renders a dropdown
+    #: from exactly this list, so it cannot offer an option the server refuses.
+    choices: tuple = ()
     #: model meta key holding this option's real ceiling (e.g. "n_layers"), so
     #: the UI can bound the field per selected model instead of guessing.
     max_from_meta: Optional[str] = None
@@ -85,7 +88,9 @@ class LaunchOption:
     requires_meta: Optional[str] = None
 
     def as_dict(self) -> dict:
-        return self.__dict__.copy()
+        d = self.__dict__.copy()
+        d["choices"] = list(self.choices)
+        return d
 
 
 @dataclass
@@ -163,18 +168,36 @@ class Sink:
     def token(self, text: str) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def reasoning(self, text: str) -> None:
+        """A chunk of the model's THINKING, not of its answer.
+
+        Separate channel because they are separate things: a reasoning model
+        streams its scratchpad into ``reasoning_content`` and its actual reply
+        into ``content``, and merging them means the answer arrives buried in
+        several hundred tokens of deliberation. Default is a no-op so every
+        existing sink keeps working — a backend that has no notion of reasoning
+        simply never calls it.
+        """
+
 
 class ListSink(Sink):
     """In-memory sink: collects tokens into ``.tokens``. For tests / probes."""
 
     def __init__(self) -> None:
         self.tokens: list[str] = []
+        self.thoughts: list[str] = []
 
     def token(self, text: str) -> None:
         self.tokens.append(text)
 
+    def reasoning(self, text: str) -> None:
+        self.thoughts.append(text)
+
     def text(self) -> str:
         return "".join(self.tokens)
+
+    def thinking(self) -> str:
+        return "".join(self.thoughts)
 
 
 class ProviderError(Exception):
@@ -314,6 +337,13 @@ def coerce_launch_options(declared, options) -> dict:
                 raise ProviderError(f"{key} must be true or false")
             if raw:
                 out[key] = True
+            continue
+        if opt.type == "select":
+            val = str(raw)
+            if val not in opt.choices:
+                raise ProviderError(
+                    f"{key} must be one of: {', '.join(opt.choices)} (got {val!r})")
+            out[key] = val
             continue
         if opt.type == "text":
             val = str(raw)

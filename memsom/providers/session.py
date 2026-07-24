@@ -63,6 +63,7 @@ class FileSink(Sink):
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.count = 0
+        self.think_count = 0
         self.t_first: Optional[float] = None
         self.t_last: Optional[float] = None
         self._fh = open(self.path, "a", encoding="utf-8")
@@ -82,6 +83,20 @@ class FileSink(Sink):
         self.t_last = t
         self.count += 1
         self._write({"t": "tok", "text": text})
+
+    def reasoning(self, text: str) -> None:
+        """A thinking chunk, written as its own event type so a reader can show
+        it apart from the answer (or not at all). Counted separately: these ARE
+        generated tokens and belong in the throughput timing, but calling them
+        answer tokens would overstate how much reply you got."""
+        if not text:
+            return
+        t = now()
+        if self.t_first is None:
+            self.t_first = t
+        self.t_last = t
+        self.think_count += 1
+        self._write({"t": "think", "text": text})
 
     def done(self, stats: dict) -> None:
         self._write({"t": "done", "stats": stats}, sync=True)
@@ -275,15 +290,21 @@ def _final_stats(sink: FileSink, adapter_stats: dict) -> dict:
     reported. Prefer the backend's own eval_count/eval_duration for TPS (exact);
     fall back to token-count / wall-clock elapsed."""
     tokens = sink.count
+    thinking = getattr(sink, "think_count", 0)
     elapsed = sink.elapsed()
     tps = None
     ev_count = adapter_stats.get("eval_count")
     ev_dur = adapter_stats.get("eval_duration_s")
     if ev_count and ev_dur:
         tps = round(ev_count / ev_dur, 2)
-    elif tokens and elapsed > 0:
-        tps = round(tokens / elapsed, 2)
+    elif (tokens + thinking) and elapsed > 0:
+        # thinking chunks are real generated tokens — excluding them from the
+        # rate would understate throughput on a reasoning model, sometimes to
+        # zero when the whole budget went to the scratchpad.
+        tps = round((tokens + thinking) / elapsed, 2)
     stats = {"tokens": tokens, "elapsed_s": round(elapsed, 3), "tps": tps}
+    if thinking:
+        stats["thinking_tokens"] = thinking
     # carry through any extra numeric fields a backend supplied (prompt tokens,
     # cost, etc.) without letting it overwrite our computed ones.
     for k, v in adapter_stats.items():

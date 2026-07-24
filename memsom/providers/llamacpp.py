@@ -60,11 +60,14 @@ _LAUNCH_FLAGS = {
     "n_cpu_moe": "--n-cpu-moe",
     "cpu_moe": "--cpu-moe",
     "override_tensor": "--override-tensor",
+    "reasoning": "--reasoning",
+    "reasoning_budget": "--reasoning-budget",
 }
 
 #: emitted in this order so the argv reads the way the flags are documented
 _LAUNCH_ORDER = ("ctx", "n_predict", "temp", "n_gpu_layers",
-                 "cpu_moe", "n_cpu_moe", "override_tensor")
+                 "cpu_moe", "n_cpu_moe", "override_tensor",
+                 "reasoning", "reasoning_budget")
 
 #: `-ot` takes `<tensor name pattern>=<buffer type>` (comma-separated pairs are
 #: allowed), e.g. `blk\.(1[5-9]|2[0-9])\.ffn_.*_exps\.=CPU`. Regex
@@ -97,6 +100,18 @@ LAUNCH_OPTIONS = (
     LaunchOption(key="override_tensor", label="tensor override", type="text",
                  pattern=_OT_PATTERN,
                  hint=r"--override-tensor, e.g. blk\.(1[5-9])\.ffn_.*_exps\.=CPU"),
+    # A reasoning model streams its scratchpad into `reasoning_content` and its
+    # reply into `content`. "off" makes it answer directly; "auto" (the
+    # server's own default) decides from the chat template.
+    LaunchOption(key="reasoning", label="thinking", type="select",
+                 choices=("auto", "on", "off"), default="auto",
+                 hint="--reasoning; off = answer directly, no scratchpad"),
+    # Worth having next to the toggle: with thinking ON and a small max output,
+    # deliberation can consume the ENTIRE budget and the reply comes back
+    # empty. This caps the scratchpad instead of the answer.
+    LaunchOption(key="reasoning_budget", label="thinking budget", type="int",
+                 min=-1, max=1048576, step=256,
+                 hint="--reasoning-budget; -1 unlimited, 0 none, N = token cap"),
 )
 
 
