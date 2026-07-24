@@ -24,6 +24,7 @@ Design rules that keep this honest:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import time
@@ -54,6 +55,40 @@ def run_no_window(*args, **kwargs):
 
 
 @dataclass
+class LaunchOption:
+    """One knob the panel may pass to :meth:`Provider.start`.
+
+    Declared by the adapter, rendered by the UI. Same discipline as
+    :class:`Capabilities`: the frontend hardcodes no backend's flags, it draws
+    whatever the adapter says it accepts. ``key`` is what travels in the request
+    body; the adapter maps it to a real command-line flag on its own side, so a
+    flag name never crosses the wire and a request can never name one.
+    """
+
+    key: str
+    label: str
+    type: str = "int"           # "int" | "float" | "bool" | "text"
+    default: Any = None         # None = "leave it to the backend's own default"
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+    hint: str = ""
+    #: for type="text": a full-match regex the value MUST satisfy. Declared here
+    #: rather than in the adapter's code so the same rule serves as the server's
+    #: gate and the UI's input hint — one source of truth.
+    pattern: Optional[str] = None
+    #: model meta key holding this option's real ceiling (e.g. "n_layers"), so
+    #: the UI can bound the field per selected model instead of guessing.
+    max_from_meta: Optional[str] = None
+    #: option only applies when this model meta key is truthy (e.g. "n_experts"
+    #: for the MoE knobs) — the UI disables it otherwise.
+    requires_meta: Optional[str] = None
+
+    def as_dict(self) -> dict:
+        return self.__dict__.copy()
+
+
+@dataclass
 class Capabilities:
     """What a backend can actually do. The UI keys every affordance off this."""
 
@@ -62,10 +97,14 @@ class Capabilities:
     has_vram: bool = False    # does it consume local VRAM (→ show gauges)?
     can_estimate: bool = False  # can pre-load VRAM be predicted from metadata?
     transports: tuple = ("native",)  # e.g. ("api", "cli-subscription") for cloud
+    #: LaunchOption tuple — the knobs `start` accepts. Empty means START takes
+    #: nothing but a model (or nothing at all).
+    launch_options: tuple = ()
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
         d["transports"] = list(self.transports)
+        d["launch_options"] = [o.as_dict() for o in self.launch_options]
         return d
 
 
@@ -186,7 +225,7 @@ class Provider:
 
     # ---- lifecycle (local serving process) ----
 
-    def start(self) -> dict:
+    def start(self, model: str = None, options: dict = None) -> dict:
         raise ProviderError(f"{self.label} cannot be started from the panel")
 
     def stop(self) -> dict:
@@ -235,6 +274,67 @@ def now() -> float:
     """Monotonic-ish wall clock for TPS timing. Kept in one place so tests can
     monkeypatch it; adapters never call time.time() directly."""
     return time.time()
+
+
+def coerce_launch_options(declared, options) -> dict:
+    """Validate a REQUEST-SUPPLIED option dict against an adapter's declared
+    :class:`LaunchOption` list, returning ``{key: coerced value}``.
+
+    These values end up in an argv, so this is the gate. The rule the provider
+    layer already follows (see :mod:`memsom.providers.registry`) is that nothing
+    from a request body reaches a command line unvalidated — spawning is
+    ``Popen(list)`` with no shell, so this is defence in depth rather than the
+    only thing between a body and a process, but a whitelist is what makes that
+    claim checkable.
+
+    * an unknown key is an ERROR naming it, never a silent drop — a knob that
+      does nothing is worse than one that refuses;
+    * ints/floats are coerced and range-checked against the declaration;
+    * ``bool`` accepts only real booleans;
+    * ``text`` must full-match the declared ``pattern``.
+    """
+    if not options:
+        return {}
+    if not isinstance(options, dict):
+        raise ProviderError("launch options must be a JSON object")
+    by_key = {o.key: o for o in declared}
+    unknown = [k for k in options if k not in by_key]
+    if unknown:
+        raise ProviderError(
+            f"unknown launch option(s): {', '.join(sorted(unknown))} "
+            f"(accepted: {', '.join(sorted(by_key)) or 'none'})")
+
+    out: dict = {}
+    for key, raw in options.items():
+        if raw is None or raw == "":
+            continue  # "leave it to the backend default"
+        opt = by_key[key]
+        if opt.type == "bool":
+            if not isinstance(raw, bool):
+                raise ProviderError(f"{key} must be true or false")
+            if raw:
+                out[key] = True
+            continue
+        if opt.type == "text":
+            val = str(raw)
+            if opt.pattern and not re.fullmatch(opt.pattern, val):
+                raise ProviderError(f"{key} is not a valid value: {val!r}")
+            out[key] = val
+            continue
+        # numeric. bool is an int subclass in Python — reject it explicitly so a
+        # stray `true` can't silently become 1.
+        if isinstance(raw, bool):
+            raise ProviderError(f"{key} must be a number")
+        try:
+            val = int(raw) if opt.type == "int" else float(raw)
+        except (TypeError, ValueError):
+            raise ProviderError(f"{key} must be {'an integer' if opt.type == 'int' else 'a number'}") from None
+        if opt.min is not None and val < opt.min:
+            raise ProviderError(f"{key} must be >= {opt.min:g} (got {val:g})")
+        if opt.max is not None and val > opt.max:
+            raise ProviderError(f"{key} must be <= {opt.max:g} (got {val:g})")
+        out[key] = val
+    return out
 
 
 def tcp_ms(probe: Callable[[str, int, float], Any], host: str, port: int,

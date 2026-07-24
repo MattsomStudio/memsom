@@ -10,6 +10,11 @@ flat in a models folder AND nested in the HuggingFace cache under
 ``hub/models--*/snapshots/<hash>/*.gguf``) and skips the ``ggml-vocab-*``
 tokenizer files, which are not runnable models. Each discovered basename maps to
 its full path so ``start`` can launch it.
+
+Launch knobs (``LAUNCH_OPTIONS`` below) are declared, not hardcoded in the UI:
+the panel draws a control per declared option and posts them back by KEY. This
+module owns the key -> flag mapping, so a request body never names a
+command-line flag and cannot introduce one.
 """
 
 from __future__ import annotations
@@ -18,15 +23,80 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from memsom.providers import oai
+from memsom.providers import gguf, oai
 from memsom.providers.base import (
     Capabilities,
+    LaunchOption,
     ModelInfo,
     Provider,
     ProviderError,
     ProviderStatus,
     Sink,
+    coerce_launch_options,
     now,
+)
+
+# --------------------------------------------------------------------------
+# The launch surface: what the panel may set, and what each key becomes on the
+# llama-server command line. Verified against llama-server --help (b9601).
+#
+# `ctx`/`n_predict`/`temp` are the server's DEFAULTS — a per-request temperature
+# from the INFERENCE cockpit still overrides `--temp`, but `--ctx-size` is fixed
+# at launch, which is exactly why it belongs here and not only there.
+#
+# The MoE knobs are the reason this form exists. On a 12 GB card a 30B-A3B won't
+# fit with every expert resident, but its experts are sparse: `-ncmoe N` parks
+# the MoE weights of the first N layers on the CPU and keeps attention on the
+# GPU, which is the difference between "won't load" and "runs". `-ot` is the
+# escape hatch for placing specific tensors by regex.
+# --------------------------------------------------------------------------
+
+#: key -> flag. A flag with `None` arity is a bare switch (bool option).
+_LAUNCH_FLAGS = {
+    "ctx": "--ctx-size",
+    "n_predict": "--n-predict",
+    "temp": "--temp",
+    "n_gpu_layers": "--n-gpu-layers",
+    "n_cpu_moe": "--n-cpu-moe",
+    "cpu_moe": "--cpu-moe",
+    "override_tensor": "--override-tensor",
+}
+
+#: emitted in this order so the argv reads the way the flags are documented
+_LAUNCH_ORDER = ("ctx", "n_predict", "temp", "n_gpu_layers",
+                 "cpu_moe", "n_cpu_moe", "override_tensor")
+
+#: `-ot` takes `<tensor name pattern>=<buffer type>` (comma-separated pairs are
+#: allowed), e.g. `blk\.(1[5-9]|2[0-9])\.ffn_.*_exps\.=CPU`. Regex
+#: metacharacters have to be allowed for it to be useful at all, so the gate is
+#: a strict character whitelist — no spaces, no quotes, no shell characters —
+#: plus a leading lookahead requiring at least one `=`, since a value with no
+#: buffer-type half is not an override, it's a typo.
+_OT_PATTERN = r"(?=[^=]*=)[A-Za-z0-9_.,^$()|\[\]{}*+?\\=/-]{3,256}"
+
+LAUNCH_OPTIONS = (
+    LaunchOption(key="ctx", label="context", type="int", min=256, max=1048576,
+                 step=1024, max_from_meta="ctx_max",
+                 hint="--ctx-size; fixed for the life of the server"),
+    LaunchOption(key="n_predict", label="max output", type="int",
+                 min=-1, max=1048576, step=128,
+                 hint="--n-predict; -1 = unbounded"),
+    LaunchOption(key="temp", label="temperature", type="float",
+                 min=0.0, max=2.0, step=0.05,
+                 hint="--temp; the server default, overridden per request"),
+    LaunchOption(key="n_gpu_layers", label="gpu layers", type="int",
+                 min=0, max=1024, step=1, max_from_meta="n_layers",
+                 hint="--n-gpu-layers; how many layers live in VRAM"),
+    LaunchOption(key="cpu_moe", label="all experts on CPU", type="bool",
+                 requires_meta="n_experts",
+                 hint="--cpu-moe; every MoE weight stays in RAM"),
+    LaunchOption(key="n_cpu_moe", label="MoE layers on CPU", type="int",
+                 min=0, max=1024, step=1, max_from_meta="n_layers",
+                 requires_meta="n_experts",
+                 hint="--n-cpu-moe N; experts of the first N layers on CPU"),
+    LaunchOption(key="override_tensor", label="tensor override", type="text",
+                 pattern=_OT_PATTERN,
+                 hint=r"--override-tensor, e.g. blk\.(1[5-9])\.ffn_.*_exps\.=CPU"),
 )
 
 
@@ -49,7 +119,8 @@ class LlamaCppAdapter(Provider):
 
     def capabilities(self) -> Capabilities:
         return Capabilities(can_start=True, can_load=False, has_vram=True,
-                            can_estimate=False, transports=("native",))
+                            can_estimate=False, transports=("native",),
+                            launch_options=LAUNCH_OPTIONS)
 
     def status(self) -> ProviderStatus:
         t0 = now()
@@ -90,24 +161,38 @@ class LlamaCppAdapter(Provider):
                 served = set()
         out = []
         for name, path in sorted(index.items()):
+            # architecture facts straight from the GGUF header (cached per
+            # file), so the launch form can bound --n-cpu-moe by the real layer
+            # count and hide the MoE knobs on a dense model instead of offering
+            # a control that does nothing.
+            arch = gguf.read_meta(path)
             out.append(ModelInfo(name=name, size_bytes=_size(Path(path)),
+                                 quant=arch.get("quant"),
+                                 ctx_max=arch.get("ctx_max"),
                                  loaded=(name in served or path in served),
-                                 meta={"path": path}))
+                                 meta={"path": path,
+                                       "n_layers": arch.get("n_layers"),
+                                       "n_experts": arch.get("n_experts"),
+                                       "n_experts_used":
+                                           arch.get("n_experts_used")}))
         # a served model that isn't a discovered file (e.g. HF repo id) still shows
         for s in served:
             if s not in index and not any(s == m.name for m in out):
                 out.append(ModelInfo(name=s, loaded=True))
         return out
 
-    def start(self, model: str = None) -> dict:
+    def start(self, model: str = None, options: dict = None) -> dict:
         if self._procman is None:
             raise ProviderError("no process manager configured")
         model = model or self.spec.get("model")
         if not model:
             raise ProviderError("start requires a model (GGUF name or path)")
         path = self._resolve(model)
+        # validated FIRST — a bad knob must refuse the launch, not spawn a
+        # server with the flag silently dropped.
+        opts = coerce_launch_options(LAUNCH_OPTIONS, options)
         argv = [self.exec, "-m", path, "--host", self.host,
-                "--port", str(self.port), *self.extra_args]
+                "--port", str(self.port), *_flags(opts), *self.extra_args]
         return self._procman.start(self.id, _wrap(argv, self.host_kind),
                                    port=self.port, model=model)
 
@@ -133,6 +218,23 @@ class LlamaCppAdapter(Provider):
         if params.get("tools"):
             return oai.chat_once(self.base, model, messages, params, sink)
         return oai.chat_stream(self.base, model, messages, params, sink)
+
+
+def _flags(opts: dict) -> list:
+    """Coerced options -> argv fragment. Bools become bare switches; everything
+    else becomes `--flag value` as two elements (never one interpolated string,
+    which is what turns a value into a second argument)."""
+    out: list = []
+    for key in _LAUNCH_ORDER:
+        if key not in opts:
+            continue
+        flag = _LAUNCH_FLAGS[key]
+        val = opts[key]
+        if val is True:
+            out.append(flag)
+        else:
+            out += [flag, str(val)]
+    return out
 
 
 def _wrap(argv: list, host_kind: str) -> list:

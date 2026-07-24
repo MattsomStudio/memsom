@@ -12,6 +12,7 @@ backends over stdlib ``urllib`` / ``subprocess`` only (matching the existing
 
 from memsom.providers.base import (
     Capabilities,
+    LaunchOption,
     ModelInfo,
     Provider,
     ProviderStatus,
@@ -21,6 +22,7 @@ from memsom.providers.registry import build_registry
 
 __all__ = [
     "Capabilities",
+    "LaunchOption",
     "ModelInfo",
     "Provider",
     "ProviderStatus",

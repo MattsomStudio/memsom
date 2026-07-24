@@ -58,7 +58,13 @@ class VllmAdapter(Provider):
         except ProviderError:
             return []
 
-    def start(self, model: str = None) -> dict:
+    def start(self, model: str = None, options: dict = None) -> dict:
+        # Signature parity with the rest of the Provider interface. vLLM
+        # declares no launch_options (its serve flags are a different set from
+        # llama.cpp's, and none of them place MoE experts per layer), so a body
+        # that carries any is refused rather than silently ignored.
+        if options:
+            raise ProviderError(f"{self.label} accepts no launch options")
         if self._procman is None:
             raise ProviderError("no process manager configured")
         model = model or self.spec.get("model")

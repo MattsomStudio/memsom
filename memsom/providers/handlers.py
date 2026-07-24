@@ -88,9 +88,20 @@ def handle_provider_action(registry: dict, audit_log_path, action: str,
     if action in _MODEL_ACTIONS and not model:
         return 400, {"ok": False, "error": f"{action} requires 'model'"}
 
+    # launch knobs for `start` (llama.cpp: context, gpu layers, MoE placement,
+    # ...). Validated against the adapter's DECLARED options inside the adapter,
+    # not here — this only enforces the envelope shape.
+    options = payload.get("options")
+    if options is not None and not isinstance(options, dict):
+        return 400, {"ok": False, "error": "'options' must be an object"}
+
     intent = {"provider": pid, "action": action}
     if model:
         intent["model"] = model
+    if options:
+        # audited: these become a command line, so what was asked for is part of
+        # the accountability trail. No secret ever lives in a launch knob.
+        intent["options"] = options
     try:
         _audit(audit_log_path, {**intent, "result": "pending"}, gate=True)
     except OSError as exc:
@@ -102,7 +113,7 @@ def handle_provider_action(registry: dict, audit_log_path, action: str,
         elif action == "unload":
             result = adapter.unload(model)
         elif action == "start":
-            result = adapter.start(model) if model else adapter.start()
+            result = adapter.start(model, options)
         elif action == "stop":
             result = adapter.stop()
         else:
