@@ -96,6 +96,49 @@ def handle_run_start(store: GraphStore, runner: AgentRunner, registry: dict,
     return 200, {"ok": True, "run_id": run_id, "cursor": 0}
 
 
+def handle_approve(store: GraphStore, runner: AgentRunner, registry: dict,
+                   audit_path, payload: dict) -> tuple:
+    """Resume a run paused at a human-approval gate.
+
+    ``{run_id, decision}`` where decision is ``approve`` or ``deny``. The spec
+    comes from the runner's memory for a live pause; if the pause outlived a
+    restart it is recompiled from the graph doc named on the run's start line —
+    preferring the original in-memory spec so a mid-pause graph edit can't warp
+    the resume. The decision is audited: approving a gated shell call is itself
+    a security event."""
+    if not isinstance(payload, dict):
+        return 400, {"ok": False, "error": "body must be a JSON object"}
+    run_id = payload.get("run_id") or ""
+    decision = (payload.get("decision") or "").lower()
+    if decision not in ("approve", "deny"):
+        return 400, {"ok": False, "error": "decision must be 'approve' or 'deny'"}
+
+    spec = runner.paused_spec(run_id)
+    if spec is None:
+        # Pause survived a restart (or was never live here): rebuild from the doc.
+        gid = runner.head_graph_id(run_id)
+        if not gid:
+            return 404, {"ok": False, "error": f"unknown run: {run_id!r}"}
+        try:
+            spec = compile_graph(store.get(gid), registry)
+        except ProviderError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+
+    intent = {"action": "agent-approve", "run_id": run_id, "decision": decision}
+    try:
+        _audit(audit_path, {**intent, "result": "pending"}, gate=True)
+    except OSError as exc:
+        return 503, {"ok": False, "error": f"audit unavailable; refused: {exc}"}
+    try:
+        runner.resume(run_id, decision, spec=spec)
+    except ProviderError as exc:
+        _audit(audit_path, {**intent, "result": f"failed: {exc}"})
+        busy = "already active" in str(exc)
+        return (409 if busy else 400), {"ok": False, "error": str(exc)}
+    _audit(audit_path, {**intent, "result": "resumed"})
+    return 200, {"ok": True, "run_id": run_id}
+
+
 def handle_run_read(runner: AgentRunner, run_id: str, cursor: int) -> tuple:
     try:
         data = runner.read_since(run_id or "", cursor)

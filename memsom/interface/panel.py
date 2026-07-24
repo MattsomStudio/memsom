@@ -2411,6 +2411,11 @@ def make_handler(config: PanelConfig):
                 config.graph_store, config.agent_runner, config.registry,
                 config.audit_log_path, p),
             _MAX_BODY_BYTES),
+        "/api/agents/approve": (
+            lambda p: agent_handlers.handle_approve(
+                config.graph_store, config.agent_runner, config.registry,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
         "/api/kernels": (
             lambda p: kernel_handlers.handle_kernel_create(
                 config.kernel_store, config.profile,

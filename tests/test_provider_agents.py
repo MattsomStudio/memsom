@@ -192,7 +192,8 @@ def test_compile_graph_extracts_the_spec_from_the_canvas():
     assert spec.params == {"temperature": 0.2, "max_tokens": 512, "ctx": 8192}
     assert [t["name"] for t in spec.tool_specs] == ["http_fetch"]
     assert spec.tool_specs[0] == {"name": "http_fetch", "type": "http_fetch",
-                                  "options": {"max_bytes": 100000}}
+                                  "options": {"max_bytes": 100000},
+                                  "require_approval": False}
 
 
 def test_compile_graph_merges_limits_over_the_defaults():
@@ -1336,3 +1337,153 @@ def test_a_missing_langgraph_extra_is_a_named_provider_error(tmp_path,
     _, status, stats = _drain(runner, runner.start(spec, "manual"))
     assert status == "error"
     assert "pip install 'memsom[agents]'" in stats["error"]
+
+
+# ---------------------------------------------------------------------------
+# 9. human-in-the-loop approval gates + resume  (interrupt/checkpointer)
+# ---------------------------------------------------------------------------
+
+
+def _gated_doc(require: bool = True) -> dict:
+    doc = _e2e_doc()
+    _node(doc, "n5")["config"] = {"tool": "fake_tool", "options": {},
+                                  "require_approval": require}
+    return doc
+
+
+def _approval_adapter() -> FakeAdapter:
+    # turn 1 reaches for the gated tool; turn 2 (after it clears) answers.
+    return FakeAdapter([
+        ("", {"tool_calls": [{"id": "tc_1", "name": "fake_tool",
+                              "arguments": {"q": "hi"}}]}),
+        (ANSWER_CANARY, {}),
+    ])
+
+
+def _settle(runner: AgentRunner, rid: str, *stop: str,
+            timeout: float = 10.0) -> tuple:
+    """Poll until the run reaches one of *stop*. Unlike ``_drain`` this also
+    stops at ``paused``/``resumable`` — an approval pause is not a terminal
+    state, so ``_drain`` would (correctly) time out on it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = runner.read_since(rid, 0)
+        if r["status"] in stop:
+            return r["events"], r["status"], r.get("stats")
+        time.sleep(0.02)
+    raise AssertionError(
+        f"run {rid} never reached {stop}; "
+        f"last status={runner.read_since(rid, 0)['status']}")
+
+
+def _tool_audit(tmp_path: Path) -> list:
+    p = tmp_path / "audit.jsonl"
+    if not p.is_file():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("action") == "tool":
+            out.append(rec.get("result"))
+    return out
+
+
+def test_a_gated_tool_pauses_the_run_and_does_not_execute(tmp_path, fake_tools):
+    adapter = _approval_adapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_doc(), _registry(adapter)), "manual")
+    events, status, _ = _settle(runner, rid, "paused")
+    assert status == "paused"
+    aa = [e for e in events if e["t"] == "awaiting_approval"]
+    assert len(aa) == 1
+    assert aa[0]["tool"] == "fake_tool"
+    assert aa[0]["arguments"] == {"q": "hi"}
+    # nothing ran: no tool_result, and the audit log has no execution line yet
+    assert not [e for e in events if e["t"] == "tool_result"]
+    assert _tool_audit(tmp_path) == []
+
+
+def test_deny_finishes_the_run_without_executing_the_tool(tmp_path, fake_tools):
+    adapter = _approval_adapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_doc(), _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "deny")
+    events, status, _ = _settle(runner, rid, "done", "error")
+    assert status == "done"
+    tr = [e for e in events if e["t"] == "tool_result"]
+    assert len(tr) == 1 and tr[0]["ok"] is False and "DENIED" in tr[0]["output"]
+    # the refusal IS the security event, and it is audited
+    assert _tool_audit(tmp_path) == ["refused-by-user"]
+    assert [e["decision"] for e in events if e["t"] == "approval"] == ["deny"]
+
+
+def test_approve_executes_the_tool_exactly_once(tmp_path, fake_tools):
+    adapter = _approval_adapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_doc(), _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    events, status, _ = _settle(runner, rid, "done", "error")
+    assert status == "done"
+    trs = [e for e in events if e["t"] == "tool_result"]
+    assert len(trs) == 1 and trs[0]["ok"] is True
+    # executed once, with the ordinary two-phase audit — not the refusal line
+    assert _tool_audit(tmp_path) == ["pending", "ok"]
+
+
+def test_shell_tool_defaults_to_requiring_approval():
+    doc = _e2e_doc()
+    _node(doc, "n5")["config"] = {"tool": "shell", "options": {}}  # no flag set
+    spec = compile_graph(doc, _registry())
+    assert spec.tool_specs[0]["require_approval"] is True
+
+
+def test_an_explicit_flag_overrides_the_shell_default():
+    doc = _e2e_doc()
+    _node(doc, "n5")["config"] = {"tool": "shell", "options": {},
+                                  "require_approval": False}
+    spec = compile_graph(doc, _registry())
+    assert spec.tool_specs[0]["require_approval"] is False
+
+
+def test_a_paused_run_that_lost_its_memory_is_resumable_and_resumes(
+        tmp_path, fake_tools):
+    # A server restart drops _paused but not the checkpoint. The run must then
+    # read as `resumable`, and a resume with a recompiled spec (what the handler
+    # rebuilds from the graph doc) must continue it off the checkpoint.
+    adapter = _approval_adapter()
+    reg = _registry(adapter)
+    gdoc = _gated_doc()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(gdoc, reg), "manual")
+    _settle(runner, rid, "paused")
+
+    runner._paused.clear()  # simulate the restart
+    assert runner.read_since(rid, 0)["status"] == "resumable"
+
+    runner.resume(rid, "approve", spec=compile_graph(gdoc, reg))
+    events, status, _ = _settle(runner, rid, "done", "error")
+    assert status == "done"
+    assert [e for e in events if e["t"] == "tool_result"][0]["ok"] is True
+
+
+def test_resume_refuses_when_no_checkpoint_survives(tmp_path, fake_tools):
+    adapter = _approval_adapter()
+    reg = _registry(adapter)
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_doc(), reg), "manual")
+    _settle(runner, rid, "paused")
+    # a resume against a run whose checkpoint is gone must refuse, not silently
+    # start the graph over from the top
+    runner._paused.clear()
+    import sqlite3
+    con = sqlite3.connect(str(runner.checkpoints))
+    con.execute("DELETE FROM checkpoints WHERE thread_id=?", (rid,))
+    con.commit()
+    con.close()
+    with pytest.raises(ProviderError) as ei:
+        runner.resume(rid, "approve", spec=compile_graph(_gated_doc(), reg))
+    assert "no checkpoint" in str(ei.value)

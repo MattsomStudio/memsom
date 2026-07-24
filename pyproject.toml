@@ -57,7 +57,10 @@ panel = ["psutil>=7"]
 # only when a run actually starts), and a machine without this extra gets a
 # ProviderError naming it rather than a boot-time failure. langchain-core and
 # langgraph-prebuilt arrive transitively as langgraph's own dependencies.
-agents = ["langgraph>=1.2,<2"]
+# langgraph-checkpoint-sqlite is the durable checkpointer behind pause/resume
+# (approval gates + resume-after-crash); it is LangGraph's own package, so it
+# is upkeep we don't own — the point of adopting LangGraph in the first place.
+agents = ["langgraph>=1.2,<2", "langgraph-checkpoint-sqlite>=2,<4"]
 
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"

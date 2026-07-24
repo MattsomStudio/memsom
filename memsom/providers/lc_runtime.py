@@ -25,9 +25,13 @@ Three design points worth stating out loud:
   ``AgentRunner`` thread inside the panel server, which already has a scheduler
   daemon thread; starting an event loop there to await a call that is
   blocking anyway would buy nothing and cost a whole class of shutdown bug.
-* **No checkpointer.** The run log is the record of what happened. A
-  ``SqliteSaver`` alongside it would be a second answer to "what did this run
-  do", and two sources of truth is how they start disagreeing.
+* **Checkpointer holds execution state, NOT history.** A ``SqliteSaver`` at
+  ``<agents_dir>/checkpoints.db`` persists the resumable state LangGraph needs
+  to pause a run (approval gates) and to survive a restart. The discipline that
+  keeps it from becoming a second answer to "what did this run do": it is never
+  read for DISPLAY (the JSONL run log is the only UI/audit source), and a run's
+  checkpoint is pruned the moment it reaches a terminal state, so the DB only
+  ever holds in-flight runs.
 
 Everything langgraph/langchain is imported lazily inside these functions.
 memsom's core is stdlib-only, so a machine that never runs an agent never pays
@@ -38,6 +42,7 @@ for the import, and one that tries without the extra installed gets a
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -67,9 +72,11 @@ def _lc() -> SimpleNamespace:
     cost to pay on the first run of a server's life."""
     try:
         from langchain_core.messages import AIMessage, HumanMessage
+        from langgraph.checkpoint.sqlite import SqliteSaver
         from langgraph.errors import GraphRecursionError
         from langgraph.graph import END, START, MessagesState, StateGraph
         from langgraph.prebuilt import create_react_agent
+        from langgraph.types import Command
 
         from memsom.providers.lc_model import (
             MemsomChatModel, MemsomTool, RunContext, to_memsom_messages,
@@ -80,10 +87,16 @@ def _lc() -> SimpleNamespace:
         AIMessage=AIMessage, HumanMessage=HumanMessage,
         GraphRecursionError=GraphRecursionError, END=END, START=START,
         MessagesState=MessagesState, StateGraph=StateGraph,
-        create_react_agent=create_react_agent,
+        create_react_agent=create_react_agent, SqliteSaver=SqliteSaver,
+        Command=Command,
         MemsomChatModel=MemsomChatModel, MemsomTool=MemsomTool,
         RunContext=RunContext, to_memsom_messages=to_memsom_messages,
     )
+
+
+#: distinguishes "start this run fresh" from "resume with a decision value" —
+#: None is a legitimate resume payload, so it cannot be the sentinel.
+_UNSET = object()
 
 
 class _QuietSink(Sink):
@@ -104,13 +117,17 @@ class _QuietSink(Sink):
 # ---------------------------------------------------------------------------
 
 
-def build_state_graph(spec, registry: dict, ctx) -> Any:
+def build_state_graph(spec, registry: dict, ctx, checkpointer=None) -> Any:
     """Compile *spec* into a runnable ``CompiledStateGraph``.
 
     *ctx* is the run's :class:`RunContext` — shared by every node's model and
     every tool wrapper, which is what makes turn numbers continuous across
     nodes and the terminal ``done`` line describe the whole graph rather than
     whichever agent happened to speak last.
+
+    *checkpointer* (a ``SqliteSaver`` or None) is what makes a run pausable and
+    resumable; passed straight to ``compile``. None compiles a run that cannot
+    pause — fine for a throwaway or a test.
     """
     lc = _lc()
     builder = lc.StateGraph(lc.MessagesState)
@@ -140,7 +157,7 @@ def build_state_graph(spec, registry: dict, ctx) -> Any:
         else:
             # No successor, or an output node: the run ends here.
             builder.add_edge(node_id, lc.END)
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx):
@@ -157,7 +174,11 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx):
     model = lc.MemsomChatModel(adapter=adapter, model=agent.model,
                                params=dict(agent.params), ctx=ctx,
                                node_id=node_id)
-    tools = [lc.MemsomTool(tool, ctx) for tool in build_tools(agent.tool_specs)]
+    approval = {s["name"]: bool(s.get("require_approval"))
+                for s in agent.tool_specs}
+    tools = [lc.MemsomTool(tool, ctx,
+                           require_approval=approval.get(tool.name, False))
+             for tool in build_tools(agent.tool_specs)]
     subgraph = lc.create_react_agent(model, tools,
                                      prompt=agent.system or None)
     # The subgraph gets the same budget as the parent. Without it, an agent
@@ -327,30 +348,86 @@ def _route_tool(names: list) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def run_graph(spec, registry: dict, sink, audit_path) -> dict:
-    """Build and run *spec* to completion; return the aggregated stats.
+def run_graph(spec, registry: dict, sink, audit_path,
+              run_id: str = None, checkpoint_path=None,
+              resume_decision=_UNSET) -> tuple:
+    """Build and run *spec*; return ``(stats, paused)``.
 
-    The return shape is what ``_final_stats`` expects and what the terminal
-    ``done`` line has always carried — ``turns``, ``tool_calls``, plus whatever
-    usage counters the backends reported — so the frontend reads a graph run
-    and a legacy single-agent run through the same code.
+    ``stats`` is the aggregated shape ``_final_stats`` expects and the terminal
+    ``done`` line has always carried, so the frontend reads a graph run and a
+    legacy single-agent run through the same code. ``paused`` is True when the
+    run hit a human-approval ``interrupt()`` and is now waiting: the caller must
+    NOT write a ``done`` line and must NOT prune the checkpoint — the run resumes
+    later through this same function.
+
+    Fresh vs resume: with ``resume_decision`` left unset the graph starts from
+    the trigger input; given a value it resumes a paused run via
+    ``Command(resume=…)``, replaying from the checkpoint to the interrupt and
+    handing the value back to the waiting ``interrupt()`` call.
+
+    *run_id* is the checkpoint thread id; *checkpoint_path* the SqliteSaver DB.
+    Both are required for pause/resume; without them the graph runs un-
+    checkpointed (a throwaway or a test that never pauses).
     """
     lc = _lc()
     ctx = lc.RunContext(sink=sink, audit_path=Path(audit_path),
                         limits=dict(spec.limits))
-    graph = build_state_graph(spec, registry, ctx)
     max_steps = spec.limits["max_steps"]
+
+    conn = saver = None
+    thread_id = run_id or ""
+    if checkpoint_path is not None and run_id:
+        # check_same_thread=False: the run executes on an AgentRunner worker
+        # thread, not the one that opened this. One connection per run, closed
+        # in the finally — runs are serialized by the single run slot, so the
+        # shared DB file never has two writers.
+        conn = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
+        saver = lc.SqliteSaver(conn)
+
+    config: dict = {"recursion_limit": max_steps, "max_concurrency": 1}
+    if saver is not None:
+        config["configurable"] = {"thread_id": thread_id}
+
+    graph_input = (
+        {"messages": [lc.HumanMessage(content=spec.input or "Begin.")]}
+        if resume_decision is _UNSET
+        else lc.Command(resume=resume_decision))
+
+    paused = False
     try:
-        graph.invoke({"messages": [lc.HumanMessage(content=spec.input or "Begin.")]},
-                     {"recursion_limit": max_steps, "max_concurrency": 1})
-    except lc.GraphRecursionError as exc:
-        # A cycle that never converges is the expected way to hit this, and the
-        # user needs a terminal error line naming the knob they can turn — not
-        # a run that sits at RUNNING forever.
-        raise ProviderError(
-            f"step limit reached ({max_steps}) without finishing the graph"
-        ) from exc
+        graph = build_state_graph(spec, registry, ctx, checkpointer=saver)
+        try:
+            result = graph.invoke(graph_input, config)
+        except lc.GraphRecursionError as exc:
+            # A cycle that never converges is the expected way to hit this, and
+            # the user needs a terminal error line naming the knob they can turn
+            # — not a run that sits at RUNNING forever.
+            raise ProviderError(
+                f"step limit reached ({max_steps}) without finishing the graph"
+            ) from exc
+        # A pending interrupt surfaces as __interrupt__ on the returned state.
+        # Its payload is what MemsomTool._run passed to interrupt(): the tool
+        # and arguments the human is being asked to approve.
+        interrupts = result.get("__interrupt__") if isinstance(result, dict) else None
+        if interrupts:
+            paused = True
+            payload = getattr(interrupts[0], "value", None) or {}
+            sink.event({"t": "awaiting_approval",
+                        "tool": payload.get("tool"),
+                        "arguments": payload.get("arguments") or {},
+                        "id": payload.get("id"), "ts": now()})
+    finally:
+        # Prune only on a TERMINAL exit (done or errored). A paused run keeps its
+        # checkpoint — that state is exactly what resume replays from.
+        if saver is not None and not paused:
+            try:
+                saver.delete_thread(thread_id)
+            except Exception:
+                pass
+        if conn is not None:
+            conn.close()
+
     stats = dict(ctx.stats)
     stats["turns"] = ctx.turn
     stats.setdefault("tool_calls", 0)
-    return stats
+    return stats, paused

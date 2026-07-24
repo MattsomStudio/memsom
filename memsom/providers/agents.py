@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -344,8 +345,13 @@ def _compile_agent(node: dict, nodes: dict, edges: list, registry: dict, *,
                             for c in base_name.lower()) or "tool"
         seen[base_name] = seen.get(base_name, 0) + 1
         name = base_name if seen[base_name] == 1 else f"{base_name}_{seen[base_name]}"
+        # A shell tool defaults to requiring approval; anything else defaults
+        # off. Either way the tool node's own `require_approval` config wins.
+        default_gate = t_type == "shell"
+        require_approval = bool(t_cfg.get("require_approval", default_gate))
         tool_specs.append({"name": name, "type": t_type,
-                           "options": t_cfg.get("options") or {}})
+                           "options": t_cfg.get("options") or {},
+                           "require_approval": require_approval})
     # surface unknown tool types now, not mid-run
     try:
         build_tools(tool_specs)
@@ -652,8 +658,16 @@ class AgentRunner:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.registry = registry
         self.audit_path = Path(audit_path)
+        # Execution-state store for pause/resume, a sibling of runs/. Holds only
+        # in-flight runs (pruned on any terminal exit); never a display source.
+        self.checkpoints = self.dir.parent / "checkpoints.db"
         self._slots = threading.BoundedSemaphore(max_concurrent)
         self._active: set[str] = set()
+        # run_id -> spec for runs paused at a human-approval interrupt. Holds
+        # what resume() needs to rebuild the graph; the pausable state itself
+        # lives in the checkpoint DB, not here. Lost on restart — a paused run
+        # is then recovered as "resumable" via its surviving checkpoint.
+        self._paused: dict[str, "GraphSpec"] = {}
         self._lock = threading.Lock()
 
     def _path(self, run_id: str) -> Path:
@@ -689,20 +703,84 @@ class AgentRunner:
                          name=f"agent-{run_id}", daemon=True).start()
         return run_id
 
-    def _run(self, spec: "GraphSpec", run_id: str, path: Path) -> None:
+    def _run(self, spec: "GraphSpec", run_id: str, path: Path,
+             resume_decision=None) -> None:
         sink = AgentFileSink(path)
         try:
+            if resume_decision is not None:
+                # A resume appends to the same run file. Record the human's call
+                # before continuing so the transcript shows what unblocked it.
+                sink.event({"t": "approval", "decision": resume_decision,
+                            "ts": now()})
             self._warmup(spec, sink)
-            stats = self._loop(spec, sink)
-            sink.done(_final_stats(sink, stats))
+            stats, paused = self._loop(spec, run_id, sink, resume_decision)
+            if paused:
+                # The run is waiting on a human. The awaiting_approval event is
+                # already on disk; write no terminal line, keep the checkpoint,
+                # and remember the spec so resume() can rebuild the graph.
+                with self._lock:
+                    self._paused[run_id] = spec
+            else:
+                sink.done(_final_stats(sink, stats))
         except ProviderError as exc:
             sink.error(str(exc))
         except Exception as exc:  # defensive: never die silently
             sink.error(f"internal error: {exc}")
         finally:
+            # The slot is freed whether the run finished or is now waiting on a
+            # human — a paused run consumes no compute.
             with self._lock:
                 self._active.discard(run_id)
             self._slots.release()
+
+    def resume(self, run_id: str, decision: str,
+               spec: "GraphSpec" = None) -> str:
+        """Continue a run paused at a human-approval gate.
+
+        ``decision`` is ``"approve"`` or ``"deny"`` — handed straight to the
+        waiting ``interrupt()`` inside the tool. The spec comes from memory for a
+        live pause; for one that outlived a restart the caller recompiles it from
+        the graph doc and passes it in. Either way the run's pausable state is in
+        the checkpoint, so a missing checkpoint is a hard refusal, not a silent
+        fresh start. Re-acquires the single run slot and continues on a fresh
+        worker thread under the same run id."""
+        with self._lock:
+            spec = spec or self._paused.get(run_id)
+        if spec is None:
+            raise ProviderError(f"run {run_id!r} cannot be resumed")
+        if not self._has_checkpoint(run_id):
+            raise ProviderError(
+                f"run {run_id!r} has no checkpoint to resume from")
+        if not self._slots.acquire(blocking=False):
+            raise ProviderError("an agent run is already active; try again later")
+        with self._lock:
+            self._paused.pop(run_id, None)
+            self._active.add(run_id)
+        path = self._path(run_id)
+        threading.Thread(
+            target=self._run, args=(spec, run_id, path),
+            kwargs={"resume_decision": decision},
+            name=f"agent-resume-{run_id}", daemon=True).start()
+        return run_id
+
+    def paused_spec(self, run_id: str) -> "Optional[GraphSpec]":
+        """The in-memory spec of a live-paused run, or None (e.g. after a
+        restart, when the caller must recompile from the graph doc)."""
+        with self._lock:
+            return self._paused.get(run_id)
+
+    def head_graph_id(self, run_id: str) -> Optional[str]:
+        """The graph id recorded on a run's start line — what a post-restart
+        resume recompiles its spec from."""
+        p = self._path(run_id)
+        if not p.is_file():
+            return None
+        try:
+            lines = p.read_text(encoding="utf-8", errors="replace").split("\n")
+        except OSError:
+            return None
+        head = _first_json(lines) or {}
+        return head.get("graph_id")
 
     # -- the loop ----------------------------------------------------------
 
@@ -749,16 +827,25 @@ class AgentRunner:
             time.sleep(_WARMUP_POLL_S)
         raise ProviderError("engine did not come up within warmup timeout")
 
-    def _loop(self, spec: "GraphSpec", sink: AgentFileSink) -> dict:
+    def _loop(self, spec: "GraphSpec", run_id: str, sink: AgentFileSink,
+              resume_decision=None) -> tuple:
         """Hand the compiled graph to the LangGraph runtime.
 
         Imported here and not at module scope on purpose: ``lc_runtime`` pulls
         in langgraph and langchain-core, and memsom's core is stdlib-only. A
         machine that never runs an agent never pays for the import, and one
         that tries gets a ProviderError naming the extra instead of a
-        traceback at server boot."""
-        from memsom.providers.lc_runtime import run_graph
-        return run_graph(spec, self.registry, sink, self.audit_path)
+        traceback at server boot.
+
+        ``run_id`` doubles as the checkpoint thread id, so a run's pausable
+        state is keyed to the same id its run-log file carries. Returns
+        ``(stats, paused)``; ``resume_decision`` (None on a fresh run) is passed
+        through so a resume continues the same checkpointed thread."""
+        from memsom.providers.lc_runtime import _UNSET, run_graph
+        resume = _UNSET if resume_decision is None else resume_decision
+        return run_graph(spec, self.registry, sink, self.audit_path,
+                         run_id=run_id, checkpoint_path=self.checkpoints,
+                         resume_decision=resume)
 
     # -- reads -------------------------------------------------------------
 
@@ -812,27 +899,62 @@ class AgentRunner:
         return out
 
     def _status_of(self, run_id: str, lines) -> tuple:
+        last = None
         for line in reversed(lines):
             line = line.strip()
             if not line:
                 continue
             try:
-                rec = json.loads(line)
+                last = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if rec.get("t") == "done":
-                return "done", rec.get("stats")
-            if rec.get("t") == "error":
-                return "error", {"error": rec.get("error")}
             break
+        # A terminal line on disk is authoritative — a done/errored run stays so.
+        if last is not None:
+            if last.get("t") == "done":
+                return "done", last.get("stats")
+            if last.get("t") == "error":
+                return "error", {"error": last.get("error")}
+        # Live membership beats a stale last line. During a resume the run is
+        # back in _active while its last disk line is still awaiting_approval;
+        # without this check that window reads as "resumable" and a poll can
+        # abort the resume it just kicked off.
         with self._lock:
             if run_id in self._active:
                 return "running", None
+            if run_id in self._paused:
+                return "paused", None
+        # Not running here and not tracked in memory. An awaiting_approval tail
+        # or any un-terminated run is recoverable iff its checkpoint survives;
+        # otherwise it was lost to a crash.
+        if self._has_checkpoint(run_id):
+            return "resumable", None
         return "interrupted", None
 
+    def _has_checkpoint(self, run_id: str) -> bool:
+        """Whether a live checkpoint for *run_id* survives in the DB. Cheap and
+        defensive — a missing DB, a locked one, or a schema surprise all read as
+        'no checkpoint' rather than raising into a status read."""
+        if not self.checkpoints.is_file():
+            return False
+        try:
+            con = sqlite3.connect(str(self.checkpoints))
+            try:
+                row = con.execute(
+                    "SELECT 1 FROM checkpoints WHERE thread_id=? LIMIT 1",
+                    (run_id,)).fetchone()
+            finally:
+                con.close()
+            return row is not None
+        except Exception:
+            return False
+
     def reconcile_on_boot(self) -> None:
-        """Stamp a terminal line onto any run file the previous server left
-        unterminated — safe because that writer thread died with the process."""
+        """Terminalise runs the previous server left dangling — but only the
+        UNRECOVERABLE ones. A run whose checkpoint survives is marked neither
+        done nor errored: ``_status_of`` reports it ``resumable`` and the user
+        (or Phase-2 resume) continues it. Only a run with no checkpoint gets the
+        error stamp, safe because that writer thread died with the process."""
         for p in self.dir.glob("*.jsonl"):
             try:
                 lines = p.read_text(encoding="utf-8", errors="replace").split("\n")

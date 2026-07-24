@@ -469,8 +469,11 @@ class MemsomTool(BaseTool):
     memsom_tool: Any = None
     #: the shared per-run carrier (turn number, limits, audit path, strikes).
     run_ctx: Any = None
+    #: when true, the call PAUSES for a human APPROVE/DENY before it executes.
+    require_approval: bool = False
 
-    def __init__(self, tool: Tool, ctx: RunContext, **kwargs: Any) -> None:
+    def __init__(self, tool: Tool, ctx: RunContext,
+                 require_approval: bool = False, **kwargs: Any) -> None:
         # args_schema is the tool's raw JSON Schema dict, NOT a generated
         # pydantic model. langchain-core 1.5.1 accepts a dict here and, when it
         # sees one, passes the model's arguments through untouched — which is
@@ -485,6 +488,7 @@ class MemsomTool(BaseTool):
                                                  "properties": {}}),
             memsom_tool=tool,
             run_ctx=ctx,
+            require_approval=require_approval,
             **kwargs,
         )
 
@@ -512,6 +516,36 @@ class MemsomTool(BaseTool):
         ctx: RunContext = self.run_ctx
         limits = ctx.limits
 
+        # Human-in-the-loop gate. interrupt() is the FIRST thing here, before any
+        # counter, event or audit, and that ordering is load-bearing: on the
+        # first pass it raises GraphInterrupt (the run pauses, this function
+        # unwinds having done nothing), and on resume LangGraph RE-RUNS the whole
+        # tool node from the top — so anything with a side effect before
+        # interrupt() would fire twice. With it first, the resume path runs the
+        # count/events/execution below exactly once. The payload is what
+        # run_graph turns into the awaiting_approval event the UI reads.
+        if self.require_approval:
+            from langgraph.types import interrupt
+            decision = interrupt({"kind": "approval", "tool": self.name,
+                                  "arguments": arguments,
+                                  "id": call_id or None})
+            if str(decision).lower() != "approve":
+                # Denied: record it (the gate working IS the security event) and
+                # hand the model a plain result it can react to and move on.
+                nth = ctx.count_tool_call()
+                cid = call_id or f"tc_{nth}"
+                self._audit_denied(ctx, cid, arguments)
+                ctx.sink.event({"t": "tool_call", "turn": ctx.turn, "id": cid,
+                                "name": self.name, "arguments": arguments,
+                                "ts": now()})
+                denied = "DENIED by user: the tool was not executed."
+                ctx.sink.event({"t": "tool_result", "turn": ctx.turn, "id": cid,
+                                "name": self.name, "ok": False, "output": denied,
+                                "bytes": len(denied.encode("utf-8")),
+                                "truncated": False, "elapsed_s": 0.0})
+                return denied
+            # Approved: fall through and execute exactly like an ungated call.
+
         # Loop detection lives in MemsomChatModel._generate, over the whole
         # turn's batch of calls — not here. The tool node fans a turn's calls
         # out across a thread pool, so a per-call check is both racy and blind
@@ -538,3 +572,19 @@ class MemsomTool(BaseTool):
                         "truncated": truncated,
                         "elapsed_s": round(now() - started, 3)})
         return text
+
+    def _audit_denied(self, ctx: RunContext, call_id: str,
+                      arguments: dict) -> None:
+        """Record a human-refused call in the same audit log a real call uses.
+
+        A denied tool never reaches ``_execute_tool``, so it would otherwise
+        leave no trace — but "the human stopped shell(rm -rf)" is exactly the
+        event the audit exists to hold. Same redaction discipline as the two-
+        phase path: tool name and stringified/clipped arguments only, never the
+        prompt or model text."""
+        from memsom.providers.handlers import _audit
+        _audit(ctx.audit_path, {
+            "action": "tool", "tool": self.name, "id": call_id,
+            "arguments": {k: str(v)[:200] for k, v in arguments.items()},
+            "result": "refused-by-user",
+        })
