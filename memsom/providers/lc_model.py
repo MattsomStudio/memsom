@@ -122,6 +122,9 @@ class RunContext:
     strikes: int = 0
     #: when the run began; the run-timeout gate compares against it.
     started: float = field(default_factory=now)
+    #: the run's shared scratch dict — one object every agent's state tools
+    #: read/write, so a value set by one agent is visible to the next.
+    data: dict = field(default_factory=dict)
 
     def guard(self) -> None:
         """Enforce the run-wide turn ceiling and timeout, at turn entry.
@@ -560,6 +563,7 @@ class MemsomTool(BaseTool):
             audit_path=ctx.audit_path,
             timeout_s=limits["tool_timeout_s"],
             max_output_bytes=limits["max_tool_output_bytes"],
+            shared=ctx.data,
         )
         started = now()
         output, ok = _execute_tool(self.memsom_tool, self.name, arguments,

@@ -17,6 +17,8 @@ from memsom.providers.tools.builtins import (
     HttpFetch,
     MemoryRecall,
     Shell,
+    StateGet,
+    StateSet,
     WebSearch,
 )
 
@@ -27,6 +29,8 @@ BUILTIN_TOOLS: dict[str, type[Tool]] = {
     DeepRecall.type: DeepRecall,
     FileRead.type: FileRead,
     Shell.type: Shell,
+    StateSet.type: StateSet,
+    StateGet.type: StateGet,
 }
 
 

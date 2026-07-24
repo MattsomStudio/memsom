@@ -40,11 +40,16 @@ class ToolContext:
     ``audit_path`` is the agents' audit log (``agents/audit.jsonl``, two-phase
     intent/result lines) — carried here so the RUNNER can write around the
     call; tools themselves never touch it.
+
+    ``shared`` is the run's scratch dict — the same object across every agent in
+    the graph, so the state tools can pass a value from one agent to the next.
+    None when the runner didn't wire one (a bare tool test).
     """
 
     audit_path: Path
     timeout_s: int
     max_output_bytes: int
+    shared: dict = None
 
 
 class Tool:

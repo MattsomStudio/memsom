@@ -1487,3 +1487,129 @@ def test_resume_refuses_when_no_checkpoint_survives(tmp_path, fake_tools):
     with pytest.raises(ProviderError) as ei:
         runner.resume(rid, "approve", spec=compile_graph(_gated_doc(), reg))
     assert "no checkpoint" in str(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# 10. structured output, context hooks, shared state
+# ---------------------------------------------------------------------------
+
+_SCHEMA = {"title": "Verdict", "type": "object",
+           "properties": {"ok": {"type": "boolean"}, "why": {"type": "string"}},
+           "required": ["ok", "why"]}
+
+
+def test_output_schema_must_be_an_object():
+    doc = _doc()  # real http_fetch tool — reaches the schema check
+    _node(doc, "n6")["config"]["output_schema"] = "not a dict"
+    with pytest.raises(ProviderError) as ei:
+        compile_graph(doc, _registry())
+    assert "output_schema must be a JSON-schema object" in str(ei.value)
+
+
+def test_context_mode_is_validated():
+    doc = _doc()
+    _node(doc, "n6")["config"]["context_mode"] = "hallucinate"
+    with pytest.raises(ProviderError) as ei:
+        compile_graph(doc, _registry())
+    assert "context_mode must be" in str(ei.value)
+
+
+def _no_tool_doc() -> dict:
+    """The e2e chassis with the tool node removed — a plain text agent, so the
+    ReAct loop ends on a plain answer and the structured step is the only call
+    that binds a tool."""
+    doc = _doc()
+    doc["nodes"] = [n for n in doc["nodes"] if n["id"] != "n5"]
+    doc["edges"] = [e for e in doc["edges"] if e["id"] != "e3"]
+    return doc
+
+
+def test_structured_output_lands_in_the_run(tmp_path):
+    # Schema-aware adapter: with no agent tools the ReAct loop answers plainly,
+    # then LangGraph's structured step binds the schema tool — THAT is the only
+    # call with a tool bound, and the adapter answers it with valid data.
+    class Schematic(FakeAdapter):
+        def infer(self, model, messages, params, sink):
+            self.calls.append((model, [], dict(params)))
+            if params.get("tools"):
+                name = params["tools"][0]["function"]["name"]
+                return {"tool_calls": [{"id": "s1", "name": name,
+                                        "arguments": {"ok": True, "why": "clean"}}]}
+            sink.token("looks fine")
+            return {}
+
+    doc = _no_tool_doc()
+    _node(doc, "n6")["config"]["output_schema"] = _SCHEMA
+    adapter = Schematic([])
+    runner = _runner(tmp_path, adapter)
+    events, status, stats = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done"
+    structured = [e for e in events if e["t"] == "structured"]
+    assert len(structured) == 1
+    assert structured[0]["data"] == {"ok": True, "why": "clean"}
+    assert stats["structured"] == {"ok": True, "why": "clean"}
+
+
+def test_shared_state_passes_a_value_between_agents(tmp_path, fake_tools):
+    # WRITER stores a value; READER (a later node) reads it back — proving the
+    # scratchpad is one object across the whole run.
+    class Scripted(FakeAdapter):
+        def __init__(self):
+            super().__init__([])
+            self.script2 = [
+                {"tool_calls": [{"id": "c1", "name": "state_set",
+                                 "arguments": {"key": "finding", "value": "42"}}]},
+                {},
+                {"tool_calls": [{"id": "c2", "name": "state_get",
+                                 "arguments": {"key": "finding"}}]},
+                {},
+            ]
+            self.i = 0
+
+        def infer(self, model, messages, params, sink):
+            step = self.script2[min(self.i, len(self.script2) - 1)]
+            self.i += 1
+            if step.get("tool_calls"):
+                return dict(step)
+            sink.token("ok")
+            return {}
+
+    adapter = Scripted()
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(_shared_state_doc(), _registry(adapter)), "manual"))
+    assert status == "done"
+    reads = [e for e in events if e["t"] == "tool_result" and e["name"] == "state_get"]
+    assert reads and reads[0]["output"] == '"42"'
+
+
+def _shared_state_doc() -> dict:
+    return {"id": "g_ss", "rev": 1, "nodes": [
+        {"id": "t", "type": "trigger", "config": {"mode": "manual", "input": "go"}},
+        {"id": "e", "type": "engine",
+         "config": {"provider": "fake", "model": "m"}},
+        {"id": "ts", "type": "tool", "config": {"tool": "state_set", "options": {}}},
+        {"id": "tg", "type": "tool", "config": {"tool": "state_get", "options": {}}},
+        {"id": "a1", "type": "agent",
+         "config": {"name": "WRITER", "system": "", "params": {},
+                    "limits": {"max_turns": 4}}},
+        {"id": "a2", "type": "agent",
+         "config": {"name": "READER", "system": "", "params": {},
+                    "limits": {"max_turns": 4}}},
+        {"id": "o", "type": "output", "config": {}}],
+        "edges": [
+        {"id": "1", "source": "t", "target": "a1",
+         "sourceHandle": "run", "targetHandle": "trigger"},
+        {"id": "2", "source": "e", "target": "a1",
+         "sourceHandle": "engine", "targetHandle": "engine"},
+        {"id": "3", "source": "ts", "target": "a1",
+         "sourceHandle": "tool", "targetHandle": "tools"},
+        {"id": "4", "source": "e", "target": "a2",
+         "sourceHandle": "engine", "targetHandle": "engine"},
+        {"id": "5", "source": "tg", "target": "a2",
+         "sourceHandle": "tool", "targetHandle": "tools"},
+        {"id": "6", "source": "a1", "target": "a2",
+         "sourceHandle": "next", "targetHandle": "in"},
+        {"id": "7", "source": "a2", "target": "o",
+         "sourceHandle": "out", "targetHandle": "in"}]}

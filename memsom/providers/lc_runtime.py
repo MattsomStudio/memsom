@@ -71,7 +71,9 @@ def _lc() -> SimpleNamespace:
     that can raise the "install the extra" message, and exactly one import
     cost to pay on the first run of a server's life."""
     try:
-        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.messages import (
+            AIMessage, HumanMessage, SystemMessage, ToolMessage,
+        )
         from langgraph.checkpoint.sqlite import SqliteSaver
         from langgraph.errors import GraphRecursionError
         from langgraph.graph import END, START, MessagesState, StateGraph
@@ -85,6 +87,7 @@ def _lc() -> SimpleNamespace:
         raise ProviderError(_MISSING_EXTRA) from exc
     return SimpleNamespace(
         AIMessage=AIMessage, HumanMessage=HumanMessage,
+        SystemMessage=SystemMessage, ToolMessage=ToolMessage,
         GraphRecursionError=GraphRecursionError, END=END, START=START,
         MessagesState=MessagesState, StateGraph=StateGraph,
         create_react_agent=create_react_agent, SqliteSaver=SqliteSaver,
@@ -179,8 +182,21 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx):
     tools = [lc.MemsomTool(tool, ctx,
                            require_approval=approval.get(tool.name, False))
              for tool in build_tools(agent.tool_specs)]
-    subgraph = lc.create_react_agent(model, tools,
-                                     prompt=agent.system or None)
+
+    kwargs: dict = {"prompt": agent.system or None}
+    # Structured output: a JSON schema the answer must satisfy. LangGraph makes
+    # ONE extra structured call after the loop and lands the result in
+    # state["structured_response"]; requires the model to tool-call, which every
+    # adapter routes through the same stats["tool_calls"] path.
+    if getattr(agent, "output_schema", None):
+        kwargs["response_format"] = agent.output_schema
+    # Context management: a pre_model_hook that shrinks the history the model
+    # sees each turn (via llm_input_messages, leaving the saved transcript
+    # intact). Off by default.
+    hook = _context_hook(lc, agent, adapter, ctx, node_id)
+    if hook is not None:
+        kwargs["pre_model_hook"] = hook
+    subgraph = lc.create_react_agent(model, tools, **kwargs)
     # The subgraph gets the same budget as the parent. Without it, an agent
     # whose model keeps reaching for tools would trip langgraph's default
     # recursion limit instead of the one the user set on the trigger.
@@ -195,18 +211,108 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx):
     config = {"recursion_limit": spec.limits["max_steps"], "max_concurrency": 1}
     agent_name = agent.agent_name
 
+    wants_schema = bool(getattr(agent, "output_schema", None))
+
     def run_node(state: dict) -> dict:
         ctx.node_id = node_id
         ctx.sink.event({"t": "node", "id": node_id, "agent": agent_name,
                         "ts": now()})
         prior = len(state["messages"])
         result = subgraph.invoke({"messages": state["messages"]}, config)
+        if wants_schema and "structured_response" in result:
+            data = _jsonable(result["structured_response"])
+            ctx.stats["structured"] = data      # carried into the done line
+            ctx.sink.event({"t": "structured", "node": node_id,
+                            "data": data, "ts": now()})
         # Append only what this node produced. The inbound messages come back
         # out of the subgraph unchanged, and handing them to the parent's
         # add_messages reducer again would rely on id-dedup to stay correct.
         return {"messages": result["messages"][prior:]}
 
     return run_node
+
+
+def _jsonable(obj):
+    """Coerce a structured response (pydantic model, dataclass or dict) to plain
+    JSON-serializable data — the run log and the done line both need it flat."""
+    for attr in ("model_dump", "dict"):
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                break
+    return obj
+
+
+# default history budgets (message counts) when the node leaves it at 0.
+_TRIM_DEFAULT = 20
+_SUMMARIZE_KEEP = 10
+
+
+def _safe_tail(lc, messages: list, keep: int) -> list:
+    """The last *keep* messages, but never STARTING on an orphan tool result —
+    a ToolMessage whose triggering tool_call got trimmed away confuses models
+    that validate call/result pairing."""
+    tail = messages[-keep:] if keep > 0 else list(messages)
+    while tail and isinstance(tail[0], lc.ToolMessage):
+        tail = tail[1:]
+    return tail
+
+
+def _context_hook(lc, agent, adapter, ctx, node_id: str):
+    """Build the pre_model_hook for an agent's context_mode, or None for 'off'.
+
+    The hook returns ``{"llm_input_messages": …}`` — LangGraph's channel for
+    "what the model sees THIS call" — so the durable transcript in state is left
+    untouched while the model is handed a shorter history.
+    """
+    mode = getattr(agent, "context_mode", "off")
+    if mode == "off":
+        return None
+    budget = getattr(agent, "context_budget", 0)
+
+    if mode == "trim":
+        keep = budget or _TRIM_DEFAULT
+
+        def trim_hook(state: dict) -> dict:
+            msgs = state.get("messages") or []
+            if len(msgs) <= keep:
+                return {}
+            return {"llm_input_messages": _safe_tail(lc, msgs, keep)}
+
+        return trim_hook
+
+    # summarize: fold everything older than the kept tail into one summary
+    # message via a single extra inference on this agent's own engine.
+    keep = budget or _SUMMARIZE_KEEP
+
+    def summarize_hook(state: dict) -> dict:
+        msgs = state.get("messages") or []
+        if len(msgs) <= keep:
+            return {}
+        head, tail = msgs[:-keep], _safe_tail(lc, msgs, keep)
+        convo = lc.to_memsom_messages(head)
+        convo.append({"role": "user", "content":
+                      "Summarize the conversation so far in a few sentences, "
+                      "preserving names, decisions and open questions."})
+        from memsom.providers.base import ListSink
+        sink = ListSink()
+        try:
+            stats = adapter.infer(agent.model, convo,
+                                  {**dict(agent.params)}, sink) or {}
+        except Exception:
+            # A summarizer that falls over must not kill the run — fall back to
+            # a plain trim, which needs no model.
+            return {"llm_input_messages": tail}
+        ctx.accumulate(stats)   # its tokens are real and belong in the total
+        summary = lc.SystemMessage(
+            content="Summary of earlier conversation:\n" + (sink.text() or ""))
+        ctx.sink.event({"t": "context", "node": node_id, "mode": "summarize",
+                        "folded": len(head), "ts": now()})
+        return {"llm_input_messages": [summary, *tail]}
+
+    return summarize_hook
 
 
 # ---------------------------------------------------------------------------

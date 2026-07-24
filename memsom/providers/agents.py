@@ -106,6 +106,14 @@ class AgentSpec:
     limits: dict
     input: str
     node_id: str = ""
+    #: JSON schema this agent's final answer must conform to, or None for free
+    #: text (structured output — a separate structured LLM call after the loop).
+    output_schema: Optional[dict] = None
+    #: context management before each model call: "off" | "trim" | "summarize".
+    context_mode: str = "off"
+    #: message-count budget the context hook trims/summarizes down to (0 = the
+    #: mode's built-in default).
+    context_budget: int = 0
 
     def as_start_meta(self) -> dict:
         return {
@@ -368,6 +376,17 @@ def _compile_agent(node: dict, nodes: dict, edges: list, registry: dict, *,
     if transport:
         params["transport"] = transport
 
+    output_schema = a_cfg.get("output_schema")
+    if output_schema is not None and not isinstance(output_schema, dict):
+        raise ProviderError(f"{who}output_schema must be a JSON-schema object")
+    context_mode = a_cfg.get("context_mode") or "off"
+    if context_mode not in ("off", "trim", "summarize"):
+        raise ProviderError(
+            f"{who}context_mode must be off, trim or summarize")
+    context_budget = a_cfg.get("context_budget")
+    context_budget = int(context_budget) if isinstance(context_budget, (int, float)) \
+        and context_budget > 0 else 0
+
     return AgentSpec(
         graph_id=graph_id,
         graph_rev=graph_rev,
@@ -381,6 +400,9 @@ def _compile_agent(node: dict, nodes: dict, edges: list, registry: dict, *,
         limits=limits,
         input="",          # the graph owns the trigger input, not the node
         node_id=node["id"],
+        output_schema=output_schema or None,
+        context_mode=context_mode,
+        context_budget=context_budget,
     )
 
 

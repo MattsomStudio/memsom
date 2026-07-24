@@ -587,3 +587,60 @@ class Shell(Tool):
             raise ToolError(f"failed to launch: {exc}") from exc
         return _cap(f"exit {proc.returncode}\n{proc.stdout or ''}",
                     ctx.max_output_bytes)
+
+
+class StateSet(Tool):
+    """Write a value into the run's shared scratchpad — visible to every other
+    agent in the graph, this turn or a later node. Passing structured data
+    between agents without threading it through the prose of the conversation."""
+
+    type = "state_set"
+    description = (
+        "Store a value under a key in the shared scratchpad that later agents "
+        "in this run can read with state_get."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "the name to store under"},
+            "value": {"description": "any JSON value to store"},
+        },
+        "required": ["key", "value"],
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> str:
+        if ctx.shared is None:
+            raise ToolError("no shared state on this run")
+        key = str(arguments.get("key") or "").strip()
+        if not key:
+            raise ToolError("state_set requires a non-empty 'key'")
+        ctx.shared[key] = arguments.get("value")
+        return f"stored {key!r}"
+
+
+class StateGet(Tool):
+    """Read the run's shared scratchpad — the whole dict, or one key."""
+
+    type = "state_get"
+    description = (
+        "Read from the shared scratchpad. With a key, returns that value; "
+        "without one, lists every key currently stored."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string",
+                    "description": "the key to read (omit to list all keys)"},
+        },
+    }
+
+    def run(self, arguments: dict, ctx: ToolContext) -> str:
+        import json as _json
+        shared = ctx.shared or {}
+        key = arguments.get("key")
+        if key is None or key == "":
+            keys = sorted(shared)
+            return "keys: " + (", ".join(keys) if keys else "(empty)")
+        if key not in shared:
+            return f"no value stored under {key!r}"
+        return _json.dumps(shared[key], default=str)
