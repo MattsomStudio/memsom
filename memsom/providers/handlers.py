@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -229,6 +230,17 @@ def _safe(fn, fallback):
         return fallback
 
 
+# The audit log is one append-only file that any number of callers may write.
+# A bare open("a")+write+fsync is atomic per-process only up to the OS write
+# buffer, so two threads appending at once can interleave and tear a line —
+# fatal for a JSONL file a parser walks, and worse when a lost line is a tool's
+# "pending" intent. The agent tool node runs sequentially today (max_concurrency
+# =1), so this lock is defence in depth rather than the only guard, but it is
+# what makes "every tool call lands one intact intent line" true by construction
+# instead of by an invariant a future caller could break.
+_AUDIT_LOCK = threading.Lock()
+
+
 def _audit(path, obj: dict, *, gate: bool = False) -> None:
     """Append one fsync'd JSONL line. When gate=True (the intent line) the
     OSError propagates so the caller can refuse the action; otherwise (result
@@ -238,13 +250,14 @@ def _audit(path, obj: dict, *, gate: bool = False) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"ts": forget.now_iso(), **obj}, ensure_ascii=False) + "\n"
-        fh = open(p, "a", encoding="utf-8")
-        try:
-            fh.write(line)
-            fh.flush()
-            os.fsync(fh.fileno())
-        finally:
-            fh.close()
+        with _AUDIT_LOCK:
+            fh = open(p, "a", encoding="utf-8")
+            try:
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
+            finally:
+                fh.close()
     except OSError:
         if gate:
             raise

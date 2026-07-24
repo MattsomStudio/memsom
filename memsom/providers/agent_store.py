@@ -17,7 +17,7 @@ from pathlib import Path
 from memsom.providers.base import ProviderError, now
 
 _GRAPH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_NODE_TYPES = {"engine", "agent", "tool", "trigger", "output"}
+_NODE_TYPES = {"engine", "agent", "tool", "trigger", "output", "router"}
 
 
 class GraphStore:

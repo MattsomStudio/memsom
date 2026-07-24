@@ -1,25 +1,39 @@
-"""Agent runs — a durable, multi-turn tool-use loop over any provider.
+"""Agent runs — a durable, multi-node graph of tool-using agents.
 
-An *agent* is a compiled graph: one engine (provider + model), a system
-prompt, a set of tool instances, and hard limits. Running one is a loop the
-panel server owns: infer → if the model asked for tools, execute them and
-feed the results back → infer again → until a plain answer, a limit, or an
-error. Every step lands in an append-only JSONL run file (the session.py
-pattern with a wider event vocabulary), so the app can close mid-run and
-re-poll the transcript later.
+A *graph* is what the canvas draws: one or more agent nodes, each with its own
+engine (provider + model), system prompt and tool instances, wired to each
+other by control flow — a straight handoff, or a router that picks a branch,
+or an edge back to an earlier agent to make a cycle. Running one is the panel
+server's job, and every step lands in an append-only JSONL run file (the
+session.py pattern with a wider event vocabulary), so the app can close
+mid-run and re-poll the transcript later.
+
+The graph *shape* is compiled here (:func:`compile_graph` → :class:`GraphSpec`);
+the graph *execution* lives in ``lc_runtime.py`` on top of LangGraph, imported
+lazily so memsom's core stays stdlib-only. What stays here is everything the
+runtime is built out of — :func:`_execute_tool` (the two-phase audit) and
+:func:`run_tool_loop`, the hand-rolled single-agent loop the voice path still
+drives and which is therefore NOT dead code.
 
 Run file — one JSON object per line at ``<runs_dir>/<run_id>.jsonl``:
 
     {"t":"start","run_id":..,"graph_id":..,"trigger":..,"provider":..,
-     "model":..,"tools":[..],"limits":{..},"ts":..}
+     "model":..,"tools":[..],"limits":{..},"agents":[{..}],"ts":..}
     {"t":"warmup","action":"start"|"none","ok":true,"detail":"..","ts":..}
-    {"t":"turn","n":1,"ts":..}
+    {"t":"node","id":"n6","agent":"RESEARCHER","ts":..}   # graph runs only
+    {"t":"turn","n":1,"node":"n6","ts":..}
     {"t":"tok","text":".."}                         # whole-turn text w/ tools
     {"t":"tool_call","turn":1,"id":"tc_1","name":..,"arguments":{..},"ts":..}
     {"t":"tool_result","turn":1,"id":"tc_1","name":..,"ok":true,
      "output":"..","bytes":123,"truncated":false,"elapsed_s":1.2}
+    {"t":"route","router":"n8","branch":"escalate","mode":"decide","ts":..}
     {"t":"done","stats":{..}}                       # terminal, fsync'd, OR
     {"t":"error","error":"..","turn":2}
+
+``node``/``route`` and the ``node`` field on ``turn`` are the multi-agent
+additions, and they are strictly additive: a reader that switches on ``t``
+ignores what it doesn't know, so a stale frontend degrades to the old view
+rather than breaking.
 
 Durability scope matches session.py: survives the app closing, not the panel
 server restarting — ``reconcile_on_boot`` stamps orphaned run files with a
@@ -53,6 +67,15 @@ _DEFAULT_LIMITS = {
     "max_tool_output_bytes": 32768,
     "run_timeout_s": 900,
 }
+# Graph-level step budget: how many node transitions the whole graph may take
+# before it is declared a runaway. Distinct from max_turns (how many times a
+# MODEL may speak) because a cycle between two agents can burn steps without
+# either agent exceeding its own turn ceiling — this is the one bound that
+# makes a cycle safe to draw on the canvas.
+_DEFAULT_MAX_STEPS = 24
+_MAX_STEPS_CEILING = 64
+# control-flow node types: what an agent or a router branch may hand off to.
+_FLOW_TYPES = ("agent", "router", "output")
 # identical consecutive tool calls before we call it a loop
 _LOOP_STRIKES = 3
 # bounded wait for a cold engine to come up
@@ -62,7 +85,13 @@ _WARMUP_POLL_S = 2.0
 
 @dataclass
 class AgentSpec:
-    """A validated, runnable agent — the output of ``compile_graph``."""
+    """One validated agent NODE — engine, prompt, tools, limits.
+
+    Unchanged field for field from when it *was* the whole compile output; what
+    moved out from under it is "what does this GRAPH do", which is now
+    :class:`GraphSpec`'s job. ``node_id`` is appended last and defaulted so the
+    handful of callers that build one positionally by hand keep working.
+    """
 
     graph_id: str
     graph_rev: int
@@ -75,6 +104,7 @@ class AgentSpec:
     tool_specs: list  # [{"name","type","options"}]
     limits: dict
     input: str
+    node_id: str = ""
 
     def as_start_meta(self) -> dict:
         return {
@@ -87,31 +117,204 @@ class AgentSpec:
         }
 
 
+@dataclass
+class RouterSpec:
+    """A branch point — one compiled ``router`` node.
+
+    A router is not an agent: it owns no engine and no prompt. In ``decide``
+    mode it borrows the engine of the agent that fed it (``source_agent``) for
+    one small inference whose only job is to name a branch; in ``match`` mode
+    it never infers at all and regexes that agent's final text. Either way an
+    undecidable result falls to ``else_branch``, which is why compile time
+    insists the else names one of this router's own branches — a router that
+    can fail to route is a graph that can hang.
+    """
+
+    node_id: str
+    mode: str                 # "decide" | "match"
+    branches: list            # [{"name","when","target_node"}]
+    else_branch: str          # always one of branches[*]["name"]
+    source_agent: str         # node id of the agent whose output it reads
+
+
+@dataclass
+class GraphSpec:
+    """A validated, runnable GRAPH — the output of ``compile_graph``.
+
+    ``flow_edges`` is the control-flow adjacency and nothing else: for each
+    agent and router node, the nodes it may hand off to. An agent has at most
+    one entry (fan-out without a router would mean parallel agents sharing one
+    message thread, which is a different feature); a router has one per branch.
+    Resource wiring — engine→agent, tool→agent — is *not* in here; it was
+    already folded into each :class:`AgentSpec`.
+
+    The entry-agent properties below are deliberate: ``list_runs`` and the
+    RunMonitor history list read ``provider``/``model``/``tools`` off the run
+    file's head line, ``handle_run_start`` audits them, and a one-agent graph
+    should keep answering those questions exactly as it did before there were
+    graphs at all.
+    """
+
+    graph_id: str
+    graph_rev: int
+    entry: str                # node id of the agent the trigger fires
+    agents: dict              # node_id -> AgentSpec, entry first
+    routers: dict             # node_id -> RouterSpec
+    flow_edges: dict          # node_id -> [downstream node ids]
+    limits: dict              # graph-level: entry agent's limits + max_steps
+    input: str
+
+    @property
+    def entry_agent(self) -> AgentSpec:
+        return self.agents[self.entry]
+
+    @property
+    def agent_name(self) -> str:
+        return self.entry_agent.agent_name
+
+    @property
+    def provider_id(self) -> str:
+        return self.entry_agent.provider_id
+
+    @property
+    def model(self) -> str:
+        return self.entry_agent.model
+
+    @property
+    def transport(self) -> Optional[str]:
+        return self.entry_agent.transport
+
+    @property
+    def system(self) -> str:
+        return self.entry_agent.system
+
+    @property
+    def params(self) -> dict:
+        return self.entry_agent.params
+
+    @property
+    def tool_specs(self) -> list:
+        return self.entry_agent.tool_specs
+
+    def engines(self) -> list:
+        """Distinct provider ids across every agent node, entry first.
+
+        Deduped because warming an engine twice is a wasted round trip, and
+        ordered because the entry agent's engine is the one whose warmup the
+        user is actually waiting on."""
+        out = []
+        for agent in self.agents.values():
+            if agent.provider_id not in out:
+                out.append(agent.provider_id)
+        return out
+
+    def as_start_meta(self) -> dict:
+        entry = self.entry_agent
+        return {
+            "graph_id": self.graph_id,
+            "agent": entry.agent_name,
+            "provider": entry.provider_id,
+            "model": entry.model,
+            "tools": [t["name"] for t in entry.tool_specs],
+            "limits": self.limits,
+            "agents": [
+                {"node_id": a.node_id, "name": a.agent_name,
+                 "provider": a.provider_id, "model": a.model,
+                 "tools": [t["name"] for t in a.tool_specs]}
+                for a in self.agents.values()
+            ],
+        }
+
+
 def compile_graph(graph: dict, registry: dict, *,
-                  input_override: Optional[str] = None) -> AgentSpec:
-    """Validate a graph document into an AgentSpec. Every failure raises
+                  input_override: Optional[str] = None) -> GraphSpec:
+    """Validate a graph document into a GraphSpec. Every failure raises
     ProviderError with a verbatim, user-facing reason (the route maps these
-    to 400s)."""
+    to 400s).
+
+    The validations are ordered by what a user can act on: first the agents
+    themselves (an agent with no engine is broken no matter how it's wired),
+    then the entry point, then the routers, then reachability. A graph saved
+    before routers existed has no ``next`` edges and no router nodes, so it
+    falls straight through to a one-agent GraphSpec whose entry-agent
+    properties answer exactly what the old AgentSpec answered.
+    """
     nodes = {n["id"]: n for n in graph.get("nodes", []) if isinstance(n, dict)}
     edges = [e for e in graph.get("edges", []) if isinstance(e, dict)]
+    graph_id = str(graph.get("id") or "")
+    graph_rev = int(graph.get("rev") or 0)
 
-    agents = [n for n in nodes.values() if n.get("type") == "agent"]
-    if len(agents) != 1:
+    agent_nodes = [n for n in nodes.values() if n.get("type") == "agent"]
+    if not agent_nodes:
+        raise ProviderError("graph must contain at least one agent node")
+
+    # Naming an agent in an error message only helps when there is more than
+    # one to confuse — and the unqualified sentence is the one the panel has
+    # shown for every single-agent graph since this feature shipped.
+    qualify = len(agent_nodes) > 1
+    agents = {n["id"]: _compile_agent(n, nodes, edges, registry,
+                                      graph_id=graph_id, graph_rev=graph_rev,
+                                      qualify=qualify)
+              for n in agent_nodes}
+
+    triggers = [n for n in nodes.values() if n.get("type") == "trigger"]
+    if len(triggers) != 1:
         raise ProviderError(
-            f"graph must contain exactly one agent node (found {len(agents)})")
-    agent = agents[0]
-    a_cfg = agent.get("config") or {}
+            f"graph must contain exactly one trigger node (found {len(triggers)})")
+    trigger = triggers[0]
+    fired = list(dict.fromkeys(
+        e.get("target") for e in edges
+        if e.get("source") == trigger["id"] and e.get("target") in agents))
+    if len(fired) != 1:
+        raise ProviderError(
+            "the trigger must be wired into exactly one agent node "
+            f"(found {len(fired)})")
+    entry = fired[0]
+    # entry first so as_start_meta()'s agents array leads with the agent whose
+    # provider/model the head line already reports.
+    agents = {entry: agents[entry],
+              **{k: v for k, v in agents.items() if k != entry}}
+
+    routers = {n["id"]: _compile_router(n, nodes, edges, agents)
+               for n in nodes.values() if n.get("type") == "router"}
+
+    flow_edges = _flow_edges(agents, routers, nodes, edges)
+    _require_reachable(entry, agents, flow_edges)
+
+    t_cfg = trigger.get("config") or {}
+    limits = {**agents[entry].limits,
+              "max_steps": _max_steps(t_cfg)}
+
+    trigger_input = t_cfg.get("input") or ""
+    return GraphSpec(
+        graph_id=graph_id,
+        graph_rev=graph_rev,
+        entry=entry,
+        agents=agents,
+        routers=routers,
+        flow_edges=flow_edges,
+        limits=limits,
+        input=input_override if input_override is not None else trigger_input,
+    )
+
+
+def _compile_agent(node: dict, nodes: dict, edges: list, registry: dict, *,
+                   graph_id: str, graph_rev: int, qualify: bool) -> AgentSpec:
+    """Resolve one agent node's engine, tools, params and limits."""
+    a_cfg = node.get("config") or {}
+    agent_name = a_cfg.get("name") or "AGENT"
+    who = f"agent {agent_name!r} " if qualify else "agent "
 
     def _into(target_handle: str) -> list:
         return [nodes.get(e.get("source")) for e in edges
-                if e.get("target") == agent["id"]
+                if e.get("target") == node["id"]
                 and e.get("targetHandle") == target_handle
                 and nodes.get(e.get("source"))]
 
     engines = [n for n in _into("engine") if n.get("type") == "engine"]
     if len(engines) != 1:
         raise ProviderError(
-            f"agent needs exactly one engine wired in (found {len(engines)})")
+            f"{who}needs exactly one engine wired in (found {len(engines)})")
     e_cfg = engines[0].get("config") or {}
     provider_id = e_cfg.get("provider") or ""
     adapter = registry.get(provider_id)
@@ -129,7 +332,9 @@ def compile_graph(graph: dict, registry: dict, *,
             "custom tools not supported over cli transport — use the api "
             "transport or remove the tool nodes")
 
-    # unique tool instance names: auto-suffix duplicates (http_fetch_2, ...)
+    # unique tool instance names: auto-suffix duplicates (http_fetch_2, ...).
+    # Uniqueness is PER AGENT, not per graph: each agent's model only ever sees
+    # its own tool list, so two agents may both carry a plain "http_fetch".
     tool_specs, seen = [], {}
     for n in tool_nodes:
         t_cfg = n.get("config") or {}
@@ -153,20 +358,14 @@ def compile_graph(graph: dict, registry: dict, *,
             limits[k] = int(v)
     limits["max_turns"] = min(limits["max_turns"], _MAX_TURNS_CEILING)
 
-    trigger_input = ""
-    for n in nodes.values():
-        if n.get("type") == "trigger":
-            trigger_input = (n.get("config") or {}).get("input") or ""
-            break
-
     params = dict(a_cfg.get("params") or {})
     if transport:
         params["transport"] = transport
 
     return AgentSpec(
-        graph_id=str(graph.get("id") or ""),
-        graph_rev=int(graph.get("rev") or 0),
-        agent_name=a_cfg.get("name") or "AGENT",
+        graph_id=graph_id,
+        graph_rev=graph_rev,
+        agent_name=agent_name,
         provider_id=provider_id,
         model=model,
         transport=transport,
@@ -174,8 +373,138 @@ def compile_graph(graph: dict, registry: dict, *,
         params=params,
         tool_specs=tool_specs,
         limits=limits,
-        input=input_override if input_override is not None else trigger_input,
+        input="",          # the graph owns the trigger input, not the node
+        node_id=node["id"],
     )
+
+
+def _compile_router(node: dict, nodes: dict, edges: list,
+                    agents: dict) -> RouterSpec:
+    """Resolve one router node's branches, else and feeding agent.
+
+    A branch is matched to its outgoing edge by ``sourceHandle``: either the
+    positional ``case_<i>`` the canvas emits, or the branch name itself, so
+    renaming a branch on the canvas doesn't silently orphan its edge.
+    """
+    cfg = node.get("config") or {}
+    label = cfg.get("label") or cfg.get("name") or node["id"]
+    mode = str(cfg.get("mode") or "decide").lower()
+    if mode not in ("decide", "match"):
+        raise ProviderError(
+            f"router {label!r} has an unknown mode: {mode!r} "
+            "(expected 'decide' or 'match')")
+
+    raw = [b for b in (cfg.get("branches") or []) if isinstance(b, dict)]
+    if not raw:
+        raise ProviderError(f"router {label!r} needs at least one branch")
+
+    out_edges = [e for e in edges if e.get("source") == node["id"]]
+    branches = []
+    for i, b in enumerate(raw):
+        name = str(b.get("name") or f"case_{i}")
+        handles = {f"case_{i}", name}
+        targets = list(dict.fromkeys(
+            e.get("target") for e in out_edges
+            if str(e.get("sourceHandle") or "") in handles))
+        if len(targets) != 1:
+            raise ProviderError(
+                f"router {label!r} branch {name!r} needs exactly one outgoing "
+                f"edge (found {len(targets)})")
+        target = nodes.get(targets[0])
+        if target is None:
+            raise ProviderError(
+                f"router {label!r} branch {name!r} points at a missing node")
+        if target.get("type") not in ("agent", "output"):
+            raise ProviderError(
+                f"router {label!r} branch {name!r} must target an agent or an "
+                f"output node (targets a {target.get('type')!r} node)")
+        branches.append({"name": name, "when": str(b.get("when") or ""),
+                         "target_node": target["id"]})
+
+    names = [b["name"] for b in branches]
+    if len(set(names)) != len(names):
+        raise ProviderError(f"router {label!r} has duplicate branch names")
+    else_branch = str(cfg.get("else") or "")
+    if else_branch not in names:
+        raise ProviderError(
+            f"router {label!r} needs an 'else' naming one of its branches "
+            f"({', '.join(names)})")
+
+    feeders = list(dict.fromkeys(
+        e.get("source") for e in edges
+        if e.get("target") == node["id"] and e.get("source") in agents))
+    if len(feeders) != 1:
+        raise ProviderError(
+            f"router {label!r} needs exactly one agent wired into it "
+            f"(found {len(feeders)})")
+
+    return RouterSpec(node_id=node["id"], mode=mode, branches=branches,
+                      else_branch=else_branch, source_agent=feeders[0])
+
+
+def _flow_edges(agents: dict, routers: dict, nodes: dict, edges: list) -> dict:
+    """Control-flow adjacency for every agent and router node.
+
+    An agent may hand off to at most ONE agent or router. Fan-out is refused
+    rather than silently truncated: two live successors sharing one message
+    thread is a parallelism feature nobody designed, and picking one at random
+    would make the canvas lie about what runs.
+    """
+    flow: dict = {}
+    for aid, agent in agents.items():
+        outs = list(dict.fromkeys(
+            e.get("target") for e in edges
+            if e.get("source") == aid
+            and (nodes.get(e.get("target")) or {}).get("type") in _FLOW_TYPES))
+        live = [t for t in outs
+                if nodes[t].get("type") in ("agent", "router")]
+        if len(live) > 1:
+            raise ProviderError(
+                f"agent {agent.agent_name!r} has more than one outgoing "
+                "control-flow edge; wire it into a router to branch")
+        # A live successor wins over a terminal output edge: an agent wired to
+        # BOTH an output node and a next agent is mid-edit on the canvas, and
+        # ending the run there would be the surprising reading.
+        flow[aid] = live or outs
+    for rid, router in routers.items():
+        flow[rid] = list(dict.fromkeys(b["target_node"]
+                                       for b in router.branches))
+    return flow
+
+
+def _require_reachable(entry: str, agents: dict, flow_edges: dict) -> None:
+    """Every agent must be reachable from the trigger.
+
+    An orphaned agent is always a wiring mistake, and it is the expensive kind:
+    the canvas shows a configured agent that silently never runs, so the user
+    debugs the prompt instead of the edge."""
+    seen, stack = set(), [entry]
+    while stack:
+        node_id = stack.pop()
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        stack.extend(flow_edges.get(node_id) or [])
+    for node_id, agent in agents.items():
+        if node_id not in seen:
+            raise ProviderError(
+                f"agent {agent.agent_name!r} is not reachable from the trigger")
+
+
+def _max_steps(trigger_config: dict) -> int:
+    """Read the graph's step budget off the trigger node, clamped.
+
+    It lives on the trigger because that is the node that owns "how this graph
+    runs" (the schedule is already there), not on any one agent — a cycle's
+    budget belongs to nobody in particular. Both ``max_steps`` and
+    ``limits.max_steps`` are accepted; the canvas writes one, hand-edited JSON
+    tends to write the other."""
+    raw = (trigger_config.get("limits") or {}).get(
+        "max_steps", trigger_config.get("max_steps"))
+    steps = _DEFAULT_MAX_STEPS
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+        steps = int(raw)
+    return min(steps, _MAX_STEPS_CEILING)
 
 
 def run_tool_loop(adapter, model: str, messages: list, params: dict,
@@ -332,7 +661,10 @@ class AgentRunner:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def start(self, spec: AgentSpec, trigger: str) -> str:
+    def start(self, spec: "GraphSpec", trigger: str) -> str:
+        # The entry agent's provider is checked here, synchronously, so a
+        # registry that lost an adapter between compile and run is a 400 the
+        # caller sees rather than a run file that errors a millisecond later.
         adapter = self.registry.get(spec.provider_id)
         if adapter is None:
             raise ProviderError(f"unknown provider: {spec.provider_id!r}")
@@ -353,15 +685,15 @@ class AgentRunner:
             raise
         with self._lock:
             self._active.add(run_id)
-        threading.Thread(target=self._run, args=(adapter, spec, run_id, path),
+        threading.Thread(target=self._run, args=(spec, run_id, path),
                          name=f"agent-{run_id}", daemon=True).start()
         return run_id
 
-    def _run(self, adapter, spec: AgentSpec, run_id: str, path: Path) -> None:
+    def _run(self, spec: "GraphSpec", run_id: str, path: Path) -> None:
         sink = AgentFileSink(path)
         try:
-            self._warmup(adapter, sink)
-            stats = self._loop(adapter, spec, run_id, sink)
+            self._warmup(spec, sink)
+            stats = self._loop(spec, sink)
             sink.done(_final_stats(sink, stats))
         except ProviderError as exc:
             sink.error(str(exc))
@@ -374,10 +706,23 @@ class AgentRunner:
 
     # -- the loop ----------------------------------------------------------
 
-    def _warmup(self, adapter, sink: AgentFileSink) -> None:
-        """Cold engines get started; warm ones pass through. Never unloads
-        anyone else's model — VRAM admission control is deliberately not
-        this layer's job."""
+    def _warmup(self, spec: "GraphSpec", sink: AgentFileSink) -> None:
+        """Warm every DISTINCT engine the graph will speak to, entry first.
+
+        A two-agent graph split across ollama and llama.cpp would otherwise
+        stall halfway through on a cold second engine — after the first agent
+        has already burned real tokens. Deduped by provider id, and still
+        never unloads anyone else's model: VRAM admission control is
+        deliberately not this layer's job."""
+        for provider_id in spec.engines():
+            adapter = self.registry.get(provider_id)
+            if adapter is None:
+                raise ProviderError(f"unknown provider: {provider_id!r}")
+            self._warmup_one(adapter, provider_id, sink)
+
+    def _warmup_one(self, adapter, provider_id: str,
+                    sink: AgentFileSink) -> None:
+        """Cold engine gets started; a warm one passes through."""
         try:
             state = adapter.status().state
         except Exception:
@@ -385,33 +730,35 @@ class AgentRunner:
         caps = adapter.capabilities()
         if state == "up" or not getattr(caps, "can_start", False):
             sink.event({"t": "warmup", "action": "none", "ok": True,
-                        "detail": state, "ts": now()})
+                        "detail": state, "provider": provider_id, "ts": now()})
             return
         sink.event({"t": "warmup", "action": "start", "ok": True,
-                    "detail": "starting engine", "ts": now()})
+                    "detail": "starting engine", "provider": provider_id,
+                    "ts": now()})
         adapter.start()
         deadline = now() + _WARMUP_TIMEOUT_S
         while now() < deadline:
             try:
                 if adapter.status().state == "up":
                     sink.event({"t": "warmup", "action": "start", "ok": True,
-                                "detail": "engine up", "ts": now()})
+                                "detail": "engine up", "provider": provider_id,
+                                "ts": now()})
                     return
             except Exception:
                 pass
             time.sleep(_WARMUP_POLL_S)
         raise ProviderError("engine did not come up within warmup timeout")
 
-    def _loop(self, adapter, spec: AgentSpec, run_id: str,
-              sink: AgentFileSink) -> dict:
-        tools = build_tools(spec.tool_specs)
-        messages: list = []
-        if spec.system:
-            messages.append({"role": "system", "content": spec.system})
-        messages.append({"role": "user", "content": spec.input or "Begin."})
-        return run_tool_loop(adapter, spec.model, messages, spec.params, sink,
-                             tools=tools, audit_path=self.audit_path,
-                             limits=spec.limits)
+    def _loop(self, spec: "GraphSpec", sink: AgentFileSink) -> dict:
+        """Hand the compiled graph to the LangGraph runtime.
+
+        Imported here and not at module scope on purpose: ``lc_runtime`` pulls
+        in langgraph and langchain-core, and memsom's core is stdlib-only. A
+        machine that never runs an agent never pays for the import, and one
+        that tries gets a ProviderError naming the extra instead of a
+        traceback at server boot."""
+        from memsom.providers.lc_runtime import run_graph
+        return run_graph(spec, self.registry, sink, self.audit_path)
 
     # -- reads -------------------------------------------------------------
 

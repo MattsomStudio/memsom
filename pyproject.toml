@@ -51,6 +51,14 @@ bge = ["FlagEmbedding>=1.4.0"]
 # extra isn't installed (see memsom/interface/telemetry.py).
 panel = ["psutil>=7"]
 
+# The AGENTS graph runtime (memsom.providers.lc_runtime + lc_model): runs a
+# canvas of agents on LangGraph's StateGraph. Opt-in ONLY — the core stays
+# zero-dependency, the import is lazy (confined to those two modules, reached
+# only when a run actually starts), and a machine without this extra gets a
+# ProviderError naming it rather than a boot-time failure. langchain-core and
+# langgraph-prebuilt arrive transitively as langgraph's own dependencies.
+agents = ["langgraph>=1.2,<2"]
+
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"
 
