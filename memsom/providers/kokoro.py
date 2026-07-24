@@ -40,8 +40,6 @@ from __future__ import annotations
 import base64
 import io
 import wave
-
-import numpy as np
 from pathlib import Path
 
 from memsom.providers.base import Capabilities, ProviderError
@@ -191,6 +189,7 @@ def _wav_bytes(samples, sample_rate: int) -> bytes:
     """A Kokoro waveform (numpy float32 in [-1, 1], shape (N,) or (1, N)) ->
     a little-endian 16-bit mono WAV byte buffer. Uses the stdlib wave module so
     there is no torchaudio/soundfile encoder dependency in this hot path."""
+    import numpy as np  # optional dep — only voice synthesis needs it, not core import
     arr = np.asarray(samples, dtype=np.float32)
     arr = np.squeeze(arr)
     if arr.ndim != 1:

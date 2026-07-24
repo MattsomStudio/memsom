@@ -30,8 +30,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import numpy as np
-
 from memsom.providers.base import ProviderError, run_no_window
 from memsom.providers.voice_base import VoiceAdapter
 
@@ -153,6 +151,7 @@ def _decode_to_pcm16k(audio_bytes: bytes) -> "np.ndarray":
     """Decode any ffmpeg-readable audio (opus-in-webm from MediaRecorder, wav,
     ogg, ...) to a mono 16 kHz float32 numpy array. ffmpeg autodetects the
     container from the stream, so no per-format branch is needed."""
+    import numpy as np  # optional dep — only STT decoding needs it, not core import
     if not audio_bytes:
         raise ProviderError("no audio bytes to transcribe")
     ffmpeg = shutil.which("ffmpeg")
