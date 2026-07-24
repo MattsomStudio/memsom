@@ -209,7 +209,16 @@ class SessionRunner:
         path = self._path(session_id)
         if not path.is_file():
             return {"events": [], "cursor": cursor, "status": "unknown"}
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # split on "\n" only — records are newline-delimited by construction
+        # (FileSink._write). str.splitlines() also breaks on U+2028/U+2029/
+        # U+0085, which json.dumps(ensure_ascii=False) writes literally, so it
+        # would fragment and silently drop any record carrying those chars.
+        # Drop the single trailing "" that split() leaves after the final "\n"
+        # (splitlines does not) — else cursor=len(lines) overshoots by one and
+        # buries the next record below the cursor on every subsequent poll.
+        lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
         events = []
         for line in lines[cursor:]:
             line = line.strip()
@@ -230,7 +239,7 @@ class SessionRunner:
         out = []
         for p in files:
             try:
-                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = p.read_text(encoding="utf-8", errors="replace").split("\n")
             except OSError:
                 continue
             head = _first_json(lines)

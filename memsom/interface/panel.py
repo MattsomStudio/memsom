@@ -633,24 +633,16 @@ def _audit_result(config: "PanelConfig", knob_id, result) -> None:
         pass
 
 
-def scan_crash_markers(audit_log_path, *, tail_lines: int = 4000) -> list:
+def scan_crash_markers(audit_log_path, *, window_bytes: int = 512 * 1024) -> list:
     """Scan the audit log tail for a 'pending' intent line with no following
-    result line for the same knob — evidence of a crash mid-write."""
+    result line for the same knob — evidence of a crash mid-write. Reads only
+    the tail window (the audit log is append-only and never rotated, so a
+    whole-file read grows unbounded per knobs render)."""
     path = Path(audit_log_path)
     if not path.is_file():
         return []
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    if len(lines) > tail_lines:
-        lines = lines[-tail_lines:]
     pending: dict = {}
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in _tail_jsonl(path, window_bytes=window_bytes):
         knob = rec.get("knob")
         if knob is None:
             continue
@@ -922,6 +914,9 @@ class MemoryCache:
         # multi-second tab stall — and the data is a snapshot either way.
         self._stale_ok = stale_ok
         self._refreshing = False
+        # bumped by invalidate(); a background rebuild that started before an
+        # invalidate carries a stale generation and must not commit its result.
+        self._gen = 0
 
     def get(self, *, refresh: bool = False) -> dict:
         with self._lock:
@@ -947,9 +942,10 @@ class MemoryCache:
         if self._refreshing:
             return
         self._refreshing = True
-        threading.Thread(target=self._refresh_bg, daemon=True).start()
+        gen = self._gen
+        threading.Thread(target=self._refresh_bg, args=(gen,), daemon=True).start()
 
-    def _refresh_bg(self) -> None:
+    def _refresh_bg(self, gen: int) -> None:
         data = None
         try:
             data = self._builder()
@@ -957,13 +953,18 @@ class MemoryCache:
             print(f"[memsom-panel] background cache refresh failed:\n"
                   f"{traceback.format_exc()}", file=sys.stderr)
         with self._lock:
+            self._refreshing = False
+            # An invalidate() during this build bumped the generation — the
+            # data we just built predates a write, so discard it and let the
+            # next get() rebuild synchronously.
+            if gen != self._gen:
+                return
             if data is not None:
                 self._data = data
                 self._at_iso = self._now()
             # stamp the time either way: a failing builder must not be retried
             # on every single request.
             self._at = self._clock()
-            self._refreshing = False
 
     def invalidate(self) -> None:
         """Force the next get() to rebuild synchronously — used after a write
@@ -971,6 +972,7 @@ class MemoryCache:
         with self._lock:
             self._data = None
             self._at = None
+            self._gen += 1
 
     def prime(self) -> None:
         """Warm the cache off the request path (called at server start)."""
@@ -2607,6 +2609,14 @@ def make_handler(config: PanelConfig):
             origin = self.headers.get("Origin")
             if origin is not None and origin not in _allowed_origins(config):
                 self._reject(403, {"ok": False, "error": "origin not allowed"})
+                return None
+
+            # This server frames bodies by Content-Length only. A chunked body
+            # would leave unread octets in rfile and desync the next request on
+            # a keep-alive connection, so refuse it and close.
+            if self.headers.get("Transfer-Encoding"):
+                self._reject(400, {"ok": False,
+                                   "error": "Transfer-Encoding not supported"})
                 return None
 
             raw_len = self.headers.get("Content-Length")

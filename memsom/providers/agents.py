@@ -421,7 +421,13 @@ class AgentRunner:
         path = self._path(run_id)
         if not path.is_file():
             return {"events": [], "cursor": cursor, "status": "unknown"}
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # newline-only split; see SessionStore.read_since for why splitlines()
+        # is wrong here (it breaks on U+2028/U+2029/U+0085 and drops records).
+        # Drop the trailing "" from the final "\n" so cursor=len(lines) doesn't
+        # overshoot and bury the next record below the cursor on later polls.
+        lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
         events = []
         for line in lines[cursor:]:
             line = line.strip()
@@ -441,7 +447,7 @@ class AgentRunner:
         out = []
         for p in files:
             try:
-                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = p.read_text(encoding="utf-8", errors="replace").split("\n")
             except OSError:
                 continue
             head = _first_json(lines) or {}
@@ -482,7 +488,7 @@ class AgentRunner:
         unterminated — safe because that writer thread died with the process."""
         for p in self.dir.glob("*.jsonl"):
             try:
-                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = p.read_text(encoding="utf-8", errors="replace").split("\n")
             except OSError:
                 continue
             status, _ = self._status_of(p.stem, lines)

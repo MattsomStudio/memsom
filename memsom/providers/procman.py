@@ -55,7 +55,7 @@ class ProcessManager:
         rec = self.record(key)
         if not rec or not rec.get("pid"):
             return False
-        return _pid_alive(rec["pid"])
+        return _pid_alive(rec["pid"], _expected_image(rec.get("argv")))
 
     def start(self, key: str, argv: list, *, port: Optional[int] = None,
               model: Optional[str] = None, cwd: Optional[str] = None) -> dict:
@@ -79,22 +79,48 @@ class ProcessManager:
         if not rec or not rec.get("pid"):
             raise ProviderError(f"{key} is not running (no tracked pid)")
         pid = rec["pid"]
-        _kill_tree(pid)
+        # Only kill if the live PID is still OUR process. Windows recycles PIDs
+        # fast, so a tracked server that crashed may have handed its PID to an
+        # unrelated process/tree — a bare taskkill would force-kill that.
+        killed = False
+        if _pid_alive(pid, _expected_image(rec.get("argv"))):
+            _kill_tree(pid)
+            killed = True
         data = self._load()
         data.pop(key, None)
         self._save(data)
-        return {"ok": True, "stopped_pid": pid}
+        return {"ok": True, "stopped_pid": pid, "killed": killed}
 
 
-def _pid_alive(pid: int) -> bool:
+def _expected_image(argv) -> Optional[str]:
+    """The Windows image name we expect this PID to carry, derived from the
+    tracked argv[0]. Used to reject a recycled PID that now belongs to some
+    other process. Returns None when argv is unknown (fall back to PID-only)."""
+    if not argv:
+        return None
+    exe = os.path.basename(str(argv[0])).lower()
+    if not exe.endswith(".exe"):
+        exe += ".exe"
+    return exe
+
+
+def _pid_alive(pid: int, image: Optional[str] = None) -> bool:
     if sys.platform == "win32":
         try:
+            # CSV (not table) so long image names aren't truncated; the FI
+            # filter already scopes output to this PID.
             out = run_no_window(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5)
-            return str(pid) in out.stdout
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+        text = (out.stdout or "")
+        if str(pid) not in text:
+            return False
+        if image is not None:
+            # first CSV field is the quoted image name: "llama-server.exe",...
+            return f'"{image}"' in text.lower()
+        return True
     try:
         os.kill(pid, 0)
         return True
