@@ -146,6 +146,10 @@ NEGATIVES = [
      "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
     ("uuid", "run id 3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
     ("semver and hex colour", "v1.24.0 shipped, accent #a0f2c4"),
+    # Generic username on purpose: `scripts/scrub_gate.py` scans this tree for
+    # author-identifying tokens and correctly flagged the real one when this
+    # corpus first landed. What the case is testing is the backslashes and the
+    # length, neither of which needs a real account name.
     ("windows path",
      r"C:\Users\dev\AppData\Local\Temp\build\artifacts\notes.md"),
     ("base64 of ordinary text",

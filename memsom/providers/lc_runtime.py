@@ -1584,6 +1584,20 @@ def run_graph(spec, registry: dict, sink, audit_path,
     checkpointed (a throwaway or a test that never pauses).
     """
     lc = _lc()
+    # The LAST place a fork can be refused, and the one that has both the spec
+    # and the checkpoint. `_fork_checkpoint` below already defends against the
+    # direct caller on the step ARGUMENT ("a script, a test, that never went
+    # through the handler") — this is the same defence for the graph SHAPE, which
+    # is the half it could not see, because it is handed a `fork_from` dict and
+    # never the spec.
+    #
+    # Why a fan-out cannot be forked: one parallel superstep runs N sibling nodes
+    # and writes ONE checkpoint, so the JSONL's N node events collapse to a single
+    # step in the DB and "fork from after B" names no state that exists.
+    if fork_from is not None:
+        from memsom.providers.agents import _fan_sets
+        if _fan_sets(spec.agents, spec.flow_edges):
+            raise ProviderError("forking a fan-out graph is not supported yet")
     ctx = lc.RunContext(sink=sink, audit_path=Path(audit_path),
                         limits=dict(spec.limits),
                         scope=dict(getattr(spec, "scope", None) or {}))

@@ -677,6 +677,37 @@ def _require_reachable(entry: str, agents: dict, flow_edges: dict) -> None:
                 f"agent {agent.agent_name!r} is not reachable from the trigger")
 
 
+def fork_steps(events: list) -> list:
+    """The superstep numbers a run can be forked from, ascending.
+
+    Read off each ``node`` event's own ``step`` field, deduplicated — NOT
+    counted. A resume REPLAYS the parent task it paused inside, so a run that
+    stopped at an approval gate emits a second ``node`` line for a superstep
+    that already ran (measured: a gated two-agent chain gives node events
+    ``[A, A, B]`` across two supersteps). Counting them offered the user a step
+    that had no checkpoint and shifted every later one onto the wrong state —
+    picking "after A" silently seeded the state after B and produced a fork that
+    ran nothing and reported ``done``. The replayed event carries the same
+    number as the original, so deduplicating on it is exact.
+
+    Runs written before the field existed fall back to the positional count,
+    which is right for them: they are all runs that never paused, or the field
+    would have been there.
+
+    Lives here rather than in ``agent_handlers`` (where it was written, and from
+    where it is still re-exported) because :meth:`AgentRunner.fork` has to apply
+    it too. A rule that only the HTTP route knows is a rule that holds for
+    exactly one caller.
+    """
+    nodes = [ev for ev in events if ev.get("t") == "node"]
+    stamped = [ev["step"] for ev in nodes
+               if isinstance(ev.get("step"), int)
+               and not isinstance(ev.get("step"), bool)]
+    if len(stamped) != len(nodes):
+        return list(range(1, len(nodes) + 1))
+    return sorted(set(stamped))
+
+
 def _fan_sets(agents: dict, flow_edges: dict) -> dict:
     """Every agent that fans out → the sibling agents it fans out TO.
 
@@ -1306,10 +1337,38 @@ class AgentRunner:
         *spec* is compiled by the caller from the CURRENT graph doc — same
         precedent as a post-restart resume — so a fork taken after fixing a
         prompt runs the fix rather than the mistake it was forked to escape.
+
+        **What it refuses, and why that moved here.** Every one of these lived
+        only in ``handle_run_fork``, which made them properties of the HTTP route
+        rather than of forking — so a scheduler, an MCP tool, a script or a
+        future second route got none of them. The route keeps its own copies
+        because it can answer 404 vs 400 vs 409 and this cannot; these are the
+        backstop, and they run before a run id, a file and a thread are spent.
         """
         adapter = self.registry.get(spec.provider_id)
         if adapter is None:
             raise ProviderError(f"unknown provider: {spec.provider_id!r}")
+        # Fan-out, and the reason is the ordinal the whole feature is built on:
+        # one parallel superstep runs N sibling nodes and writes ONE checkpoint,
+        # so N node events collapse to a single step in the DB and "fork from
+        # after B" names no state. `_fan_sets` rather than `spec.joins` because a
+        # fan-out that never reconverges has no join to find and breaks the
+        # mapping just the same.
+        if _fan_sets(spec.agents, spec.flow_edges):
+            raise ProviderError("forking a fan-out graph is not supported yet")
+        data = self.read_since(source_run_id or "", 0)
+        if data["status"] == "unknown":
+            raise ProviderError(f"unknown run: {source_run_id!r}")
+        if data["status"] not in ("done", "error"):
+            # A run still in flight has no settled steps: the state behind its
+            # last node event is being written as this reads it.
+            raise ProviderError(
+                "only a finished run can be forked "
+                f"(this one is {data['status']})")
+        steps = fork_steps(data["events"])
+        if step not in steps:
+            raise ProviderError(
+                f"step must be one of {steps} for run {source_run_id!r}")
         if not self._slots.acquire(blocking=False):
             raise ProviderError("an agent run is already active; try again later")
         run_id = new_session_id()

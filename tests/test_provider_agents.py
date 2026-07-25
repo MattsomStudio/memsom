@@ -5911,15 +5911,115 @@ def test_fork_of_an_aged_out_run_fails_cleanly(tmp_path):
 
 def test_forking_a_step_that_never_completed_is_refused(tmp_path):
     """A step with no checkpoint behind it must fail rather than silently fork
-    the state BEFORE it — which is what a positional lookup would have done."""
+    the state BEFORE it — which is what a positional lookup would have done.
+
+    CHANGED 2026-07-25: it now fails EARLIER. This used to spawn the fork and let
+    it die at `_fork_checkpoint` mid-run, because the step list was checked only
+    by the HTTP route; `AgentRunner.fork` applies it too, so an impossible step
+    costs no run id, no file and no thread. Strictly stronger — the run that
+    used to exist only to report its own failure never starts.
+
+    The two failure modes are now cleanly separated, and the neighbouring
+    aged-out test pins the other one: a step the run never had is refused up
+    front, a step it DID have whose checkpoint was later evicted still errors at
+    run time, because only the DB can answer that.
+    """
     runner, reg = _fork_runner(tmp_path, FakeAdapter([("A", {}), ("B", {})]))
     src = runner.start(compile_graph(_chain_doc(), reg), "manual")
     _drain(runner, src)
     reg["fake"] = FakeAdapter([("x", {})])
-    fid = runner.fork(compile_graph(_chain_doc(), reg), src, 9)
-    _, status, stats = _drain(runner, fid)
-    assert status == "error"
-    assert "no checkpoint at step 9" in stats["error"]
+    with pytest.raises(ProviderError) as ei:
+        runner.fork(compile_graph(_chain_doc(), reg), src, 9)
+    assert "step must be one of [1, 2]" in str(ei.value)
+    # and nothing was spawned: the slot is free for a real run
+    assert runner.fork(compile_graph(_chain_doc(), reg), src, 1)
+
+
+# -- the runner enforces forking, not just the HTTP route --------------------
+
+
+def test_the_runner_refuses_to_fork_a_fan_out_graph(tmp_path):
+    """The named item. Every fork rule lived in `handle_run_fork`, which made
+    them properties of the ROUTE rather than of forking — so a scheduler, an MCP
+    tool, a script or a second route got none of them.
+
+    Fan-out is the one that corrupts rather than merely fails: a parallel
+    superstep runs N sibling nodes and writes ONE checkpoint, so N node events
+    collapse to a single step in the DB and "fork from after B" names state that
+    does not exist. The route refused it; the runner handed it through.
+    """
+    runner, reg = _fork_runner(tmp_path, FakeAdapter([("A", {}), ("B", {})]))
+    src = runner.start(compile_graph(_chain_doc(), reg), "manual")
+    _drain(runner, src)
+    with pytest.raises(ProviderError) as ei:
+        runner.fork(compile_graph(_fan_doc(), reg), src, 1)
+    assert "fan-out" in str(ei.value)
+
+
+def test_the_runner_refuses_to_fork_an_unfinished_run(tmp_path):
+    """A run still in flight has no settled steps — the state behind its last
+    node event is being written as this reads it."""
+    gate = threading.Event()
+    adapter = FakeAdapter([("A", {}), ("B", {})], gate=gate)
+    runner, reg = _fork_runner(tmp_path, adapter)
+    src = runner.start(compile_graph(_chain_doc(), reg), "manual")
+    try:
+        with pytest.raises(ProviderError) as ei:
+            runner.fork(compile_graph(_chain_doc(), reg), src, 1)
+        assert "only a finished run can be forked" in str(ei.value)
+    finally:
+        gate.set()
+        _drain(runner, src)
+
+
+def test_the_runner_refuses_to_fork_a_run_it_has_never_heard_of(tmp_path):
+    runner, reg = _fork_runner(tmp_path, FakeAdapter([("A", {})]))
+    with pytest.raises(ProviderError) as ei:
+        runner.fork(compile_graph(_chain_doc(), reg), "no-such-run", 1)
+    assert "unknown run" in str(ei.value)
+
+
+def test_run_graph_itself_refuses_a_fan_out_fork(tmp_path):
+    """The lowest layer, and the last one that can say no.
+
+    `_fork_checkpoint` already defends against a direct caller on the step
+    ARGUMENT — its own comment says so, "a script, a test, that never went
+    through the handler" — but it is handed a `fork_from` dict and never the
+    spec, so the graph SHAPE was the half it could not see.
+    """
+    from memsom.providers import lc_runtime
+
+    adapter = FakeAdapter([("hi", {})])
+    spec = compile_graph(_fan_doc(), _registry(adapter))
+    sink = AgentFileSink(tmp_path / "run.jsonl")
+    with pytest.raises(ProviderError) as ei:
+        lc_runtime.run_graph(
+            spec, _registry(adapter), sink, tmp_path / "audit.jsonl",
+            run_id="r1", checkpoint_path=tmp_path / "checkpoints.db",
+            fork_from={"source_run_id": "other", "step": 1})
+    assert "fan-out" in str(ei.value)
+
+
+def test_forking_a_plain_chain_still_works(tmp_path):
+    """Keeps all four refusals honest — a fork path that refused everything
+    would pass every test above."""
+    runner, reg = _fork_runner(tmp_path, FakeAdapter([("A", {}), ("B", {})]))
+    src = runner.start(compile_graph(_chain_doc(), reg), "manual")
+    _drain(runner, src)
+    reg["fake"] = FakeAdapter([("B2", {})])
+    fid = runner.fork(compile_graph(_chain_doc(), reg), src, 1)
+    _events, status, _ = _drain(runner, fid)
+    assert status == "done"
+
+
+def test_the_route_and_the_runner_agree_about_the_step_list(tmp_path):
+    """`fork_steps` moved into `agents` so both can apply it. Re-exported from
+    `agent_handlers` because that is the name it has always been imported by —
+    and asserted to be the SAME function, so the two can never drift apart into
+    two rules that merely look alike."""
+    from memsom.providers import agent_handlers, agents as agents_mod
+
+    assert agent_handlers.fork_steps is agents_mod.fork_steps
 
 
 def test_fork_needs_a_checkpointer(tmp_path):

@@ -7,7 +7,12 @@ audited — node counts and tool names only.
 
 from __future__ import annotations
 
-from memsom.providers.agents import AgentRunner, _fan_sets, compile_graph
+from memsom.providers.agents import (
+    AgentRunner,
+    _fan_sets,
+    compile_graph,
+    fork_steps,
+)
 from memsom.providers.agent_store import GraphStore
 from memsom.providers.base import ProviderError
 from memsom.providers.handlers import _audit
@@ -177,30 +182,9 @@ def handle_approve(store: GraphStore, runner: AgentRunner, registry: dict,
     return 200, {"ok": True, "run_id": run_id}
 
 
-def fork_steps(events: list) -> list:
-    """The superstep numbers a run can be forked from, ascending.
-
-    Read off each ``node`` event's own ``step`` field, deduplicated — NOT
-    counted. A resume REPLAYS the parent task it paused inside, so a run that
-    stopped at an approval gate emits a second ``node`` line for a superstep
-    that already ran (measured: a gated two-agent chain gives node events
-    ``[A, A, B]`` across two supersteps). Counting them offered the user a step
-    that had no checkpoint and shifted every later one onto the wrong state —
-    picking "after A" silently seeded the state after B and produced a fork that
-    ran nothing and reported ``done``. The replayed event carries the same
-    number as the original, so deduplicating on it is exact.
-
-    Runs written before the field existed fall back to the positional count,
-    which is right for them: they are all runs that never paused, or the field
-    would have been there.
-    """
-    nodes = [ev for ev in events if ev.get("t") == "node"]
-    stamped = [ev["step"] for ev in nodes
-               if isinstance(ev.get("step"), int)
-               and not isinstance(ev.get("step"), bool)]
-    if len(stamped) != len(nodes):
-        return list(range(1, len(nodes) + 1))
-    return sorted(set(stamped))
+# `fork_steps` moved to `agents` so AgentRunner.fork can enforce the step list
+# itself instead of trusting whoever called it. It is imported above, so the
+# name is still available here — which is how it has always been imported.
 
 
 def handle_run_fork(store: GraphStore, runner: AgentRunner, registry: dict,
