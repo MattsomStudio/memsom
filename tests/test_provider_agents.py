@@ -108,6 +108,36 @@ class ExplodingTool(Tool):
         raise ToolError("nope")
 
 
+class CountingTool(Tool):
+    """Counts its own EXECUTIONS on the class.
+
+    `state_set` cannot answer the question item 3 is about: a repeated write of
+    the same key to the same value is invisible, which is exactly why it was the
+    tool chosen to pin the old replay behaviour. Only a side effect that
+    accumulates distinguishes "ran once" from "ran twice, idempotently".
+    """
+
+    type = "counting_tool"
+    description = "counts how many times it really ran"
+    parameters = {"type": "object", "properties": {"q": {"type": "string"}},
+                  "required": ["q"]}
+    runs = 0
+
+    def run(self, arguments: dict, ctx) -> str:
+        type(self).runs += 1
+        return f"RAN-{type(self).runs}"
+
+
+@pytest.fixture
+def counting_tool(monkeypatch):
+    CountingTool.runs = 0
+    monkeypatch.setitem(tool_registry.BUILTIN_TOOLS, CountingTool.type,
+                        CountingTool)
+    monkeypatch.setitem(tool_registry.BUILTIN_TOOLS, FakeTool.type, FakeTool)
+    yield CountingTool
+    CountingTool.runs = 0
+
+
 class FakeFetch(Tool):
     """Stands in for http_fetch: the same TYPE, so the scope table sees it, and
     no socket, so a scope test is about the RULE rather than about the network."""
@@ -1608,16 +1638,21 @@ def test_shared_state_written_before_a_pause_survives_resume(tmp_path,
     assert len(sets) == 1, f"unexpected state_set count: {len(sets)}"
 
 
-def test_a_same_batch_write_replays_on_resume_but_the_value_is_idempotent(
-        tmp_path, fake_tools):
-    """The pre-existing replay gap, pinned rather than papered over.
+def test_a_same_batch_write_does_not_replay_on_resume(tmp_path, fake_tools):
+    """FLIPPED 2026-07-25. This asserted 2 for as long as the replay existed.
 
-    When the scratchpad write and the gated call arrive in the SAME turn they
-    are one ToolNode task, and a resume re-runs that task from the top — so
-    state_set executes a second time. MEASURED: 2. Not fixed here (it is a
-    declined fast-follow); what this proves is that the sidecar fix is
-    IDEMPOTENT under it, because a repeated write is a dict overwrite of the
-    same key with the same value.
+    When the scratchpad write and the gated call arrive in the SAME turn, the
+    resume re-enters the node the gate paused inside and asks for the write
+    again — MEASURED at 2 executions. The old version of this test pinned that
+    number and called the fix a declined fast-follow; `RunContext.calls` is that
+    fix, so the number is now 1.
+
+    Deliberately kept rather than deleted: state_set is the ONE tool for which
+    the old behaviour was harmless (a repeated write is a dict overwrite of the
+    same key with the same value), so this is where the difference between
+    "idempotent under replay" and "does not replay" is visible at all. The tool
+    that could not survive it is covered by
+    `test_a_non_idempotent_sibling_of_a_gated_call_runs_exactly_once`.
     """
     class SameBatch(FakeAdapter):
         def __init__(self) -> None:
@@ -1649,7 +1684,8 @@ def test_a_same_batch_write_replays_on_resume_but_the_value_is_idempotent(
     assert status == "done"
     sets = [e for e in events
             if e["t"] == "tool_result" and e["name"] == "state_set"]
-    assert len(sets) == 2, f"replay shape changed: {len(sets)} state_set calls"
+    assert len(sets) == 1, f"replay shape changed: {len(sets)} state_set calls"
+    # and the value the replay would have rewritten is still readable
     reads = [e for e in events
              if e["t"] == "tool_result" and e["name"] == "state_get"]
     assert reads and reads[-1]["output"] == '"42"'
@@ -3193,6 +3229,263 @@ def test_the_router_decides_at_a_fixed_temperature(tmp_path):
                    if not any(t.get("function", {}).get("name") == "route"
                               for t in (params.get("tools") or []))]
     assert agent_calls and agent_calls[0]["temperature"] == 1.9
+
+
+# -- exactly once across a resume -------------------------------------------
+
+
+def _counting_doc() -> dict:
+    """One agent holding [counting_tool, fake_tool(gated)].
+
+    The smallest shape that reproduces the real hazard: an ungated tool with a
+    side effect batched into the SAME turn as a gated one.
+    """
+    doc = _e2e_doc()
+    _node(doc, "n5")["config"] = {"tool": "fake_tool", "options": {},
+                                  "require_approval": True}
+    doc["nodes"].append({"id": "n8", "type": "tool",
+                         "config": {"tool": "counting_tool", "options": {}}})
+    doc["edges"].append({"id": "e5", "source": "n8", "target": "n6",
+                         "sourceHandle": "tool", "targetHandle": "tools"})
+    return doc
+
+
+class _SameBatchAdapter(FakeAdapter):
+    """Asks for [counting_tool, fake_tool] in ONE turn, then finishes.
+
+    Keyed off what it SEES rather than a call index, because a resume replays
+    part of the paused node and a positional script would desynchronise — the
+    test would then be measuring the script.
+    """
+
+    def __init__(self, *, second_id: str = "c1") -> None:
+        super().__init__([])
+        self.second_id = second_id
+        #: every tool result the MODEL was shown, which is the only place a
+        #: suppressed replay's value is observable — it emits no tool_result.
+        self.tool_text: list = []
+
+    def infer(self, model, messages, params, sink):
+        self.calls.append((model, copy.deepcopy(messages), dict(params)))
+        self.tool_text.extend(
+            str(m.get("content") or "") for m in messages
+            if m.get("role") == "tool" and m.get("name") == "counting_tool")
+        seen = {m.get("name") for m in messages if m.get("role") == "tool"}
+        if "fake_tool" not in seen:
+            return {"tool_calls": [
+                {"id": self.second_id, "name": "counting_tool",
+                 "arguments": {"q": "work"}},
+                {"id": "c2", "name": "fake_tool", "arguments": {"q": "hi"}}]}
+        sink.token(ANSWER_CANARY)
+        return {}
+
+
+def test_a_non_idempotent_sibling_of_a_gated_call_runs_exactly_once(
+        tmp_path, counting_tool):
+    """The headline, and the test that did not exist in any form before.
+
+    A gate protects the call it sits on. The OTHER calls the model batched into
+    the same turn have no interrupt() in front of them, so resuming asked for
+    them a second time — MEASURED at 2. On a real target that is a scan, a POST
+    or a payload firing again with nobody having approved the repeat.
+
+    The existing coverage used state_set, chosen BECAUSE repeating it is free,
+    and only ever claimed the stored value was idempotent. This counts.
+    """
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    assert counting_tool.runs == 1, (
+        f"the tool executed {counting_tool.runs} times across the resume")
+
+
+def test_a_suppressed_replay_leaves_one_pair_in_the_run_log(
+        tmp_path, counting_tool):
+    """The duplicate tool_call/tool_result pair — same id, twice — was the
+    visible half of the bug, and nothing anywhere dedups it: `read_since` is a
+    plain JSONL tail and the only dedup in the repo is `fork_steps`, on `node`
+    events. So the feed has to be right at the point it is written."""
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    events, status, _ = _settle(runner, rid, "done", "error")
+    assert status == "done"
+
+    calls = [e for e in events
+             if e["t"] == "tool_call" and e["name"] == "counting_tool"]
+    results = [e for e in events
+               if e["t"] == "tool_result" and e["name"] == "counting_tool"]
+    assert len(calls) == 1 and len(results) == 1
+    assert results[0]["output"] == "RAN-1"
+
+
+def test_the_audit_shows_one_pending_ok_pair_for_a_replayed_sibling(
+        tmp_path, counting_tool):
+    """The oracle that was NAMED and never asserted.
+
+    A test docstring in this file pointed at "the duplicate-audit note" while
+    never calling `_tool_audit()` — so a second `pending`/`ok` pair, written for
+    a call no human re-approved, went into the one file that is supposed to
+    settle what happened. It does not any more, and the suppression says so in
+    its own line rather than by absence.
+    """
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    _settle(runner, rid, "done", "error")
+
+    entries = _tool_audit_for(tmp_path, "counting_tool")
+    assert entries == ["pending", "ok", "suppressed-replay"], entries
+
+
+def test_a_suppressed_replay_is_announced(tmp_path, counting_tool):
+    """Loud, not silent. Fixing the double execution and leaving no trace would
+    swap one invisible behaviour for another — a reader has to see BOTH that the
+    call ran once and that a repeat was asked for and refused."""
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    events, _status, _ = _settle(runner, rid, "done", "error")
+
+    replays = [e for e in events if e["t"] == "replay"]
+    assert len(replays) == 1
+    assert replays[0]["name"] == "counting_tool" and replays[0]["id"] == "c1"
+
+
+def test_a_suppressed_replay_hands_back_what_the_call_ACTUALLY_returned(
+        tmp_path, counting_tool):
+    """Suppressing the second execution is only half the job — the model still
+    needs an answer, and it has to be the real one.
+
+    This is why the record is written AFTER `_execute_tool` returns rather than
+    next to the counter on the way in: at intent time there is no output to
+    record, so an early write would suppress the call and hand the model an
+    empty string it would then reason from. The model never sees a tool_result
+    event for a suppressed replay, so what it was shown is the only place this
+    is observable.
+    """
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    _events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    assert adapter.tool_text, "the model was never shown a tool result"
+    assert all(t == "RAN-1" for t in adapter.tool_text), adapter.tool_text
+
+
+def test_a_fresh_run_never_consults_the_replay_record(tmp_path, counting_tool):
+    """The record is resume-only, and that is what removes the whole
+    false-positive class: a run that never paused cannot be replaying, so a
+    repeated id inside one uninterrupted run still executes."""
+    class Twice(FakeAdapter):
+        def infer(self, model, messages, params, sink):
+            self.calls.append((model, copy.deepcopy(messages), dict(params)))
+            seen = [m for m in messages if m.get("role") == "tool"]
+            if len(seen) < 2:
+                return {"tool_calls": [{"id": "dup", "name": "counting_tool",
+                                        "arguments": {"q": "work"}}]}
+            sink.token(ANSWER_CANARY)
+            return {}
+
+    doc = _e2e_doc()
+    _node(doc, "n5")["config"] = {"tool": "counting_tool", "options": {}}
+    adapter = Twice([])
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done"
+    assert counting_tool.runs == 2, "a fresh run suppressed a real second call"
+
+
+def test_only_calls_that_actually_RAN_are_recorded(tmp_path, counting_tool):
+    """The record is written after execution, and the deny path proves why.
+
+    A denied call never reaches the tool. If it were recorded anyway — say, on
+    intent, next to the counter — then the refusal would become permanent: the
+    same id could never execute again in that run, and a human changing their
+    mind would be answered with a cached result for something that never ran.
+
+    Asserted positively, on the record itself: the sibling that really ran is in
+    it, the one the human refused is not. The pause is left in place so the file
+    is still on disk to read.
+    """
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+
+    record = _read_calls_record(tmp_path)
+    assert record, "nothing was recorded at all — this test proves nothing"
+    assert "c1" in record and record["c1"]["name"] == "counting_tool"
+    assert "c2" not in record, "a call still waiting on a human was recorded"
+
+    runner.resume(rid, "deny")
+    _events, status, _ = _settle(runner, rid, "done", "error")
+    assert status == "done"
+    assert counting_tool.runs == 1
+
+
+def test_the_replay_record_is_kept_while_paused_and_pruned_when_done(
+        tmp_path, counting_tool):
+    """Same lifecycle as the scratchpad sidecar: it exists only to carry a fact
+    across a pause, so a paused run MUST keep it and a finished one has no use
+    for it. Also pins that the sidecar SWEEP does not eat it — the record's stem
+    is `<run>.calls`, which is not a run id, and asking `_status_of` about that
+    returns something terminal-looking."""
+    adapter = _SameBatchAdapter()
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_counting_doc(), _registry(adapter)),
+                       "manual")
+    _settle(runner, rid, "paused")
+    # `AgentRunner.checkpoints` is `runs_dir.parent / checkpoints.db`, so the
+    # sidecars sit beside it in `<tmp>/shared`, NOT under `runs/`.
+    record = tmp_path / "shared" / f"{rid}.calls.json"
+    assert record.is_file(), "the record was gone before the resume needed it"
+
+    runner.resume(rid, "approve")
+    _settle(runner, rid, "done", "error")
+    assert not record.exists(), "a terminal run kept its replay record"
+
+
+def _tool_audit_for(tmp_path: Path, name: str) -> list:
+    """Every audit result for one tool, in order."""
+    out = []
+    for line in (tmp_path / "audit.jsonl").read_text(
+            encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("action") == "tool" and rec.get("tool") == name:
+            out.append(rec.get("result"))
+    return out
+
+
+def _read_calls_record(tmp_path: Path) -> dict:
+    """The exactly-once record on disk, or {} — asserted against, so it must not
+    be able to answer "nothing recorded" just because the path was wrong."""
+    shared = tmp_path / "shared"
+    files = list(shared.glob("*.calls.json")) if shared.is_dir() else []
+    return json.loads(files[0].read_text(encoding="utf-8")) if files else {}
 
 
 # -- scope: what a run may touch --------------------------------------------

@@ -1511,8 +1511,22 @@ def run_graph(spec, registry: dict, sink, audit_path,
     # RunContext.load_data for which and why. Keyed by run_id, same as the
     # checkpoint thread, and pruned on the same terminal-exit rule.
     if checkpoint_path is not None and run_id:
-        ctx.data_path = Path(checkpoint_path).parent / "shared" / f"{run_id}.json"
+        shared = Path(checkpoint_path).parent / "shared"
+        ctx.data_path = shared / f"{run_id}.json"
         ctx.load_data()
+        # The exactly-once record, a sibling of the scratchpad and keyed the same
+        # way. Same key is what makes a FORK correct for free: a fork is a new
+        # run_id, so it reads no record and re-executes everything it replays,
+        # which is what a fork is FOR.
+        ctx.calls_path = shared / f"{run_id}.calls.json"
+        ctx.load_calls()
+    # Consulted only when this really is a resume — see RunContext.recall_call.
+    # A breakpoint resume (_CONTINUE) counts: it replays the pending node too.
+    # A FORK deliberately does NOT, on top of already having an empty record:
+    # a fork exists to run the work again, and relying on the empty record alone
+    # would make that correctness a property of the file naming rather than of a
+    # decision anybody wrote down.
+    ctx.replaying = resume_decision is not _UNSET
 
     # Built BEFORE the graph, because `_agent_node` resolves each node's gate
     # once at build time rather than looking it up per invocation.
@@ -1672,9 +1686,14 @@ def run_graph(spec, registry: dict, sink, audit_path,
             # The scratchpad sidecar goes with it, for the same reason and on
             # the same rule: it exists only to carry `data` across a pause, so a
             # paused run MUST keep it and a finished one has no use for it.
-            if ctx.data_path is not None:
+            # The exactly-once record goes on the same rule, and for a stronger
+            # version of the same reason: it only means anything to a resume, and
+            # a terminal run has none coming.
+            for sidecar in (ctx.data_path, ctx.calls_path):
+                if sidecar is None:
+                    continue
                 try:
-                    Path(ctx.data_path).unlink(missing_ok=True)
+                    Path(sidecar).unlink(missing_ok=True)
                 except OSError:
                     pass
         if conn is not None:

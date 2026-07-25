@@ -470,6 +470,69 @@ def test_run_context_sync_and_load_data_roundtrip(tmp_path):
     assert reader.data == {"finding": "42", "nested": {"a": [1, 2]}}
 
 
+def test_recall_matches_on_id_AND_name_AND_arguments(tmp_path):
+    """Not id alone, and the difference is the whole safety of the record.
+
+    A model that reuses a tool_call_id for a genuinely different call — other
+    tool, other arguments — must get a real execution, not the earlier result.
+    Matching on the id by itself would hand back somebody else's answer, which is
+    a worse failure than the double execution the record exists to prevent.
+    """
+    sink = AgentFileSink(tmp_path / "run.jsonl")
+    ctx = RunContext(sink=sink, audit_path=tmp_path / "audit.jsonl",
+                     limits=dict(LIMITS))
+    ctx.replaying = True
+    ctx.record_call("c1", "counting_tool", {"q": "a"}, "RAN-1", True)
+
+    assert ctx.recall_call("c1", "counting_tool", {"q": "a"})["output"] == "RAN-1"
+    assert ctx.recall_call("c1", "counting_tool", {"q": "b"}) is None
+    assert ctx.recall_call("c1", "other_tool", {"q": "a"}) is None
+    assert ctx.recall_call("c9", "counting_tool", {"q": "a"}) is None
+
+
+def test_recall_ignores_argument_key_ORDER(tmp_path):
+    """Arguments arrive through JSON parsing, so their key order carries no
+    meaning. Treating it as meaningful would turn a genuine replay into a miss
+    and re-execute the exact call the record exists to stop."""
+    sink = AgentFileSink(tmp_path / "run.jsonl")
+    ctx = RunContext(sink=sink, audit_path=tmp_path / "audit.jsonl",
+                     limits=dict(LIMITS))
+    ctx.replaying = True
+    ctx.record_call("c1", "t", {"a": 1, "b": 2}, "X", True)
+    assert ctx.recall_call("c1", "t", {"b": 2, "a": 1})["output"] == "X"
+
+
+def test_a_fresh_context_never_recalls_anything(tmp_path):
+    """`replaying` is the false-positive defence, and it is structural: a run
+    that never paused cannot be replaying, so it never consults the record at
+    all — no matter what the record happens to contain."""
+    sink = AgentFileSink(tmp_path / "run.jsonl")
+    ctx = RunContext(sink=sink, audit_path=tmp_path / "audit.jsonl",
+                     limits=dict(LIMITS))
+    ctx.record_call("c1", "t", {"q": "a"}, "X", True)
+    assert ctx.replaying is False
+    assert ctx.recall_call("c1", "t", {"q": "a"}) is None
+
+
+def test_run_context_calls_record_roundtrips_through_its_own_sidecar(tmp_path):
+    path = tmp_path / "shared" / "run_1.calls.json"
+    sink = AgentFileSink(tmp_path / "run.jsonl")
+    writer = RunContext(sink=sink, audit_path=tmp_path / "audit.jsonl",
+                        limits=dict(LIMITS), calls_path=path)
+    writer.record_call("c1", "t", {"q": "a"}, "X", True)
+    assert path.is_file()
+
+    reader = RunContext(sink=sink, audit_path=tmp_path / "audit.jsonl",
+                        limits=dict(LIMITS), calls_path=path)
+    reader.replaying = True
+    assert reader.recall_call("c1", "t", {"q": "a"}) is None   # not loaded yet
+    reader.load_calls()
+    assert reader.recall_call("c1", "t", {"q": "a"})["output"] == "X"
+    # and it stays OUT of the user-visible scratchpad
+    reader.load_data()
+    assert reader.data == {}
+
+
 def test_load_data_is_a_no_op_without_a_path_or_a_file(tmp_path):
     sink = AgentFileSink(tmp_path / "run.jsonl")
     # no path at all (an uncheckpointed run): both calls must be harmless

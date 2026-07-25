@@ -93,6 +93,59 @@ _REPLACE_ATTEMPTS = 5
 _REPLACE_RETRY_S = 0.01
 
 
+def _atomic_json_write(path: Path, payload: dict) -> None:
+    """Write *payload* tmp-then-replace. Best-effort; OSError is swallowed.
+
+    Extracted from :meth:`RunContext.sync_data` when the exactly-once record
+    gained a second sidecar, because the retry loop below is not boilerplate —
+    it is a measured Windows behaviour, and a second hand-rolled copy of it is a
+    second place to get it subtly wrong.
+
+    ``os.replace`` onto a path another handle currently has OPEN fails with
+    ``PermissionError`` (WinError 5): in a probe with three reader threads, 2935
+    of 3000 replaces failed. Swallowing that means the write is silently gone,
+    and the readers are not hypothetical — a fan-out has several tool threads
+    writing here, and a machine like this one also has Syncthing and a virus
+    scanner touching a run directory. The failure is transient by construction
+    (the other handle closes in microseconds), so a few short retries turn
+    "sometimes loses the last write" into "effectively never", for a worst case
+    of 40ms.
+
+    ``default=str`` mirrors :meth:`StateGet.run`'s existing dumps tolerance: a
+    value that is not JSON-serializable round-trips as its ``str()``. Deliberately
+    not "fixed" into a pickle — these are JSON sidecars, and a pickle in a run
+    directory is an execution primitive we do not want.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    except OSError:
+        return
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            tmp.replace(path)
+            return
+        except OSError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                return
+            time.sleep(_REPLACE_RETRY_S)
+
+
+def _args_sig(arguments: dict) -> str:
+    """A stable signature for a tool call's arguments.
+
+    Sorted keys so two dicts that differ only in insertion order compare equal —
+    a model's arguments arrive through JSON parsing and their order is not
+    meaningful, so treating it as meaningful would turn a genuine replay into a
+    miss and re-execute the call this record exists to stop.
+    """
+    try:
+        return json.dumps(arguments or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):        # pragma: no cover - default=str eats these
+        return repr(sorted((arguments or {}).items()))
+
+
 # ---------------------------------------------------------------------------
 # Per-run state
 # ---------------------------------------------------------------------------
@@ -160,6 +213,22 @@ class RunContext:
     #: where :meth:`sync_data` persists ``data``, or None for a run that cannot
     #: pause (no checkpoint path, a throwaway, a unit test). See sync_data.
     data_path: Optional[Path] = None
+    #: tool_call_id -> what that call returned, for calls that ALREADY RAN in
+    #: this run. Resuming after an approval gate re-enters the node the gate
+    #: paused inside, so every tool call batched into the SAME turn as the gated
+    #: one is asked for a second time (MEASURED: 2 executions, same batch; 1 when
+    #: the call was in an earlier turn). Without this the second execution is
+    #: real — a scan, a POST, a payload firing again with nobody having approved
+    #: the repeat.
+    calls: dict = field(default_factory=dict)
+    #: sibling of ``data_path``, keyed the same way. A SEPARATE file rather than
+    #: a key inside the scratchpad because `load_data` does `data.update(stored)`
+    #: — a reserved key would surface in the scratchpad `state_get` reads.
+    calls_path: Optional[Path] = None
+    #: True only when this run_graph call is resuming a paused run. The record is
+    #: consulted ONLY then, which removes the whole false-positive class by
+    #: construction: a run that never paused cannot be replaying anything.
+    replaying: bool = False
     #: guards the sidecar file AND the decision to write it. An RLock rather
     #: than a Lock because :meth:`MemsomTool._run` holds it across the
     #: "did anything change?" comparison and the :meth:`sync_data` call that
@@ -253,7 +322,6 @@ class RunContext:
         """
         if self.data_path is None:
             return
-        path = Path(self.data_path)
         with self._data_lock:
             # dict(self.data) first: the lock serializes the WRITERS of the
             # file, but nothing stops another tool thread inserting a key into
@@ -262,22 +330,63 @@ class RunContext:
             # resize under it. (Nested values are still shared — the discipline
             # the state tools follow is one whole value per key, not in-place
             # mutation of a value another agent holds.)
-            snapshot = dict(self.data)
+            _atomic_json_write(Path(self.data_path), dict(self.data))
+
+    def load_calls(self) -> None:
+        """Rehydrate the exactly-once record. Same discipline as `load_data`.
+
+        A corrupt or unreadable record is swallowed, and the consequence is worth
+        stating: the run falls back to TODAY's behaviour, which is that a replayed
+        call executes twice. A degradation, not a regression — and the alternative,
+        refusing to resume over an unreadable sidecar, would strand a paused run
+        over a file that only ever existed to make it safer.
+        """
+        if self.calls_path is None:
+            return
+        with self._data_lock:
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(snapshot, default=str),
-                               encoding="utf-8")
-            except OSError:
+                stored = json.loads(
+                    Path(self.calls_path).read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
                 return
-            for attempt in range(_REPLACE_ATTEMPTS):
-                try:
-                    tmp.replace(path)
-                    return
-                except OSError:
-                    if attempt == _REPLACE_ATTEMPTS - 1:
-                        return
-                    time.sleep(_REPLACE_RETRY_S)
+            if isinstance(stored, dict):
+                self.calls.update(stored)
+
+    def record_call(self, call_id: str, name: str, arguments: dict,
+                    output: str, ok: bool) -> None:
+        """Remember that this tool call ran, and what it returned."""
+        if not call_id:
+            return
+        with self._data_lock:
+            self.calls[call_id] = {"name": name, "args": _args_sig(arguments),
+                                   "output": output, "ok": ok}
+            if self.calls_path is not None:
+                _atomic_json_write(Path(self.calls_path), dict(self.calls))
+
+    def recall_call(self, call_id: str, name: str, arguments: dict):
+        """What this call returned last time, or None to execute it.
+
+        Returns ``None`` on a fresh run no matter what the record says — see
+        ``replaying``. That is the whole false-positive defence: a run that never
+        resumed cannot possibly be replaying, so it never consults this.
+
+        Matched on id AND name AND arguments rather than id alone. **The stated
+        limit:** a model that reuses a tool_call_id inside one run for a call with
+        the same name and the same arguments gets the first result back instead of
+        a second execution. Real providers mint a unique id per call, so that is a
+        model pathology rather than a case to design for — and given the choice,
+        answering a duplicate id with the duplicate's own result is the more
+        defensible half of the trade.
+        """
+        if not self.replaying or not call_id:
+            return None
+        with self._data_lock:
+            hit = self.calls.get(call_id)
+        if not hit:
+            return None
+        if hit.get("name") != name or hit.get("args") != _args_sig(arguments):
+            return None
+        return hit
 
     def begin_turn(self, node: str = "") -> int:
         """Open one model turn: check the budget, take a number, announce it.
@@ -848,6 +957,32 @@ class MemsomTool(BaseTool):
                 return denied
             # Approved: fall through and execute exactly like an ungated call.
 
+        # EXACTLY ONCE. The comment above is true of THIS tool and says nothing
+        # about its siblings: a gate protects the call it sits on, and the other
+        # calls the model batched into the same turn have no interrupt() in front
+        # of them at all. Resuming re-enters the node the gate paused inside, so
+        # those siblings are asked a second time — MEASURED at 2 executions for a
+        # same-batch call, against 1 when the call was in an earlier turn. Which
+        # meant a scan, a POST or a payload could fire twice, the repeat approved
+        # by nobody.
+        #
+        # Placed after the gate and before the counter on purpose: the gated tool
+        # itself never ran (it interrupted first), so it must fall through and
+        # execute normally, while a suppressed replay must not take a tool-call
+        # number or emit a second tool_call/tool_result pair — that duplicate
+        # pair is the visible half of the bug.
+        seen = ctx.recall_call(call_id, self.name, arguments)
+        if seen is not None:
+            # Loud. Fixing the double execution and leaving no trace of the
+            # replay would trade one invisible behaviour for another; a reader
+            # has to be able to see BOTH that the call ran once and that a repeat
+            # was refused.
+            self._audit_replay(ctx, call_id, arguments)
+            ctx.sink.event({"t": "replay", "id": call_id, "name": self.name,
+                            "node": self.node_id,
+                            "turn": ctx.turn_of(self.node_id), "ts": now()})
+            return str(seen.get("output") or "")
+
         # Loop detection lives in MemsomChatModel._generate, over the whole
         # turn's batch of calls — not here. The tool node fans a turn's calls
         # out across a thread pool, so a per-call check is both racy and blind
@@ -896,6 +1031,10 @@ class MemsomTool(BaseTool):
                         "bytes": len(output.encode("utf-8", "ignore")),
                         "truncated": truncated,
                         "elapsed_s": round(now() - started, 3)})
+        # Recorded AFTER the call returned, so only a call that actually ran can
+        # ever be suppressed later. A record written before execution would turn
+        # a crash mid-call into a call that never happens and never retries.
+        ctx.record_call(call_id, self.name, arguments, text, ok)
         return text
 
     def _audit_denied(self, ctx: RunContext, call_id: str,
@@ -912,6 +1051,23 @@ class MemsomTool(BaseTool):
             "action": "tool", "tool": self.name, "id": call_id,
             "arguments": {k: str(v)[:200] for k, v in arguments.items()},
             "result": "refused-by-user",
+        })
+
+    def _audit_replay(self, ctx: RunContext, call_id: str,
+                      arguments: dict) -> None:
+        """Record a suppressed replay. The runner writes it, never the tool.
+
+        Without this line the audit would show one ``pending``/``ok`` pair and
+        nothing else — indistinguishable from a run that was never resumed at
+        all. The interesting fact is not just that the call ran once; it is that
+        the runtime was asked to run it AGAIN and declined, which is precisely
+        what somebody reading an audit after an approval gate wants to know.
+        """
+        from memsom.providers.handlers import _audit
+        _audit(ctx.audit_path, {
+            "action": "tool", "tool": self.name, "id": call_id,
+            "arguments": {k: str(v)[:200] for k, v in arguments.items()},
+            "result": "suppressed-replay",
         })
 
 

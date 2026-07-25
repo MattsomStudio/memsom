@@ -1673,7 +1673,17 @@ class AgentRunner:
             return
         for path in files:
             try:
-                status, _ = self._status_of(path.stem, self._lines(path.stem))
+                # `<run>.calls.json` (the exactly-once record) lives here too and
+                # its stem is `<run>.calls`, which is not a run id — asking
+                # `_status_of` about it returns something terminal-looking and the
+                # file gets swept out from under a run that is still PAUSED,
+                # taking the replay protection with it exactly when the resume is
+                # about to need it. Strip the suffix rather than narrowing the
+                # glob, so a third sidecar cannot reintroduce this quietly.
+                run_id = path.stem
+                if run_id.endswith(".calls"):
+                    run_id = run_id[: -len(".calls")]
+                status, _ = self._status_of(run_id, self._lines(run_id))
                 if status in ("running", "paused", "resumable"):
                     continue
                 path.unlink(missing_ok=True)
