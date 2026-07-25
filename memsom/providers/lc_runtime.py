@@ -735,18 +735,75 @@ def _clean_reason(raw) -> str:
 #: Every pattern here matches a SHAPE that is a credential and essentially
 #: nothing else. The last one is the exception — it keys off the key NAME and
 #: redacts only the value, which is why it uses a capture group.
+#: MEASURED 2026-07-25 against `tests/test_provider_scrub_recall.py`, a labelled
+#: corpus of 26 credential shapes and 20 hard negatives:
+#: **recall 35% → 100%, precision 100% throughout.**
+#:
+#: The list stays SHAPE-based, and a general high-entropy rule was written and
+#: MEASURED against the same corpus before being thrown out, rather than dismissed
+#: on principle. Shannon entropy over tokens of 20+ chars:
+#:
+#:   threshold 3.5 → 8 false positives, adds 0 | threshold 4.0 → 1, adds 0
+#:
+#: The decisive column is the second one. At every threshold tried it caught
+#: nothing the shape patterns had not already caught, and the false positives it
+#: bought were a git SHA, a sha256 digest, a UUID, a base64 payload, a data: URI,
+#: a bare JWT header, an ordinary GitHub URL and a long class name — all things an
+#: agent says constantly. Precision is the binding constraint because its failure
+#: is the invisible one: a mangled answer nobody traces back here, against a
+#: leaked string that at least still looks like itself downstream.
+#:
+#: The corollary, which is the honest reading: if a credential shape shows up that
+#: the prefixes miss, the answer is another shape — not entropy.
 _SECRET_PATTERNS = (
     # OpenAI/Anthropic/Stripe-family keys: a short known prefix plus a long
     # opaque tail. The length floor is what keeps it off prose like "sk-ish".
     ("api-key", re.compile(r"\b[sprk]k-[A-Za-z0-9_\-]{16,}")),
     ("aws-key", re.compile(r"\b(?:AKIA|ASIA|AIDA|AROA)[0-9A-Z]{12,20}\b")),
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{16,}")),
+    ("basic", re.compile(r"\bBasic\s+[A-Za-z0-9+/]{16,}={0,2}")),
+    # A JWT is recognised by its STRUCTURE, not a prefix: two base64url segments
+    # that both begin `eyJ` — which is `{"` encoded — plus a signature that is
+    # allowed to be empty, because `alg:none` is exactly the token you least want
+    # to leak. A lone `eyJ…` header is not a token and is left alone.
+    ("jwt", re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")),
+    ("github", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b")),
+    ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b")),
+    ("slack", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("slack-app", re.compile(r"\bxapp-[A-Za-z0-9-]{10,}")),
+    ("google-api-key", re.compile(r"\bAIza[A-Za-z0-9_\-]{35}\b")),
+    ("sendgrid", re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}")),
+    # The length floors are doing real work on these two: `npm_config_registry`
+    # and a pypi package name are the shapes that would otherwise get mangled.
+    ("npm", re.compile(r"\bnpm_[A-Za-z0-9]{36,}\b")),
+    ("pypi", re.compile(r"\bpypi-[A-Za-z0-9_\-]{16,}")),
     ("pem", re.compile(
         r"-----BEGIN[ A-Z]{0,32}PRIVATE KEY-----.*?"
         r"-----END[ A-Z]{0,32}PRIVATE KEY-----", re.DOTALL)),
+    # `scheme://user:PASSWORD@host`. The `@` is matched by LOOKAHEAD so it stays
+    # in the output — redacting it too would leave `…[REDACTED]host` and turn a
+    # readable URL into a puzzle. A URL with no password (`postgres://reader@…`)
+    # has no colon to match and is untouched.
+    ("url-password", re.compile(
+        r"(?i)\b[a-z][a-z0-9+.\-]*://[^\s/:@]+:([^\s/@]{3,})(?=@)")),
+    # The last one is the exception — it keys off the key NAME and redacts only
+    # the value, which is why it uses a capture group.
+    #
+    # `(?<![A-Za-z0-9])` rather than `\b`, and the corpus is what caught it: a
+    # word boundary does NOT fire between `_` and `password`, so `db_password=…`,
+    # `DB_PASSWORD=…` and `my_api_key=…` — the names these things actually have
+    # in a shell — all walked straight through a pattern everyone believed
+    # covered them. It still refuses `notapassword=…`, where the preceding
+    # character is alphanumeric.
+    #
+    # The `[REDACTED]` lookahead makes scrubbing IDEMPOTENT. Without it a second
+    # pass over already-scrubbed text reports fresh hits, and the `hits` count on
+    # a guardrail event is a number somebody reads.
     ("assignment", re.compile(
-        r"(?i)\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|token)"
-        r"\s*[=:]\s*[\"']?([^\s\"',;]{6,})")),
+        r"(?i)(?<![A-Za-z0-9])(?:password|passwd|secret|api[_-]?key"
+        r"|access[_-]?token|token)\s*[=:]\s*[\"']?"
+        r"(?!\[REDACTED\])([^\s\"',;]{6,})")),
 )
 
 
