@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -424,6 +425,131 @@ class MemoryTtlTests(unittest.TestCase):
                 self.assertNotEqual(data1["cached_at"], data3["cached_at"])
             finally:
                 srv.close()
+
+
+class ColdCacheTests(unittest.TestCase):
+    """MemoryCache(cold=...) — the first request must not pay for the build.
+
+    stale-while-revalidate only ever helped the SECOND request onward: a cold
+    get() blocked on the builder, so a 25s builder still handed the very first
+    caller a 25s response. That was the actual cause of the /api/system flake.
+    """
+
+    @staticmethod
+    def _slow_builder(gate, calls):
+        def build():
+            calls.append(1)
+            gate.wait(timeout=10)
+            return {"rows": ["real"]}
+        return build
+
+    def test_cold_request_returns_the_placeholder_without_blocking(self):
+        gate, calls = threading.Event(), []
+        cache = panel.MemoryCache(
+            builder=self._slow_builder(gate, calls), ttl=30.0, stale_ok=True,
+            cold={"rows": [], "pending": True})
+        started = time.monotonic()
+        first = cache.get()
+        elapsed = time.monotonic() - started
+        gate.set()
+        self.assertTrue(first["pending"])
+        self.assertEqual(first["rows"], [])
+        self.assertIsNone(first["cached_at"])
+        # The builder is still sleeping on the gate; returning at all proves we
+        # did not wait for it. Generous bound — this asserts "did not block on a
+        # 10s builder", not a performance target.
+        self.assertLess(elapsed, 5.0)
+
+    def test_only_one_build_is_kicked_however_many_cold_requests_land(self):
+        gate, calls = threading.Event(), []
+        cache = panel.MemoryCache(
+            builder=self._slow_builder(gate, calls), ttl=30.0, stale_ok=True,
+            cold={"rows": [], "pending": True})
+        for _ in range(5):
+            self.assertTrue(cache.get()["pending"])
+        gate.set()
+        # _refreshing collapses the pile-up: five cold reads, one sweep. This is
+        # the invariant that stops a 5s UI poll from stacking builds forever.
+        self.assertEqual(len(calls), 1)
+
+    def test_the_background_build_lands_and_replaces_the_placeholder(self):
+        gate, calls = threading.Event(), []
+        cache = panel.MemoryCache(
+            builder=self._slow_builder(gate, calls), ttl=30.0, stale_ok=True,
+            cold={"rows": [], "pending": True})
+        self.assertTrue(cache.get()["pending"])
+        gate.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            got = cache.get()
+            if not got.get("pending"):
+                break
+            time.sleep(0.05)
+        self.assertEqual(got["rows"], ["real"])
+        self.assertNotIn("pending", got)
+        self.assertIsNotNone(got["cached_at"])
+
+    def test_without_cold_the_first_get_still_blocks_and_builds(self):
+        # The other five caches rely on this: their builders cost milliseconds
+        # and their callers would rather wait once than render a hole.
+        calls = []
+
+        def build():
+            calls.append(1)
+            return {"rows": ["real"]}
+
+        cache = panel.MemoryCache(builder=build, ttl=30.0, stale_ok=True)
+        self.assertEqual(cache.get()["rows"], ["real"])
+        self.assertEqual(len(calls), 1)
+
+
+class SystemPayloadTests(unittest.TestCase):
+    """/api/system serves live gauges with a separately-cached process table."""
+
+    class _Telemetry:
+        def __init__(self):
+            self.full_calls = 0
+            self.lean_calls = 0
+
+        def sample(self, *, include_top_procs=True):
+            if include_top_procs:
+                self.full_calls += 1
+                return {"ts": "t", "ram": {}, "top_procs": {"whole": True}}
+            self.lean_calls += 1
+            return {"ts": "t", "ram": {}}
+
+    def test_merges_the_cached_table_into_a_live_sample(self):
+        tel = self._Telemetry()
+        cache = panel.MemoryCache(builder=lambda: {"by_working_set": ["p"]},
+                                  ttl=30.0)
+        cfg = types.SimpleNamespace(telemetry=tel, top_procs_cache=cache)
+        payload = panel._system_payload(cfg)
+        self.assertEqual(payload["top_procs"]["by_working_set"], ["p"])
+        self.assertIn("ram", payload)
+        # the expensive whole-sample path was never taken
+        self.assertEqual(tel.full_calls, 0)
+        self.assertEqual(tel.lean_calls, 1)
+
+    def test_gauges_are_resampled_per_request_while_the_table_is_cached(self):
+        tel = self._Telemetry()
+        builds = []
+        cache = panel.MemoryCache(
+            builder=lambda: builds.append(1) or {"by_working_set": []},
+            ttl=30.0)
+        cfg = types.SimpleNamespace(telemetry=tel, top_procs_cache=cache)
+        for _ in range(3):
+            panel._system_payload(cfg)
+        self.assertEqual(tel.lean_calls, 3)   # gauges: live every time
+        self.assertEqual(len(builds), 1)      # table: built once
+
+    def test_falls_back_to_a_whole_sample_when_no_cache_is_configured(self):
+        # Hand-built PanelConfigs in tests predate top_procs_cache and must keep
+        # working: slow, but complete.
+        tel = self._Telemetry()
+        cfg = types.SimpleNamespace(telemetry=tel, top_procs_cache=None)
+        payload = panel._system_payload(cfg)
+        self.assertEqual(payload["top_procs"], {"whole": True})
+        self.assertEqual(tel.full_calls, 1)
 
 
 class SystemRouteSmokeTest(unittest.TestCase):

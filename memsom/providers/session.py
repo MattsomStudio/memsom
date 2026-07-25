@@ -17,8 +17,9 @@ File format — one JSON object per line at
     {"t":"error","error":".."}
 
 Cursor = line index. ``read_since(id, N)`` returns lines[N:] and the new cursor,
-plus a status derived from whether a terminal line is present. Single writer per
-file (the generating thread), many readers — so no per-file lock is needed.
+plus a status derived from whether a terminal line is present. Many readers, and
+— since agent graphs learned to fan out — possibly several writers, so
+:class:`FileSink` serializes every append on its own lock (see the class).
 
 Durability scope (honest): this survives the *app* closing, because the panel
 server keeps running. It does NOT survive the panel *server* itself restarting —
@@ -58,7 +59,40 @@ class FileSink(Sink):
     Flush-per-token (visible to other processes immediately) but fsync only on
     the terminal line — fsync-per-token would gate TPS on disk latency for no
     gain, since 'survives app close' only needs cross-process visibility on the
-    same machine, which flush already gives."""
+    same machine, which flush already gives.
+
+    **Every append is serialized on ``_lock``, and the counters ride inside it.**
+    This file used to have a single writer by construction (one generation
+    thread), and the docstring said so. Fan-out made that false: two agent nodes
+    running concurrently share one RunContext and therefore one sink.
+
+    What the lock is and is not for, measured rather than assumed — because the
+    obvious claim turned out to be wrong. A line does NOT tear without it:
+    ``TextIOWrapper.write`` is internally locked in CPython, and 3200 concurrent
+    writes at a 1µs switch interval produced zero unparseable lines. What IS
+    unguarded is everything AROUND the write — ``count``, ``think_count``,
+    ``t_first``, ``t_last`` are ordinary read-modify-writes, they feed
+    ``_final_stats``, and a run whose token count disagrees with its own
+    transcript is a wrong audit line. So the counters are held under the SAME
+    acquisition as the append they describe, rather than a separate one.
+
+    The lock also buys not depending on that CPython detail at all. Atomic
+    ``write`` is an implementation property of the GIL-era io stack, not a
+    guarantee of the io contract, and it is exactly the kind of thing a
+    free-threaded build changes. A file this codebase treats as its audit source
+    should not rest on it.
+
+    Note what the lock does NOT fix, so nobody assumes it did: a ``token`` that
+    arrives after ``done`` has closed the handle still raises, locked or not
+    (measured both ways). That is a lifecycle question — the run is over — and
+    it is unchanged from before fan-out existed.
+    """
+
+    #: this sink's ``token`` accepts an optional node id. Checked by callers
+    #: (``lc_model._TeeSink``) rather than probed with a TypeError, because a
+    #: TypeError raised from INSIDE an inner sink is indistinguishable from one
+    #: raised by the call shape — and guessing wrong means a token written twice.
+    accepts_node = True
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -66,23 +100,39 @@ class FileSink(Sink):
         self.think_count = 0
         self.t_first: Optional[float] = None
         self.t_last: Optional[float] = None
+        self._lock = threading.Lock()
         self._fh = open(self.path, "a", encoding="utf-8")
 
     def _write(self, obj: dict, sync: bool = False) -> None:
+        with self._lock:
+            self._write_locked(obj, sync)
+
+    def _write_locked(self, obj: dict, sync: bool = False) -> None:
+        """The append itself. Callers must already hold ``_lock`` — this exists
+        so a method that also mutates counters can do both under ONE
+        acquisition instead of releasing in between."""
         self._fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
         self._fh.flush()
         if sync:
             os.fsync(self._fh.fileno())
 
-    def token(self, text: str) -> None:
+    def token(self, text: str, node: str = "") -> None:
+        """One answer chunk. *node* names the agent that produced it, and is
+        omitted from the written object when empty — which is every caller
+        outside a multi-agent graph, so a single-agent run's file is byte for
+        byte what it always was."""
         if not text:
             return
-        t = now()
-        if self.t_first is None:
-            self.t_first = t
-        self.t_last = t
-        self.count += 1
-        self._write({"t": "tok", "text": text})
+        with self._lock:
+            t = now()
+            if self.t_first is None:
+                self.t_first = t
+            self.t_last = t
+            self.count += 1
+            obj = {"t": "tok", "text": text}
+            if node:
+                obj["node"] = node
+            self._write_locked(obj)
 
     def reasoning(self, text: str) -> None:
         """A thinking chunk, written as its own event type so a reader can show
@@ -91,20 +141,23 @@ class FileSink(Sink):
         answer tokens would overstate how much reply you got."""
         if not text:
             return
-        t = now()
-        if self.t_first is None:
-            self.t_first = t
-        self.t_last = t
-        self.think_count += 1
-        self._write({"t": "think", "text": text})
+        with self._lock:
+            t = now()
+            if self.t_first is None:
+                self.t_first = t
+            self.t_last = t
+            self.think_count += 1
+            self._write_locked({"t": "think", "text": text})
 
     def done(self, stats: dict) -> None:
-        self._write({"t": "done", "stats": stats}, sync=True)
-        self._fh.close()
+        with self._lock:
+            self._write_locked({"t": "done", "stats": stats}, sync=True)
+            self._fh.close()
 
     def error(self, message: str) -> None:
-        self._write({"t": "error", "error": message}, sync=True)
-        self._fh.close()
+        with self._lock:
+            self._write_locked({"t": "error", "error": message}, sync=True)
+            self._fh.close()
 
     def elapsed(self) -> float:
         if self.t_first is None or self.t_last is None:

@@ -895,7 +895,7 @@ class MemoryCache:
     tests never touch real files or real time."""
 
     def __init__(self, *, builder=None, ttl: float = 30.0, clock=None, now=None,
-                 stale_ok: bool = False):
+                 stale_ok: bool = False, cold=None):
         self._builder = builder or dashboard.build_telemetry
         self._ttl = ttl
         self._clock = clock or time.monotonic
@@ -913,6 +913,16 @@ class MemoryCache:
         # provider health), a blocking rebuild is what the UI felt as a
         # multi-second tab stall — and the data is a snapshot either way.
         self._stale_ok = stale_ok
+        # What to serve on the FIRST request, before any build has finished.
+        # stale-while-revalidate only ever helped the second request onward: a
+        # cold get() still blocks on the builder, so a 25s builder still handed
+        # the very first caller a 25s response. Set `cold` and the first request
+        # returns this placeholder immediately and kicks the build behind it, so
+        # the request path never blocks — cold or warm. None keeps the original
+        # blocking-cold-start behaviour, which is what every other cache here
+        # wants (their builders cost milliseconds and their callers would rather
+        # wait once than render a hole). Only meaningful with stale_ok=True.
+        self._cold = cold
         self._refreshing = False
         # bumped by invalidate(); a background rebuild that started before an
         # invalidate carries a stale generation and must not commit its result.
@@ -922,6 +932,15 @@ class MemoryCache:
         with self._lock:
             now = self._clock()
             stale = self._data is None or self._at is None or (now - self._at) >= self._ttl
+            if self._data is None and not refresh and self._stale_ok \
+                    and self._cold is not None:
+                # Cold and allowed to say so. Kick the build, answer now. `_at`
+                # stays None so this stays the cold branch until a build lands —
+                # `_refreshing` is what keeps that from starting a second one.
+                self._kick_refresh()
+                payload = dict(self._cold)
+                payload["cached_at"] = None
+                return payload
             if refresh or self._data is None:
                 self._data = self._builder()
                 self._at = now
@@ -981,6 +1000,37 @@ class MemoryCache:
         except Exception:
             print(f"[memsom-panel] cache prime failed:\n{traceback.format_exc()}",
                   file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/system — live gauges, cached process table
+# ---------------------------------------------------------------------------
+
+def _system_payload(config) -> dict:
+    """GET /api/system — live everywhere except the process table.
+
+    The split is the whole point. ``ram``/``cpu``/``gpu``/``disks``/``probes``/
+    ``syncthing`` together cost under half a second, so they are sampled per
+    request and the gauges stay honest. ``top_procs`` is a per-process Windows
+    handle sweep measured at ~25s on a 333-process box, and the UI polls this
+    route every 5s (panel.js ``setInterval(refreshSystem, 5000)``) against a
+    ThreadingHTTPServer — so before this split the endpoint kept four to six
+    full sweeps in flight at all times, forever, for as long as a panel tab was
+    open. It was also why ``test_api_system_returns_shape`` failed: a 30s socket
+    timeout against a ~25s handler is a coin flip, not an environment problem.
+
+    ``top_procs_cache`` is a late addition and may be None on a hand-built
+    PanelConfig, in which case this falls back to one whole uncached sample —
+    the historical behaviour, slow but complete.
+    """
+    cache = getattr(config, "top_procs_cache", None)
+    if cache is None:
+        return config.telemetry.sample()
+    payload = config.telemetry.sample(include_top_procs=False)
+    # MemoryCache.get() stamps `cached_at`, which rides along inside top_procs
+    # and tells the UI how old THIS table is independently of the sample's `ts`.
+    payload["top_procs"] = cache.get()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1660,6 +1710,13 @@ class PanelConfig:
     # direct, uncached path.
     task_cache: MemoryCache = None
     providers_cache: MemoryCache = None
+    # /api/system's one expensive limb, on its own clock. The rest of a sample
+    # costs <0.5s and stays live per request; the process table is a ~25s
+    # Windows handle sweep (see telemetry.top_procs) and the UI polls every 5s,
+    # so uncached it kept 4-6 sweeps in flight permanently. Defaulted to None
+    # like the other late additions: a hand-built PanelConfig in a test falls
+    # back to a whole, uncached sample and behaves exactly as it used to.
+    top_procs_cache: MemoryCache = None
     # Bearer token (see panel_auth). Defaulted to None like every other late
     # addition, but the request gate treats a falsy token as DENY, not as
     # "auth off" — a config that somehow reached the serve loop without one
@@ -1718,6 +1775,19 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
     providers_cache = MemoryCache(
         builder=lambda: provider_handlers.build_providers_payload(registry, run=run),
         ttl=3.0, stale_ok=True)
+    # 30s because the sweep itself costs ~25s on a busy box: a shorter TTL would
+    # just mean one rebuild always in flight. stale_ok is what actually fixes the
+    # bug — the first request pays, every request after it is served instantly
+    # while at most ONE sweep runs behind (MemoryCache._refreshing enforces the
+    # "at most one"). A process table is a snapshot either way.
+    # `cold` matters as much as stale_ok here: without it the FIRST request
+    # after a panel start still paid the full sweep, which is precisely the 30s
+    # socket timeout that made test_api_system_returns_shape flaky. The shape
+    # matches _top_procs' own empty return so the UI renders an empty table for
+    # one poll cycle rather than special-casing anything.
+    top_procs_cache = MemoryCache(
+        builder=sys_telemetry.top_procs, ttl=30.0, stale_ok=True,
+        cold={"by_working_set": [], "by_commit": [], "pending": True})
     session_runner = SessionRunner(inference_dir)
     # voice chat streams into its own sessions dir (sibling of inference/) so the
     # voice tab's transcripts stay separate from the INFERENCE tab's history.
@@ -1758,6 +1828,7 @@ def build_config(profile_path, *, host: str = "127.0.0.1", port: int = 7788,
         scheduler=scheduler,
         kernel_store=kernel_store, kernel_runner=kernel_runner,
         task_cache=task_cache, providers_cache=providers_cache,
+        top_procs_cache=top_procs_cache,
         token=token, cookie_secret=cookie_secret,
     )
 
@@ -2336,7 +2407,7 @@ def make_handler(config: PanelConfig):
     _GET_ROUTES = {
         "/health": lambda q: (200, {"app": "memsom-panel",
                                     "version": _MEMSOM_VERSION, "ok": True}),
-        "/api/system": lambda q: (200, config.telemetry.sample()),
+        "/api/system": lambda q: (200, _system_payload(config)),
         "/api/knobs": lambda q: (200, build_knobs_payload(config)),
         "/api/activity/workflows": lambda q: (200, config.workflows_cache.get()),
         "/api/activity/agents": lambda q: (200, config.agents_cache.get()),
@@ -2413,6 +2484,11 @@ def make_handler(config: PanelConfig):
             _MAX_BODY_BYTES),
         "/api/agents/approve": (
             lambda p: agent_handlers.handle_approve(
+                config.graph_store, config.agent_runner, config.registry,
+                config.audit_log_path, p),
+            _MAX_BODY_BYTES),
+        "/api/agents/run/fork": (
+            lambda p: agent_handlers.handle_run_fork(
                 config.graph_store, config.agent_runner, config.registry,
                 config.audit_log_path, p),
             _MAX_BODY_BYTES),

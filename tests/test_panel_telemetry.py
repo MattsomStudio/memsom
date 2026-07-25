@@ -3,11 +3,13 @@
 Run:  python -m pytest tests/test_panel_telemetry.py -q
 """
 
+import contextlib
 import os
 import socket
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -328,6 +330,79 @@ class TestSampleShape(unittest.TestCase):
             self.assertIn(key, result)
         self.assertIsInstance(result["disks"], list)
         self.assertIsInstance(result["probes"], list)
+
+
+@contextlib.contextmanager
+def _fake_psutil(count=3):
+    """Stub psutil for the process-table tests.
+
+    A real ``top_procs()`` opens a handle per process — measured at ~20s on a
+    333-process box, which is the whole reason the panel caches it. Calling the
+    real one from a unit test would put that cost into every suite run to prove
+    something about dict shape.
+    """
+    class _Proc:
+        def __init__(self, pid):
+            self.info = {"pid": pid, "name": f"p{pid}.exe",
+                         "memory_info": types.SimpleNamespace(
+                             rss=pid * 1000, vms=pid * 2000)}
+
+    fake = types.SimpleNamespace(
+        process_iter=lambda attrs=None: [_Proc(i) for i in range(1, count + 1)],
+        NoSuchProcess=type("NoSuchProcess", (Exception,), {}),
+        AccessDenied=type("AccessDenied", (Exception,), {}),
+    )
+    original = tel._import_psutil
+    tel._import_psutil = lambda: fake
+    try:
+        yield fake
+    finally:
+        tel._import_psutil = original
+
+
+class TestTopProcsSplit(unittest.TestCase):
+    """The process table is separable from the rest of a sample.
+
+    It is the only section that costs seconds instead of milliseconds (a
+    per-process Windows handle sweep), so the panel caches it on its own clock
+    while the gauges stay live. These tests pin the seam that makes that
+    possible, not the timing — timing is the machine's business.
+    """
+
+    def test_include_top_procs_false_omits_the_key_entirely(self):
+        # Omitted, not emptied: a caller opting out is expected to merge its own
+        # copy in, and an empty dict would render as "no processes" instead.
+        st = tel.SystemTelemetry({})
+        self.assertNotIn("top_procs", st.sample(include_top_procs=False))
+
+    def test_the_lean_sample_keeps_every_other_section(self):
+        st = tel.SystemTelemetry({})
+        result = st.sample(include_top_procs=False)
+        for key in ("ts", "ram", "cpu", "gpu", "disks", "probes", "syncthing"):
+            self.assertIn(key, result)
+
+    def test_sample_still_includes_it_by_default(self):
+        with _fake_psutil():
+            self.assertIn("top_procs", tel.SystemTelemetry({}).sample())
+
+    def test_top_procs_alone_matches_what_a_full_sample_carries(self):
+        # Faked rather than real: a genuine sweep is ~20s per call on a busy
+        # box, and two real calls here is what would put 45s into every run of
+        # this suite. The seam under test is the shape, not the sweep.
+        with _fake_psutil():
+            st = tel.SystemTelemetry({})
+            self.assertEqual(st.top_procs(), st.sample()["top_procs"])
+
+    def test_top_procs_is_guarded_like_every_other_section(self):
+        # _safe wrapping, same contract as the rest: a broken psutil degrades
+        # this one section rather than raising out of the sampler.
+        st = tel.SystemTelemetry({})
+        original = tel._import_psutil
+        tel._import_psutil = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            self.assertEqual(st.top_procs(), {"error": "unavailable"})
+        finally:
+            tel._import_psutil = original
 
 
 if __name__ == "__main__":

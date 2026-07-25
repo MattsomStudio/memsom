@@ -40,9 +40,11 @@ agent is talking. Old readers ignore it.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Annotated, Any, Optional, Sequence
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -55,14 +57,18 @@ from langchain_core.messages import (
 )
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, InjectedToolCallId
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from pydantic import BaseModel
 from pydantic import Field as PydanticField
 
-# _execute_tool and _LOOP_STRIKES are imported, never reimplemented: the
-# two-phase audit and the loop threshold must be the SAME code the legacy
-# run_tool_loop uses, or the two runtimes drift apart silently.
-from memsom.providers.agents import _LOOP_STRIKES, _execute_tool
+# _execute_tool, _infer_with_deadline and _LOOP_STRIKES are imported, never
+# reimplemented: the two-phase audit, the run-budget deadline and the loop
+# threshold must be the SAME code the legacy run_tool_loop uses, or the two
+# runtimes drift apart silently.
+from memsom.providers.agents import (
+    _LOOP_STRIKES, _execute_tool, _infer_with_deadline,
+)
 from memsom.providers.base import ProviderError, Sink, now
 from memsom.providers.tools import Tool, ToolContext, to_openai_tools, truncate_output
 
@@ -70,6 +76,7 @@ __all__ = [
     "RunContext",
     "MemsomChatModel",
     "MemsomTool",
+    "HandoffTool",
     "to_memsom_messages",
     "from_memsom_messages",
 ]
@@ -78,6 +85,12 @@ __all__ = [
 #: MemsomTool._run. Dunder-ish on purpose: it must not collide with a real
 #: tool argument name coming out of a model.
 _CALL_ID_KEY = "__memsom_tool_call_id__"
+
+#: how hard :meth:`RunContext.sync_data` tries to land its atomic replace, and
+#: how long it waits between tries. Small: the contention it rides out lasts as
+#: long as somebody else's open file handle, and this sits on the tool-call path.
+_REPLACE_ATTEMPTS = 5
+_REPLACE_RETRY_S = 0.01
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +114,20 @@ class RunContext:
     so a run's turns are numbered continuously across nodes and the final stats
     line describes the WHOLE graph rather than whichever node happened to speak
     last.
+
+    **Shared across THREADS since fan-out.** Several agent nodes can now run at
+    once, and they all hold this same object, so every counter here is a shared
+    mutable. Two rules follow, and both are structural rather than defensive:
+
+    * anything that increments a counter does it under ``_lock`` — a read--
+      modify-write on ``turn`` from two threads loses a turn, and a lost turn is
+      a lost ``max_turns`` enforcement, not just a wrong number;
+    * anything PER-AGENT is keyed by node id (``node_turn``, ``node_loop``)
+      rather than kept in one scalar. The loop detector is the sharp case: with
+      one shared ``last_sig`` a sibling's interleaved call resets the strike
+      counter of the node that was actually looping, and two siblings making the
+      same call would trip each other. The state belongs to the node, so it is
+      stored per node.
     """
 
     #: the run's AgentFileSink — tokens and structural events both land here.
@@ -114,56 +141,236 @@ class RunContext:
     #: accumulated counters (prompt_tokens, eval_count, tool_calls) — what
     #: ``_final_stats`` folds into the terminal ``done`` line.
     stats: dict = field(default_factory=dict)
-    #: id of the node currently executing; stamped onto the ``turn`` event.
+    #: id of the node LAST seen executing. Under fan-out several nodes write
+    #: this and the value is whichever wrote last — a documented inert race,
+    #: deliberately not "fixed": every MemsomChatModel and MemsomTool in a graph
+    #: is constructed with its own ``node_id``, so the fallback read of this
+    #: field is unreachable on the real path. Do not start relying on it.
     node_id: str = ""
-    #: last executed (name, arguments) signature and how many times it has
-    #: repeated back-to-back — the identical-call loop detector.
-    last_sig: Optional[str] = None
-    strikes: int = 0
     #: when the run began; the run-timeout gate compares against it.
     started: float = field(default_factory=now)
     #: the run's shared scratch dict — one object every agent's state tools
     #: read/write, so a value set by one agent is visible to the next.
     data: dict = field(default_factory=dict)
+    #: where :meth:`sync_data` persists ``data``, or None for a run that cannot
+    #: pause (no checkpoint path, a throwaway, a unit test). See sync_data.
+    data_path: Optional[Path] = None
+    #: guards the sidecar file AND the decision to write it. An RLock rather
+    #: than a Lock because :meth:`MemsomTool._run` holds it across the
+    #: "did anything change?" comparison and the :meth:`sync_data` call that
+    #: follows, and sync_data takes it again — with a plain Lock that is a
+    #: deadlock, not a race.
+    _data_lock: Any = field(default_factory=threading.RLock, repr=False,
+                            compare=False)
+    #: node id → the turn number that node is currently on. ``turn`` is the
+    #: run-global latest, which mis-attributes a tool event the moment a sibling
+    #: advances the counter while this node is mid-call; ``turn_of`` reads here.
+    node_turn: dict = field(default_factory=dict)
+    #: node id → (last tool-batch signature, consecutive strikes). Per node, so
+    #: one agent's repetition cannot be reset — or falsely tripped — by a
+    #: sibling running concurrently.
+    node_loop: dict = field(default_factory=dict)
+    #: provider id → a Semaphore(1) that must be held while that engine is
+    #: generating. Populated by ``lc_runtime.run_graph`` for engines that hold
+    #: local VRAM; empty for a graph whose engines are all remote. Two nodes on
+    #: ONE 12 GB card are not parallelism, they are an OOM with extra steps.
+    engine_locks: dict = field(default_factory=dict)
+    #: guards every counter above. Not the sidecar — that has its own, because
+    #: the sidecar lock is held across a file write and this one must never be.
+    _lock: Any = field(default_factory=threading.Lock, repr=False,
+                       compare=False)
 
-    def guard(self) -> None:
-        """Enforce the run-wide turn ceiling and timeout, at turn entry.
+    def load_data(self) -> None:
+        """Rehydrate ``data`` from the sidecar written by a previous segment.
 
-        LangGraph's ``recursion_limit`` bounds NODE transitions, which is not
-        the same question as "how many times may a model speak" — one agent
-        node can take twenty turns inside its own ReAct subgraph without the
-        parent graph advancing a single step. So the two limits the user
-        actually configured are enforced here, at the one place every model
-        call in the graph passes through, with the same messages and the same
-        semantics ``run_tool_loop`` has: checked BEFORE the call, so the ceiling
-        is a count of turns taken rather than turns finished.
+        Why a file and not a graph channel: a resume builds a FRESH RunContext,
+        so anything an agent stored in ``data`` before an approval pause was
+        simply gone — the v0.18.0 caveat. The two graph-native fixes were both
+        measured dead. ``Command(graph=Command.PARENT)`` returned from a tool
+        silently truncates the enclosing agent node's remaining turns in
+        memsom's manually-invoked-subgraph topology, and ``InjectedState`` needs
+        the pydantic arg schema :class:`MemsomTool` deliberately does not have
+        (raw JSON Schema is what lets a bad argument come back to the model as a
+        message instead of raising). So the scratchpad lives entirely OUTSIDE
+        LangGraph's channel/checkpoint system: no state schema, no reducer, no
+        checkpoint migration.
 
-        A ceiling shared across nodes is the deliberate reading of max_turns in
-        a multi-agent graph: it is the run's budget, not each agent's.
+        A corrupt or unreadable sidecar is swallowed: the run continues with an
+        empty scratchpad, which is exactly the behaviour it had before this
+        existed. Losing shared state is a degradation; refusing to resume the
+        run over it would be a regression.
         """
-        limits = self.limits or {}
-        timeout = limits.get("run_timeout_s")
-        if timeout and now() - self.started > timeout:
-            raise ProviderError(f"run timeout after {timeout}s")
-        ceiling = limits.get("max_turns")
-        if ceiling and self.turn >= ceiling:
-            raise ProviderError(
-                f"max turns reached ({ceiling}) without a final answer")
+        if self.data_path is None:
+            return
+        with self._data_lock:
+            try:
+                raw = Path(self.data_path).read_text(encoding="utf-8")
+            except OSError:
+                return
+            try:
+                stored = json.loads(raw)
+            except (ValueError, TypeError):
+                return
+            if isinstance(stored, dict):
+                # update, not replace: `data` is the same object every
+                # ToolContext.shared already points at.
+                self.data.update(stored)
 
-    def next_turn(self) -> int:
-        self.turn += 1
-        return self.turn
+    def sync_data(self) -> None:
+        """Persist ``data`` to the sidecar, atomically. Best-effort.
+
+        Written tmp-then-``replace`` so a reader (or a crash) can never see a
+        half-written file — the same discipline the checkpoint DB gets, for the
+        same reason: this file is read back on resume and a torn one would
+        resurrect the run with garbage.
+
+        ``default=str`` mirrors :meth:`StateGet.run`'s existing dumps tolerance:
+        a value the model stored that is not JSON-serializable round-trips a
+        pause as its ``str()``. That is deliberately not "fixed" into a pickle —
+        the scratchpad is a JSON scratchpad, and a pickle in a run directory is
+        an execution primitive we do not want.
+
+        OSError is swallowed: a failed persist costs cross-pause survival, not
+        the run.
+
+        The replace is RETRIED, and that is not belt-and-braces — it is a
+        measured Windows behaviour with real consequences. ``os.replace`` onto a
+        path another handle currently has OPEN fails with ``PermissionError``
+        (WinError 5): in a probe with three reader threads, 2935 of 3000
+        replaces failed. Swallowing that means the write is silently gone, and
+        the readers in question are not hypothetical — a fan-out has several
+        tool threads writing this file, and a machine like this one also has
+        Syncthing and a virus scanner touching a run directory. The failure is
+        transient by construction (the other handle closes in microseconds), so
+        a few short retries turn "sometimes loses the last scratchpad write"
+        into "effectively never", for a worst case of 40ms on a path that only
+        runs when a tool actually touched the scratchpad.
+        """
+        if self.data_path is None:
+            return
+        path = Path(self.data_path)
+        with self._data_lock:
+            # dict(self.data) first: the lock serializes the WRITERS of the
+            # file, but nothing stops another tool thread inserting a key into
+            # the live scratchpad while json walks it. The shallow copy is one
+            # GIL-atomic C-level operation, so the dump never sees the dict
+            # resize under it. (Nested values are still shared — the discipline
+            # the state tools follow is one whole value per key, not in-place
+            # mutation of a value another agent holds.)
+            snapshot = dict(self.data)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(snapshot, default=str),
+                               encoding="utf-8")
+            except OSError:
+                return
+            for attempt in range(_REPLACE_ATTEMPTS):
+                try:
+                    tmp.replace(path)
+                    return
+                except OSError:
+                    if attempt == _REPLACE_ATTEMPTS - 1:
+                        return
+                    time.sleep(_REPLACE_RETRY_S)
+
+    def begin_turn(self, node: str = "") -> int:
+        """Open one model turn: check the budget, take a number, announce it.
+
+        Enforces the run-wide turn ceiling and timeout at turn ENTRY. LangGraph's
+        ``recursion_limit`` bounds NODE transitions, which is not the same
+        question as "how many times may a model speak" — one agent node can take
+        twenty turns inside its own ReAct subgraph without the parent graph
+        advancing a single step. So the two limits the user actually configured
+        are enforced here, at the one place every model call in the graph passes
+        through, with the same messages and the same semantics
+        ``run_tool_loop`` has: checked BEFORE the call, so the ceiling counts
+        turns taken rather than turns finished. A ceiling shared across nodes is
+        the deliberate reading of max_turns in a multi-agent graph: it is the
+        run's budget, not each agent's.
+
+        **The check, the increment and the ``turn`` line are ONE acquisition**,
+        and that is the whole reason this is a single method instead of the
+        ``guard()`` + ``next_turn()`` + ``sink.event()`` trio it replaces. Two
+        threads allocating 5 and 6 and then appending in the other order put
+        turn 6 above turn 5 in the file — and RunMonitor renders the file in
+        order, so the transcript shows the run going backwards. Not theoretical:
+        with the append moved outside the lock, five runs of six threads
+        produced 33 out-of-order turn lines; with it inside, zero. The append
+        does real I/O, which is a yield point, which is why this one is easy to
+        hit rather than merely possible.
+
+        The ceiling check belongs inside the same acquisition for the second
+        reason: it is a read-modify-write on a budget, so two threads passing it
+        together spend the last turn twice.
+        """
+        with self._lock:
+            limits = self.limits or {}
+            timeout = limits.get("run_timeout_s")
+            if timeout and now() - self.started > timeout:
+                raise ProviderError(f"run timeout after {timeout}s")
+            ceiling = limits.get("max_turns")
+            if ceiling and self.turn >= ceiling:
+                raise ProviderError(
+                    f"max turns reached ({ceiling}) without a final answer")
+            self.turn += 1
+            turn = self.turn
+            if node:
+                self.node_turn[node] = turn
+            # Emitted BEFORE the call, not after: the frontend draws the turn
+            # separator as soon as it appears, so a long generation shows up as
+            # a turn in progress instead of nothing at all.
+            self.sink.event({"t": "turn", "n": turn, "node": node, "ts": now()})
+            return turn
+
+    def turn_of(self, node: str = "") -> int:
+        """The turn number *node* is currently on — what its events must carry.
+
+        ``turn`` is the run-global latest, which was the same thing right up
+        until two nodes could run at once: a sibling opening turn 7 while this
+        node is still executing turn 6's tool call would stamp 7 onto that
+        call's ``tool_result``, and the reader joining it back to its
+        ``tool_call`` would land on the wrong agent's turn."""
+        if not node:
+            return self.turn
+        return self.node_turn.get(node, self.turn)
+
+    def check_loop(self, node: str, sig: str) -> None:
+        """Per-node identical-batch loop detection. Raises when it trips.
+
+        Two properties the shared scalar it replaces could not have. The
+        signature is a whole TURN'S batch (a two-call A,B,A,B loop is invisible
+        per call, and a legitimate parallel fan-out of identical calls false-
+        fires per call) — that part is unchanged from v0.17.0. What is new is
+        that the strike state is keyed by NODE: a sibling's interleaved batch
+        would otherwise reset the counter of the node that is genuinely stuck,
+        and two siblings legitimately making the same call would strike each
+        other out.
+
+        The raise happens outside the lock deliberately — nothing else needs to
+        be atomic with it, and raising while holding a lock other threads are
+        waiting on is a habit worth not forming.
+        """
+        with self._lock:
+            last, strikes = self.node_loop.get(node, (None, 0))
+            strikes = strikes + 1 if sig == last else 0
+            self.node_loop[node] = (sig, strikes)
+        if strikes >= _LOOP_STRIKES - 1:
+            raise ProviderError(
+                f"tool loop detected: {_LOOP_STRIKES}x identical call(s)")
 
     def accumulate(self, stats: dict) -> None:
         """Fold one node's usage counters into the run-wide totals."""
-        for key in ("prompt_tokens", "eval_count"):
-            value = (stats or {}).get(key)
-            if isinstance(value, (int, float)):
-                self.stats[key] = self.stats.get(key, 0) + value
+        with self._lock:
+            for key in ("prompt_tokens", "eval_count"):
+                value = (stats or {}).get(key)
+                if isinstance(value, (int, float)):
+                    self.stats[key] = self.stats.get(key, 0) + value
 
     def count_tool_call(self) -> int:
-        self.stats["tool_calls"] = self.stats.get("tool_calls", 0) + 1
-        return self.stats["tool_calls"]
+        with self._lock:
+            self.stats["tool_calls"] = self.stats.get("tool_calls", 0) + 1
+            return self.stats["tool_calls"]
 
 
 class _TeeSink(Sink):
@@ -175,16 +382,27 @@ class _TeeSink(Sink):
     ``reasoning()`` and its reply through ``token()``, and folding the
     scratchpad into ``content`` means the next node reads several hundred
     tokens of deliberation as if the model had said them out loud.
+
+    *node* is stamped onto each ``tok`` line so an interleaved concurrent stream
+    stays attributable — with two agents generating at once the run log is one
+    interleaved sequence, and without the tag a reader cannot tell which agent
+    said what. Only forwarded to a sink that declares ``accepts_node``; anything
+    else (a ListSink, a test double, the null sink) gets the one-argument call
+    it has always got.
     """
 
-    def __init__(self, inner: Sink) -> None:
+    def __init__(self, inner: Sink, node: str = "") -> None:
         self._inner = inner
         self._buf: list[str] = []
+        self._node = node if getattr(inner, "accepts_node", False) else ""
 
     def token(self, text: str) -> None:
         if text:
             self._buf.append(text)
-        self._inner.token(text)
+        if self._node:
+            self._inner.token(text, self._node)
+        else:
+            self._inner.token(text)
 
     def reasoning(self, text: str) -> None:
         self._inner.reasoning(text)
@@ -297,7 +515,18 @@ def _as_openai_tool(spec: Any) -> dict:
     LangChain :class:`BaseTool` (including our own :class:`MemsomTool`), or an
     already-rendered dict — and all three must come out the same, because the
     adapters only ever learned one shape.
+
+    A tool may also carry its OWN rendering in ``openai_schema`` and skip the
+    generic path. :class:`HandoffTool` is the reason: its pydantic arg schema
+    exists solely so LangGraph can inject the graph state, and
+    ``convert_to_openai_tool`` drops ``json_schema_extra`` (measured), which is
+    the only way pydantic could have expressed the branch ENUM. A hand-written
+    wire shape gives the model the same hard enum the ``decide`` router's
+    synthetic tool gets, without giving up state injection.
     """
+    rendered = getattr(spec, "openai_schema", None)
+    if isinstance(rendered, dict) and rendered:
+        return rendered
     if isinstance(spec, Tool):
         return to_openai_tools([spec])[0]
     if isinstance(spec, dict) and spec.get("type") == "function" \
@@ -374,21 +603,33 @@ class MemsomChatModel(BaseChatModel):
             ctx.node_id = node
             # Turn ceiling and run timeout are the model's gate, not the tool's:
             # a text-only agent that never calls a tool must still be bounded.
-            ctx.guard()
-            turn = ctx.next_turn()
-            # Emitted BEFORE the call, not after: the frontend draws the turn
-            # separator as soon as it appears, so a long generation shows up as
-            # a turn in progress instead of nothing at all.
-            ctx.sink.event({"t": "turn", "n": turn, "node": node, "ts": now()})
-            tee = _TeeSink(ctx.sink)
+            # One call, one lock: the budget check, the turn number and the
+            # `turn` line are atomic together, so file order is turn order even
+            # with a sibling node generating on another thread.
+            turn = ctx.begin_turn(node)
+            tee = _TeeSink(ctx.sink, node)
         else:
             turn, tee = 0, _TeeSink(_NullSink())
 
         # A ProviderError propagates untouched — AgentRunner._run catches it and
         # writes the terminal {"t":"error"} line. Wrapping it here would only
         # bury a clean user-facing message inside a LangGraph traceback.
-        stats = self.adapter.infer(self.model, to_memsom_messages(messages),
-                                   params, tee) or {}
+        #
+        # With a ctx the call goes through the shared deadline helper, so
+        # ``run_timeout_s`` bounds the CALL and not just the gap before it (see
+        # _infer_with_deadline) and an agent may opt into retries. Without one
+        # there is no run to budget — the probe/unit-test path calls the adapter
+        # exactly as it always did.
+        if ctx is not None:
+            stats = _infer_with_deadline(
+                self.adapter, self.model, to_memsom_messages(messages), params,
+                tee,
+                run_timeout_s=(ctx.limits or {}).get("run_timeout_s"),
+                started=ctx.started,
+                max_attempts=(ctx.limits or {}).get("infer_retries", 1))
+        else:
+            stats = self.adapter.infer(self.model, to_memsom_messages(messages),
+                                       params, tee) or {}
 
         tool_calls = [
             {"id": call.get("id") or f"tc_{i}",
@@ -407,17 +648,15 @@ class MemsomChatModel(BaseChatModel):
             # check can neither see a two-call A,B,A,B loop (its signatures never
             # land back-to-back) nor tell a legitimate parallel fan-out of
             # identical calls from a loop (it false-fires on the first turn).
-            # _generate is single-threaded and sees the batch, so it can. Only a
-            # turn that asks for tools can loop; a plain-text turn is a final
-            # answer and touches neither strikes nor last_sig.
+            # _generate sees a whole batch at once, so it can. Only a turn that
+            # asks for tools can loop; a plain-text turn is a final answer and
+            # touches no strike state. The strike state is PER NODE — a sibling
+            # running concurrently must not be able to reset, or trip, this
+            # node's counter (see RunContext.check_loop).
             if tool_calls:
                 sig = json.dumps([(c["name"], c["args"]) for c in tool_calls],
                                  sort_keys=True, default=str)
-                ctx.strikes = ctx.strikes + 1 if sig == ctx.last_sig else 0
-                ctx.last_sig = sig
-                if ctx.strikes >= _LOOP_STRIKES - 1:
-                    raise ProviderError(
-                        f"tool loop detected: {_LOOP_STRIKES}x identical call(s)")
+                ctx.check_loop(node, sig)
 
         message = AIMessage(content=tee.text(), tool_calls=tool_calls,
                             response_metadata={"node": node, "turn": turn})
@@ -454,6 +693,35 @@ def _usage_metadata(stats: dict) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_decision(decision: Any) -> tuple:
+    """One human answer to an approval gate → ``(verdict, edited_arguments)``.
+
+    Two wire shapes, because approving is not the only useful answer. A bare
+    string is the legacy vocabulary (``"approve"`` executes, anything else
+    denies — unchanged, including the deliberate breadth of "anything else").
+    A dict ``{"decision": "edit", "arguments": {…}}`` is the human saying "run
+    it, but with THESE arguments instead" — the review case where the tool call
+    was nearly right and denying it just makes the model guess again. A dict
+    round-trips through ``Command(resume=…)`` into ``interrupt()`` untouched
+    (verified against langgraph 1.2.9), so no encoding is needed.
+
+    A malformed edit — the word without an ``arguments`` object — DENIES rather
+    than falling back to the original call. The HTTP handler rejects that
+    payload before it ever gets here, so reaching this branch means something
+    upstream is confused, and a security gate that guesses when it is confused
+    is not a gate. Fail closed.
+    """
+    if isinstance(decision, dict):
+        verdict = str(decision.get("decision") or "").strip().lower()
+        if verdict == "edit":
+            arguments = decision.get("arguments")
+            if isinstance(arguments, dict):
+                return "edit", dict(arguments)
+            return "deny", None
+        return ("approve" if verdict == "approve" else "deny"), None
+    return ("approve" if str(decision).lower() == "approve" else "deny"), None
+
+
 class MemsomTool(BaseTool):
     """A ``BaseTool`` wrapping exactly one memsom :class:`Tool`.
 
@@ -466,14 +734,31 @@ class MemsomTool(BaseTool):
     verbatim and then emits the two sink events. Reimplementing any of it would
     mean the legacy loop and the graph runtime could disagree about what got
     audited, which is the one thing an audit log may not do.
+
+    **Never return ``Command(graph=Command.PARENT)`` from here.** In memsom's
+    topology the ReAct agent is a subgraph invoked BY HAND inside a parent node
+    (``lc_runtime._agent_node``), and a parent-directed Command raised from a
+    tool unwinds straight through that ``subgraph.invoke`` — silently discarding
+    whatever turns the enclosing agent node had left to take. Measured, not
+    theorised. It is therefore useless as a state write-through mechanism (which
+    is why the shared scratchpad persists through :meth:`RunContext.sync_data`
+    instead), and the one place it IS correct is a handoff tool, where ending
+    the node's turn is the entire point.
     """
 
     #: the wrapped memsom Tool.
     memsom_tool: Any = None
-    #: the shared per-run carrier (turn number, limits, audit path, strikes).
+    #: the shared per-run carrier (turn numbers, limits, audit path, strikes).
     run_ctx: Any = None
     #: when true, the call PAUSES for a human APPROVE/DENY before it executes.
     require_approval: bool = False
+    #: which canvas agent node owns this tool instance. Every event this class
+    #: emits is stamped with THAT node's turn rather than the run-global latest,
+    #: because a sibling agent can advance the run counter while this call is
+    #: still in flight. Empty for a tool driven outside a graph (a unit test),
+    #: where ``turn_of("")`` falls back to the global counter — which is correct,
+    #: because with no nodes there is nothing to mis-attribute to.
+    node_id: str = ""
 
     def __init__(self, tool: Tool, ctx: RunContext,
                  require_approval: bool = False, **kwargs: Any) -> None:
@@ -532,17 +817,26 @@ class MemsomTool(BaseTool):
             decision = interrupt({"kind": "approval", "tool": self.name,
                                   "arguments": arguments,
                                   "id": call_id or None})
-            if str(decision).lower() != "approve":
+            verdict, edited = _normalize_decision(decision)
+            if verdict == "edit":
+                # Reassigned HERE, before the counter, the sink events and
+                # _execute_tool — so the run log and the audit both record what
+                # ACTUALLY ran rather than what was proposed. The proposal is
+                # not lost: it is already on disk in the awaiting_approval
+                # event, which is the line a reviewer compares against.
+                arguments = edited
+            elif verdict != "approve":
                 # Denied: record it (the gate working IS the security event) and
                 # hand the model a plain result it can react to and move on.
                 nth = ctx.count_tool_call()
                 cid = call_id or f"tc_{nth}"
+                turn = ctx.turn_of(self.node_id)
                 self._audit_denied(ctx, cid, arguments)
-                ctx.sink.event({"t": "tool_call", "turn": ctx.turn, "id": cid,
+                ctx.sink.event({"t": "tool_call", "turn": turn, "id": cid,
                                 "name": self.name, "arguments": arguments,
                                 "ts": now()})
                 denied = "DENIED by user: the tool was not executed."
-                ctx.sink.event({"t": "tool_result", "turn": ctx.turn, "id": cid,
+                ctx.sink.event({"t": "tool_result", "turn": turn, "id": cid,
                                 "name": self.name, "ok": False, "output": denied,
                                 "bytes": len(denied.encode("utf-8")),
                                 "truncated": False, "elapsed_s": 0.0})
@@ -556,7 +850,10 @@ class MemsomTool(BaseTool):
         # sees every call in the turn at once.
         nth = ctx.count_tool_call()
         call_id = call_id or f"tc_{nth}"
-        ctx.sink.event({"t": "tool_call", "turn": ctx.turn, "id": call_id,
+        # This node's turn, not the run's. See the node_id field: with two agent
+        # nodes in flight the global counter belongs to whoever spoke last.
+        turn = ctx.turn_of(self.node_id)
+        ctx.sink.event({"t": "tool_call", "turn": turn, "id": call_id,
                         "name": self.name, "arguments": arguments, "ts": now()})
 
         tool_ctx = ToolContext(
@@ -566,11 +863,29 @@ class MemsomTool(BaseTool):
             shared=ctx.data,
         )
         started = now()
+        # Snapshot around the call so the scratchpad is persisted only by the
+        # tools that actually touch it: state_set writes a sidecar, http_fetch
+        # never does. A file write per tool call would be pure overhead on the
+        # overwhelmingly common case, and this is the only place that can tell
+        # the difference without asking every Tool to declare itself.
+        before = dict(ctx.data)
         output, ok = _execute_tool(self.memsom_tool, self.name, arguments,
                                    tool_ctx, ctx.audit_path,
                                    available=[self.name])
+        # The comparison and the persist are ONE acquisition, so a sibling tool
+        # thread cannot slip a write in between "nothing changed" and the
+        # decision not to save. Writes to `data` ITSELF are unguarded and stay
+        # that way: StateSet stores one whole value under one key, which is a
+        # single GIL-atomic dict assignment — it cannot tear, and the worst a
+        # concurrent one costs is a redundant sidecar write. The discipline that
+        # makes that true is "one whole value per key", never in-place mutation
+        # of a value another agent is holding. (RLock, so sync_data re-entering
+        # is not a deadlock.)
+        with ctx._data_lock:
+            if ctx.data != before:
+                ctx.sync_data()
         text, truncated = truncate_output(output, limits["max_tool_output_bytes"])
-        ctx.sink.event({"t": "tool_result", "turn": ctx.turn, "id": call_id,
+        ctx.sink.event({"t": "tool_result", "turn": turn, "id": call_id,
                         "name": self.name, "ok": ok, "output": text,
                         "bytes": len(output.encode("utf-8", "ignore")),
                         "truncated": truncated,
@@ -592,3 +907,179 @@ class MemsomTool(BaseTool):
             "arguments": {k: str(v)[:200] for k, v in arguments.items()},
             "result": "refused-by-user",
         })
+
+
+# ---------------------------------------------------------------------------
+# The handoff tool
+# ---------------------------------------------------------------------------
+
+
+def _handoff_args_schema(names: Sequence[str]) -> type:
+    """The pydantic arg model a handoff tool needs, built per router.
+
+    This is the ONE tool in memsom with a pydantic ``args_schema`` instead of a
+    raw JSON Schema dict, and the exception is narrow enough to be worth stating:
+    ``InjectedState`` is an ANNOTATION protocol. LangGraph's tool node reads the
+    schema's annotations to decide what to inject, so a raw dict — which is what
+    lets a user tool report a bad argument back to the model as a message rather
+    than raising — cannot receive the graph state at all (measured). Without the
+    state, a handoff cannot carry the agent's own transcript forward, and the
+    next agent starts blind. See :meth:`HandoffTool._run`.
+
+    The safety that motivated raw dicts elsewhere survives anyway: a model that
+    sends the wrong shape gets LangGraph's validation error back AS A TOOL
+    MESSAGE and takes another turn (measured against langgraph 1.2.9) — it does
+    not raise out of the run. And ``branch`` is deliberately typed ``str`` rather
+    than a ``Literal``, so a hallucinated branch name reaches :meth:`_run` and
+    comes back as a sentence naming the real branches, instead of a pydantic
+    traceback the model has to decode.
+    """
+    from langgraph.prebuilt import InjectedState
+
+    class HandoffArgs(BaseModel):
+        branch: str = PydanticField(
+            description="Name of the branch to take. One of: "
+                        + ", ".join(names))
+        message: Optional[str] = PydanticField(
+            default=None,
+            description="Optional briefing handed to whoever runs next.")
+        #: injected by LangGraph, never by the model — both are stripped from
+        #: the schema the model is shown.
+        state: Annotated[dict, InjectedState]
+        tool_call_id: Annotated[str, InjectedToolCallId]
+
+    return HandoffArgs
+
+
+class HandoffTool(BaseTool):
+    """The synthetic tool a ``handoff`` router binds into the feeding agent.
+
+    Why it exists: ``decide`` mode asks a SECOND model call "which way now?"
+    after the agent has already finished talking. A handoff asks the agent to
+    say where it is going as part of the turn it was taking anyway — one
+    inference instead of two, and the choice is made by the model that actually
+    holds the context, not by a stateless referee reading the transcript.
+
+    **This is the one place ``Command(graph=Command.PARENT)`` is correct**, and
+    it is correct for exactly the reason :class:`MemsomTool` forbids it: raising
+    a parent-directed Command unwinds straight out of the manual
+    ``subgraph.invoke`` in ``lc_runtime._agent_node``, abandoning whatever turns
+    the agent had left. For a state write-through that is data loss. For a
+    handoff it is the entire point — the agent is done, by its own declaration.
+
+    The unwinding has one consequence that had to be paid for rather than
+    documented away: the node's ``run_node`` never returns, so nothing it
+    produced would reach the parent's message thread. Measured — the next agent
+    saw the trigger input and nothing else, silently breaking the "one shared
+    conversation" invariant that ``decide`` and ``match`` both keep. So the
+    Command carries the transcript itself, sliced out of the injected state at
+    ``prior``: everything this node added, plus the tool's own result message,
+    plus the optional briefing.
+    """
+
+    #: the router's branch dicts — used to describe the choice to the model.
+    branches: list = []
+    #: branch name → parent-graph node id (or END).
+    target_map: dict = {}
+    #: the router's canvas node id; stamped onto the ``route`` event so the
+    #: monitor renders a handoff exactly like the other two modes.
+    router_node_id: str = ""
+    #: the shared per-run carrier.
+    run_ctx: Any = None
+    #: hand-rendered wire shape (see :func:`_as_openai_tool`).
+    openai_schema: dict = {}
+    #: how many messages were already in the thread when this node was entered.
+    #: Set by ``run_node`` immediately before it invokes the subgraph, so the
+    #: tool can carry forward what the NODE produced without re-sending what the
+    #: parent already holds. Slicing rather than leaning on ``add_messages``
+    #: id-dedup is the same call ``run_node`` itself makes for its normal return.
+    prior: int = 0
+
+    def __init__(self, *, name: str, branches: list, target_map: dict,
+                 router_node_id: str, ctx: RunContext, **kwargs: Any) -> None:
+        names = [str(b.get("name") or "") for b in branches]
+        super().__init__(
+            name=name,
+            description=_handoff_description(name, branches),
+            args_schema=_handoff_args_schema(names),
+            openai_schema=_handoff_openai_schema(
+                name, _handoff_description(name, branches), names),
+            branches=list(branches),
+            target_map=dict(target_map),
+            router_node_id=router_node_id,
+            run_ctx=ctx,
+            **kwargs,
+        )
+
+    def _run(self, branch: str = "", state: Any = None, tool_call_id: str = "",
+             message: Optional[str] = None, **kwargs: Any) -> Any:
+        ctx: RunContext = self.run_ctx
+        if branch not in self.target_map:
+            # A plain string, never an exception. An unknown branch is a model
+            # mistake, and the cheapest correct response to a model mistake is
+            # to tell it what the real options were and let it take another
+            # turn — the same contract every memsom tool honours.
+            return (f"unknown branch {branch!r}. Valid branches: "
+                    + ", ".join(sorted(self.target_map)) + ".")
+
+        # The existing route event, verbatim — same keys, same order, just a
+        # third value for `mode`. RunMonitor renders `mode` as free text and
+        # `read_since` never learned the vocabulary, so a handoff needs no new
+        # event type and no reader change.
+        if ctx is not None:
+            ctx.sink.event({"t": "route", "router": self.router_node_id,
+                            "branch": branch, "mode": "handoff", "ts": now()})
+
+        carried = list((state or {}).get("messages") or [])[self.prior:]
+        carried.append(ToolMessage(content=f"handing off to {branch}",
+                                   tool_call_id=tool_call_id or "handoff",
+                                   name=self.name))
+        if message:
+            # A SystemMessage rather than more tool output: the briefing is
+            # addressed to whoever runs NEXT, not to the agent that just wrote
+            # it, and a ToolMessage reads as a reply to the caller.
+            carried.append(SystemMessage(
+                content=f"Handoff from the previous agent: {message}"))
+
+        from langgraph.types import Command
+        return Command(goto=self.target_map[branch],
+                       update={"messages": carried}, graph=Command.PARENT)
+
+
+def _handoff_description(name: str, branches: list) -> str:
+    """What the model is told about the fork it is standing at."""
+    catalogue = "\n".join(
+        f"- {b.get('name')}: {b.get('when') or 'no description given'}"
+        for b in branches)
+    return (
+        "Hand the conversation to whoever should continue it. Call this as "
+        "your FINAL action, on its own — any other tool call you make in the "
+        "same turn will not run, because the handoff ends your turn "
+        "immediately.\nBranches:\n" + catalogue)
+
+
+def _handoff_openai_schema(name: str, description: str,
+                           names: Sequence[str]) -> dict:
+    """The wire shape, hand-written so ``branch`` keeps a hard enum.
+
+    Same structure as ``lc_runtime._route_tool`` — that similarity is the point.
+    Whether the model is picking a branch for a ``decide`` router or for itself,
+    it should be looking at the same kind of constrained choice."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "branch": {"type": "string", "enum": list(names),
+                               "description": "The branch to hand off to."},
+                    "message": {"type": "string",
+                                "description": "Optional briefing for whoever "
+                                               "runs next."},
+                },
+                "required": ["branch"],
+            },
+        },
+    }

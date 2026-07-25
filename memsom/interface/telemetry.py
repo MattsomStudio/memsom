@@ -12,6 +12,12 @@ Public API
 SystemTelemetry(profile, *, run=None, urlopen=None)
     .sample() -> dict     one point-in-time snapshot, see module-level SAMPLE_SHAPE
                           below for the exact keys.
+    .sample(include_top_procs=False)
+                          the same snapshot WITHOUT the process table — the one
+                          section that costs seconds rather than milliseconds.
+                          The key is omitted, not emptied; a caller using this
+                          is expected to merge its own (cached) copy in.
+    .top_procs() -> dict   just that table, so it can be cached on its own clock.
 
 `profile` dict (all keys optional — an absent key degrades that section, it never
 raises):
@@ -359,18 +365,48 @@ class SystemTelemetry:
             })
         return out
 
-    def sample(self) -> dict:
+    def top_procs(self) -> dict:
+        """Just the process table — the one limb of a sample that is EXPENSIVE.
+
+        Split out so a caller can cache it independently of the rest. On Windows
+        ``process_iter`` opens a handle per process, and the cost is per-process
+        rather than concentrated in an outlier: measured on a 333-process box,
+        194 of them took >50ms each and the sweep totalled ~28s. Every other
+        section of a sample costs under half a second combined, so folding this
+        one into the same freshness policy as the RAM gauge is what made
+        ``/api/system`` a ~25s endpoint that the panel polls every 5s.
+
+        Still no thread and no disk cache here — this method samples when asked,
+        exactly like ``sample()``. Who caches it, and for how long, is the
+        panel's decision (see ``PanelConfig.top_procs_cache``).
+        """
+        return self._safe(
+            lambda: _top_procs(_import_psutil(), int(self._profile.get("top_n", 8))),
+            {"error": "unavailable"},
+        )
+
+    def sample(self, *, include_top_procs: bool = True) -> dict:
+        """One point-in-time snapshot.
+
+        ``include_top_procs=False`` omits the process table entirely — the key is
+        absent rather than empty, so a caller that skips it MUST supply its own
+        (the panel merges a cached one). Default True keeps a bare ``sample()``
+        the complete snapshot it has always been.
+        """
         psutil_mod = _import_psutil()
-        top_n = int(self._profile.get("top_n", 8))
-        return {
+        out = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "ram": self._safe(
                 lambda: self._ram(psutil_mod),
                 {"physical": {"error": "unavailable"}, "commit": {"error": "unavailable"}},
             ),
-            "top_procs": self._safe(
-                lambda: _top_procs(psutil_mod, top_n), {"error": "unavailable"}
-            ),
+        }
+        if include_top_procs:
+            out["top_procs"] = self._safe(
+                lambda: _top_procs(psutil_mod, int(self._profile.get("top_n", 8))),
+                {"error": "unavailable"},
+            )
+        out.update({
             "cpu": self._safe(
                 lambda: _cpu_percent(psutil_mod), {"error": "unavailable"}
             ),
@@ -381,4 +417,5 @@ class SystemTelemetry:
                 lambda: _read_syncthing(self._profile.get("syncthing"), self._urlopen),
                 {"reachable": False, "error": "unavailable"},
             ),
-        }
+        })
+        return out
