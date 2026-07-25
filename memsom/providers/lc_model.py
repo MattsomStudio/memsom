@@ -79,6 +79,7 @@ __all__ = [
     "HandoffTool",
     "to_memsom_messages",
     "from_memsom_messages",
+    "hand_over_the_floor",
 ]
 
 #: reserved kwarg name carrying the tool_call_id from BaseTool.run into
@@ -590,6 +591,55 @@ def to_memsom_messages(messages: Sequence[BaseMessage]) -> list[dict]:
     return out
 
 
+#: Handed to an agent whose turn opens on somebody ELSE's assistant message.
+#:
+#: MEASURED against qwen2.5:7b-instruct, and this is the wording that survived:
+#: the shorter forms ("Continue.", "Now you respond.") also make the model speak
+#: but it answers in its own casing rather than the instruction's, which is the
+#: visible tip of it half-treating the request as a continuation. Naming the
+#: prior text as somebody else's is what makes it follow its own prompt.
+_FLOOR_HANDOVER = (
+    "The above is the conversation so far, written by other participants. "
+    "It is your turn now: follow your own instructions."
+)
+
+
+def hand_over_the_floor(messages: list) -> list:
+    """Ensure the list ends in something a model will ANSWER, not continue.
+
+    memsom's "shared thread, private prompt" design gives every agent the whole
+    conversation and applies only its own system prompt at the model. The
+    consequence nobody could see against a fake adapter: for every agent after
+    the first, that conversation ENDS IN ANOTHER AGENT'S ASSISTANT MESSAGE — and
+    a real chat model reads a trailing assistant turn as one it already took.
+
+    MEASURED, qwen2.5:7b-instruct, same system prompt and user turn both times:
+
+        [system, user]                    -> "QUARTZ"   (eval_count 4)
+        [system, user, assistant]         -> ""         (eval_count 1)
+
+    Empty. Not degraded — silent. In a four-agent graph on a real model, two
+    agents opened a turn, emitted nothing, and the join node then reported that
+    the first agent's word was "the only word provided". The other failure mode
+    is worse for being plausible: given a conversation ending "ALPHA", the model
+    CONTINUES it with "BRAVO CHARLIE" instead of answering, which reads exactly
+    like two parallel branches leaking into each other.
+
+    Every fake adapter in the suite returns scripted text regardless of message
+    shape, so 1652 passing tests could not touch this. It is the first bug the
+    first real model produced.
+
+    Applied at the MODEL boundary and never written to graph state — the same
+    rule the system prompt follows, and for the same reason: the next agent must
+    see the conversation, not a pile of scaffolding addressed to somebody else.
+    A list ending in a `tool` message is left alone; that is the ReAct loop, and
+    a model answers a tool result perfectly well.
+    """
+    if not messages or messages[-1].get("role") != "assistant":
+        return messages
+    return [*messages, {"role": "user", "content": _FLOOR_HANDOVER}]
+
+
 def from_memsom_messages(messages: Sequence[dict]) -> list[BaseMessage]:
     """The inverse of :func:`to_memsom_messages`.
 
@@ -736,14 +786,16 @@ class MemsomChatModel(BaseChatModel):
         # exactly as it always did.
         if ctx is not None:
             stats = _infer_with_deadline(
-                self.adapter, self.model, to_memsom_messages(messages), params,
+                self.adapter, self.model,
+                hand_over_the_floor(to_memsom_messages(messages)), params,
                 tee,
                 run_timeout_s=(ctx.limits or {}).get("run_timeout_s"),
                 started=ctx.started,
                 max_attempts=(ctx.limits or {}).get("infer_retries", 1))
         else:
-            stats = self.adapter.infer(self.model, to_memsom_messages(messages),
-                                       params, tee) or {}
+            stats = self.adapter.infer(
+                self.model, hand_over_the_floor(to_memsom_messages(messages)),
+                params, tee) or {}
 
         tool_calls = [
             {"id": call.get("id") or f"tc_{i}",

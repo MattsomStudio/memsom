@@ -470,6 +470,129 @@ def test_run_context_sync_and_load_data_roundtrip(tmp_path):
     assert reader.data == {"finding": "42", "nested": {"a": [1, 2]}}
 
 
+class _RealisticAdapter:
+    """A fake that behaves like a REAL chat model about message SHAPE.
+
+    Every other double in this suite returns scripted text no matter what it is
+    handed, which is precisely why 1652 passing tests could not see the bug this
+    class exists to pin: a real model handed a conversation ending in an
+    ASSISTANT message treats that turn as already taken and returns nothing.
+
+    MEASURED against qwen2.5:7b-instruct — same system prompt, same user turn:
+    ``[system, user]`` answered "QUARTZ" at eval_count 4; ``[system, user,
+    assistant]`` returned "" at eval_count 1. This reproduces that rule and
+    nothing else.
+    """
+
+    transport = None
+
+    def __init__(self, reply: str = "SPOKE") -> None:
+        self.reply = reply
+        self.calls: list = []
+
+    def capabilities(self):
+        from memsom.providers.base import Capabilities
+        return Capabilities()
+
+    def status(self):
+        from memsom.providers.base import ProviderStatus
+        return ProviderStatus("up")
+
+    def infer(self, model, messages, params, sink):
+        self.calls.append([dict(m) for m in messages])
+        if messages and messages[-1].get("role") == "assistant":
+            return {}                       # silent, exactly like the real one
+        sink.token(self.reply)
+        return {}
+
+
+def test_a_trailing_assistant_message_gets_the_floor_handed_over():
+    """The fix for the first bug a real model ever produced here.
+
+    memsom's shared thread means every agent after the first opens its turn on
+    somebody else's assistant message. A real model answers that with silence —
+    or, worse and more plausibly, CONTINUES the sentence, which reads like two
+    parallel branches leaking into each other.
+    """
+    from memsom.providers.lc_model import hand_over_the_floor
+
+    ends_user = [{"role": "system", "content": "s"},
+                 {"role": "user", "content": "u"}]
+    assert hand_over_the_floor(ends_user) is ends_user, "untouched, not copied"
+
+    ends_assistant = [*ends_user, {"role": "assistant", "content": "ALPHA"}]
+    out = hand_over_the_floor(ends_assistant)
+    assert out[-1]["role"] == "user"
+    assert "your own instructions" in out[-1]["content"]
+    assert out[:-1] == ends_assistant, "the transcript itself is not rewritten"
+
+    # a ReAct loop ends on a TOOL message and needs no help — a model answers a
+    # tool result perfectly well, and a nudge there would be noise every turn.
+    ends_tool = [*ends_assistant, {"role": "tool", "content": "42"}]
+    assert hand_over_the_floor(ends_tool) is ends_tool
+    assert hand_over_the_floor([]) == []
+
+
+def test_the_second_agent_in_a_chain_actually_SPEAKS(tmp_path):
+    """End to end, against a model double that cares about shape.
+
+    Before the fix this ran clean and produced nothing from B: the run reported
+    `done`, the node event fired, a turn was counted, and zero tokens were
+    emitted. Green tests, silent agent.
+    """
+    import json
+
+    from memsom.providers.agents import AgentRunner, compile_graph
+
+    adapter = _RealisticAdapter("B-SPOKE")
+    doc = _chain_doc_for_shape()
+    runner = AgentRunner(tmp_path / "runs", {"fake": adapter},
+                         tmp_path / "audit.jsonl")
+    rid = runner.start(compile_graph(doc, {"fake": adapter}), "manual")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        data = runner.read_since(rid, 0)
+        if data["status"] in ("done", "error"):
+            break
+        time.sleep(0.02)
+    assert data["status"] == "done", json.dumps(data["events"])[:800]
+
+    spoke = [e for e in data["events"] if e["t"] == "tok"]
+    assert spoke, "no agent said anything at all"
+    nodes = {e.get("node") for e in spoke}
+    assert nodes == {"A", "B"}, f"only {nodes} spoke; the other agent was silent"
+
+
+def _chain_doc_for_shape() -> dict:
+    """trigger -> A -> B -> out, one engine, no tools."""
+    return {
+        "id": "g_shape", "rev": 1,
+        "nodes": [
+            {"id": "t", "type": "trigger",
+             "config": {"mode": "manual", "input": "GO"}},
+            {"id": "eng", "type": "engine",
+             "config": {"provider": "fake", "model": "m"}},
+            {"id": "A", "type": "agent",
+             "config": {"name": "A", "system": "", "limits": {"max_turns": 6}}},
+            {"id": "B", "type": "agent",
+             "config": {"name": "B", "system": "", "limits": {"max_turns": 6}}},
+            {"id": "out", "type": "output", "config": {}},
+        ],
+        "edges": [
+            {"source": "t", "target": "A",
+             "sourceHandle": "run", "targetHandle": "trigger"},
+            {"source": "eng", "target": "A",
+             "sourceHandle": "engine", "targetHandle": "engine"},
+            {"source": "eng", "target": "B",
+             "sourceHandle": "engine", "targetHandle": "engine"},
+            {"source": "A", "target": "B",
+             "sourceHandle": "next", "targetHandle": "in"},
+            {"source": "B", "target": "out",
+             "sourceHandle": "out", "targetHandle": "in"},
+        ],
+    }
+
+
 def test_recall_matches_on_id_AND_name_AND_arguments(tmp_path):
     """Not id alone, and the difference is the whole safety of the record.
 
