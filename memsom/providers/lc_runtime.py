@@ -1498,7 +1498,8 @@ def run_graph(spec, registry: dict, sink, audit_path,
     """
     lc = _lc()
     ctx = lc.RunContext(sink=sink, audit_path=Path(audit_path),
-                        limits=dict(spec.limits))
+                        limits=dict(spec.limits),
+                        scope=dict(getattr(spec, "scope", None) or {}))
     max_steps = spec.limits["max_steps"]
 
     # The shared scratchpad's sidecar, a sibling of checkpoints.db. Every call

@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Optional
 
 from memsom.providers.base import ProviderError, now
+from memsom.providers.scope import check as scope_check, unscoped_tools
 from memsom.providers.session import (
     AgentFileSink, new_session_id, valid_session_id, _final_stats, _first_json,
 )
@@ -233,6 +234,10 @@ class GraphSpec:
     #: Empty for every graph without a fan-out, which is every graph saved
     #: before this existed.
     joins: dict = field(default_factory=dict)
+    #: what this run may touch — ``{"hosts": [...], "paths": [...]}``, read off
+    #: the trigger. Empty means unrestricted, which is every graph saved before
+    #: scope existed and is the deliberate default. See `memsom.providers.scope`.
+    scope: dict = field(default_factory=dict)
 
     @property
     def entry_agent(self) -> AgentSpec:
@@ -292,6 +297,15 @@ class GraphSpec:
             # here or the absence of a guardrail event is unreadable. Per-agent
             # rather than graph-level because it IS per-agent.
             "output_mode": getattr(entry, "output_mode", "off"),
+            # Same argument as output_mode, one layer out: a scope that is never
+            # violated is SILENT, so "this run declared nothing" and "this run
+            # declared a scope and stayed inside it" would otherwise be the same
+            # bytes. `unscoped` names the tools no target rule can bound (shell)
+            # so the hole is a fact on disk at run start rather than a discovery
+            # made later by whoever reads the audit.
+            "scope": dict(getattr(self, "scope", None) or {}),
+            "unscoped": unscoped_tools(
+                t["type"] for a in self.agents.values() for t in a.tool_specs),
             "agents": [
                 {"node_id": a.node_id, "name": a.agent_name,
                  "provider": a.provider_id, "model": a.model,
@@ -380,7 +394,36 @@ def compile_graph(graph: dict, registry: dict, *,
         breakpoints_before=before,
         breakpoints_after=after,
         joins=joins,
+        scope=_scope_of(t_cfg),
     )
+
+
+def _scope_of(trigger_config: dict) -> dict:
+    """Read the run's scope off the trigger node. ``{}`` means unrestricted.
+
+    On the TRIGGER for the same reason ``max_steps`` is: it is a property of the
+    run, not of any one agent. Per-agent scope would also be a hole rather than a
+    feature — the first handoff or fan-out into a second agent would leave it
+    behind, and a containment rule that stops at a node boundary contains
+    nothing.
+
+    Unknown keys are dropped rather than rejected. A scope is a safety
+    declaration, and refusing to compile a graph because someone wrote
+    ``"host"`` for ``"hosts"`` would turn a typo into a dead canvas — but
+    silently honouring it would be worse, so only the two known dimensions are
+    ever read, and what was read rides on the start meta where it can be seen.
+    """
+    raw = trigger_config.get("scope") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for key in ("hosts", "paths"):
+        entries = raw.get(key)
+        if isinstance(entries, (list, tuple)):
+            cleaned = [str(e).strip() for e in entries if str(e).strip()]
+            if cleaned:
+                out[key] = cleaned
+    return out
 
 
 def _compile_agent(node: dict, nodes: dict, edges: list, registry: dict, *,
@@ -1119,6 +1162,20 @@ def _execute_tool(tool: Optional[Tool], name: str, arguments: dict,
         _audit(audit_path, {**intent, "result": "refused-unknown-tool"})
         return (f"unknown tool {name!r}; available: "
                 f"{', '.join(available) or 'none'}", False)
+    # Scope is checked HERE, and the position is doing work. This function is the
+    # only place `Tool.run` is called from in the repo, so there is one gate
+    # rather than one per tool — and it sits AFTER the approval interrupt, so
+    # arguments a human SUBSTITUTED at the gate (`lc_model`'s "edit" verdict) get
+    # checked too. A check any earlier would have trusted the edit.
+    #
+    # Refused like an unknown tool rather than raised: an out-of-scope call is a
+    # mistake the model can correct next turn, and killing the run over it would
+    # throw away whatever the graph had already banked.
+    refusal = scope_check(getattr(ctx, "scope", None), getattr(tool, "type", ""),
+                          arguments)
+    if refusal:
+        _audit(audit_path, {**intent, "result": "refused-out-of-scope"})
+        return f"REFUSED, out of scope: {refusal}", False
     try:
         out = tool.run(arguments, ctx)
     except ToolError as exc:

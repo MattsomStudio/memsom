@@ -44,12 +44,19 @@ class ToolContext:
     ``shared`` is the run's scratch dict — the same object across every agent in
     the graph, so the state tools can pass a value from one agent to the next.
     None when the runner didn't wire one (a bare tool test).
+
+    ``scope`` is what this RUN may touch (see :mod:`memsom.providers.scope`).
+    Carried here for the same reason ``audit_path`` is: the runner enforces it
+    around the call, so a tool cannot forget to be scoped — and a tool that
+    checked its own scope would be a tool that could be written not to. Empty or
+    None means unrestricted, which is every graph saved before scope existed.
     """
 
     audit_path: Path
     timeout_s: int
     max_output_bytes: int
     shared: dict = None
+    scope: dict = None
 
 
 class Tool:

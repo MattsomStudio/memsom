@@ -152,6 +152,11 @@ class RunContext:
     #: the run's shared scratch dict — one object every agent's state tools
     #: read/write, so a value set by one agent is visible to the next.
     data: dict = field(default_factory=dict)
+    #: what this RUN may touch (`memsom.providers.scope`). On the run rather than
+    #: on a node because a scope that stopped at a node boundary would be undone
+    #: by the first handoff or fan-out. Empty means unrestricted, which is every
+    #: graph saved before scope existed.
+    scope: dict = field(default_factory=dict)
     #: where :meth:`sync_data` persists ``data``, or None for a run that cannot
     #: pause (no checkpoint path, a throwaway, a unit test). See sync_data.
     data_path: Optional[Path] = None
@@ -861,6 +866,7 @@ class MemsomTool(BaseTool):
             timeout_s=limits["tool_timeout_s"],
             max_output_bytes=limits["max_tool_output_bytes"],
             shared=ctx.data,
+            scope=getattr(ctx, "scope", None),
         )
         started = now()
         # Snapshot around the call so the scratchpad is persisted only by the
