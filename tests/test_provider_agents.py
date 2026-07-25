@@ -4093,6 +4093,245 @@ def test_handoff_ping_pong_is_bounded_by_max_steps(tmp_path):
         ["A", "B", "A", "B"]
 
 
+# -- gating the handoff -----------------------------------------------------
+
+
+def _gated_handoff_doc(else_branch: str = "ok") -> dict:
+    doc = _handoff_doc(else_branch)
+    _node(doc, "R")["config"]["require_approval"] = True
+    return doc
+
+
+def _handoff_audit(tmp_path: Path) -> list:
+    """Every handoff audit result, in order."""
+    out = []
+    for line in (tmp_path / "audit.jsonl").read_text(
+            encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if rec.get("action") == "handoff":
+            out.append(rec.get("result"))
+    return out
+
+
+def test_a_gated_handoff_pauses_BEFORE_it_routes(tmp_path):
+    """The one tool call a human could not previously stand in front of.
+
+    Handing off is how an agent moves work into a different agent with different
+    tools, so it is the single action that changes what everything downstream is
+    allowed to do — and it was the only one with no gate available at all.
+    """
+    adapter = _HandoffAdapter("esc")
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_handoff_doc(),
+                                     _registry(adapter)), "manual")
+    events, _status, _ = _settle(runner, rid, "paused")
+
+    waiting = [e for e in events if e["t"] == "awaiting_approval"]
+    assert waiting, "the handoff never paused"
+    assert waiting[0]["arguments"]["branch"] == "esc"
+    # and it has NOT routed: the fork is what is waiting on the human
+    assert [e for e in events if e["t"] == "route"] == []
+    assert [e["id"] for e in events if e["t"] == "node"] == ["A"]
+
+
+def test_approving_a_handoff_routes_EXACTLY_once(tmp_path):
+    """The test that pins the interrupt-first ordering.
+
+    Resuming re-runs the tool node from the top, and this tool has no
+    re-entrancy guard — it never touches RunContext.calls. Put the gate after
+    the route event instead of before it and one fork emits TWO route events,
+    which reads as the graph having branched twice.
+    """
+    adapter = _HandoffAdapter("esc")
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_handoff_doc(),
+                                     _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "approve")
+    events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    routes = [e for e in events if e["t"] == "route"]
+    assert len(routes) == 1, f"{len(routes)} route events for one fork"
+    assert routes[0]["branch"] == "esc" and routes[0]["mode"] == "handoff"
+    assert "B" in [e["id"] for e in events if e["t"] == "node"]
+    assert _handoff_audit(tmp_path) == ["handoff:esc"]
+
+
+def test_denying_a_handoff_does_not_take_the_branch(tmp_path):
+    """Deny means "do not go there" — which is NOT "go here instead".
+
+    So the refusal comes back as a plain string, the same contract the unknown-
+    branch path already honours, and the agent keeps the turn it was in. Forcing
+    the else branch would be inventing a destination out of a refusal.
+    """
+    adapter = _HandoffAdapter("esc", once=True)
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_handoff_doc(),
+                                     _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "deny")
+    events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    # B never ran; the run fell to the else branch (C) the ordinary way
+    assert "B" not in [e["id"] for e in events if e["t"] == "node"]
+    esc = [e for e in events if e["t"] == "route" and e["branch"] == "esc"]
+    assert esc == [], "a denied handoff routed anyway"
+    assert _handoff_audit(tmp_path) == ["refused-by-user"]
+
+
+def test_every_handoff_is_audited_even_when_it_is_not_gated(tmp_path):
+    """A handoff used to write NOTHING to the audit — one route event and that
+    was the whole record. It is the call that decides which agent runs next with
+    which tools, so it was the single tool call an audit could not see."""
+    adapter = _HandoffAdapter("esc")
+    runner = _runner(tmp_path, adapter)
+    _events, status, _ = _drain(runner, runner.start(
+        compile_graph(_handoff_doc(), _registry(adapter)), "manual"))
+    assert status == "done"
+    assert _handoff_audit(tmp_path) == ["handoff:esc"]
+
+
+def test_an_ungated_handoff_still_never_pauses(tmp_path):
+    """The default is off, and stays off."""
+    adapter = _HandoffAdapter("esc")
+    runner = _runner(tmp_path, adapter)
+    events, status, _ = _drain(runner, runner.start(
+        compile_graph(_handoff_doc(), _registry(adapter)), "manual"))
+    assert status == "done"
+    assert [e for e in events if e["t"] == "awaiting_approval"] == []
+
+
+def test_require_approval_on_a_decide_router_is_REFUSED(tmp_path):
+    """Loud, never silently ignored. `decide` spends an inference and `match`
+    runs a regex — neither is a call a human can stand in front of, so the flag
+    cannot be honoured. A canvas that LOOKS gated and is not would be the worse
+    of the two failures by a distance."""
+    for mode in ("decide", "match"):
+        doc = _router_doc(mode, _handoff_branches(), "ok",
+                          {"esc": "B", "ok": "C"})
+        _node(doc, "R")["config"]["require_approval"] = True
+        with pytest.raises(ProviderError) as ei:
+            compile_graph(doc, _registry())
+        assert "cannot require approval" in str(ei.value)
+        assert "handoff" in str(ei.value)
+
+
+def test_a_gated_handoff_inside_a_fan_out_is_refused_at_compile(tmp_path):
+    """Mandatory, not a nicety. The handoff tool is synthesised at graph-build
+    time and never appears in tool_specs, so without this the gate walks past
+    every existing check and lands on the exact failure that check exists to
+    prevent: two interrupts in one superstep, one surfaced, the resume erroring
+    with "you must specify the interrupt id" and the human's approval recorded
+    against a fork that never happened."""
+    doc = _fan_doc()
+    # B sits inside the parallel region. Re-route its single outgoing edge
+    # through a GATED handoff router instead of straight to the join, so B keeps
+    # exactly one successor and the only thing that changed is the gate.
+    doc["edges"] = [e for e in doc["edges"]
+                    if not (e["source"] == "B" and e["target"] == "J")]
+    doc["nodes"].append(
+        {"id": "R", "type": "router",
+         "config": {"mode": "handoff", "require_approval": True,
+                    "branches": [{"name": "on", "when": "go"}],
+                    "else": "on"}})
+    doc["edges"] += [
+        {"source": "B", "target": "R",
+         "sourceHandle": "next", "targetHandle": "in"},
+        {"source": "R", "target": "J",
+         "sourceHandle": "case_0", "targetHandle": "in"},
+    ]
+    with pytest.raises(ProviderError) as ei:
+        compile_graph(doc, _registry())
+    msg = str(ei.value)
+    assert "agent 'B' feeds a handoff router that requires approval" in msg
+    assert "runs in parallel with 1 other agent(s) after 'A'" in msg
+
+
+def test_the_same_fan_out_is_fine_once_the_gate_comes_off(tmp_path):
+    """Keeps the refusal above honest — a check that refused every handoff in a
+    fan-out would pass that test too."""
+    doc = _fan_doc()
+    doc["edges"] = [e for e in doc["edges"]
+                    if not (e["source"] == "B" and e["target"] == "J")]
+    doc["nodes"].append(
+        {"id": "R", "type": "router",
+         "config": {"mode": "handoff",
+                    "branches": [{"name": "on", "when": "go"}],
+                    "else": "on"}})
+    doc["edges"] += [
+        {"source": "B", "target": "R",
+         "sourceHandle": "next", "targetHandle": "in"},
+        {"source": "R", "target": "J",
+         "sourceHandle": "case_0", "targetHandle": "in"},
+    ]
+    spec = compile_graph(doc, _registry())
+    assert spec.routers["R"].require_approval is False
+
+
+def test_the_subgraph_config_merges_and_never_replaces():
+    """`config` was defined in `_agent_node` and SHADOWED by `run_node`'s own
+    parameter, so `subgraph.invoke(..., config)` passed langgraph's injected
+    runtime config and that dict reached nothing at all. Two documented
+    invariants were silently not in force: `max_concurrency=1`, which is what
+    keeps a turn's tool calls sequential so the fsync'd audit appends cannot
+    interleave, and the run's own `recursion_limit`.
+
+    MERGE, never substitute — and that is the sharp half. The injected config
+    carries the subgraph's CHECKPOINT NAMESPACE, so passing the local dict
+    instead would break nested checkpointing and therefore resume: a far quieter
+    failure than the one being fixed, and one only a distant test would notice.
+    """
+    injected = {"configurable": {"thread_id": "r1",
+                                 "checkpoint_ns": "node:abc"},
+                "max_concurrency": 8, "metadata": {"langgraph_step": 3}}
+    merged = lc_runtime._merge_subgraph_config(
+        injected, {"recursion_limit": 24, "max_concurrency": 1})
+
+    # ours wins where they overlap
+    assert merged["max_concurrency"] == 1
+    assert merged["recursion_limit"] == 24
+    # and everything langgraph injected survives
+    assert merged["configurable"] == {"thread_id": "r1",
+                                      "checkpoint_ns": "node:abc"}
+    assert merged["metadata"] == {"langgraph_step": 3}
+    # a None config (the unit-test path) still yields our settings
+    assert lc_runtime._merge_subgraph_config(
+        None, {"max_concurrency": 1}) == {"max_concurrency": 1}
+    # and the caller's dict is never mutated
+    assert injected["max_concurrency"] == 8
+
+
+def test_the_merged_config_is_what_the_subgraph_ACTUALLY_gets(
+        tmp_path, monkeypatch):
+    """The test above pins the merge; this one pins that anybody uses it.
+
+    Without it the whole fix is one line at a call site with nothing watching —
+    reverting to the shadowed name passes every other test in the suite, which
+    is exactly how the bug survived in the first place.
+    """
+    seen = []
+    real = lc_runtime._merge_subgraph_config
+
+    def spy(injected, ours):
+        merged = real(injected, ours)
+        seen.append(merged)
+        return merged
+
+    monkeypatch.setattr(lc_runtime, "_merge_subgraph_config", spy)
+    adapter = FakeAdapter([("done", {})])
+    runner = _runner(tmp_path, adapter)
+    _events, status, _ = _drain(runner, runner.start(
+        compile_graph(_chain_doc(), _registry(adapter)), "manual"))
+    assert status == "done"
+    assert seen, "the subgraph was invoked with the raw injected config"
+    assert seen[0]["max_concurrency"] == 1
+    assert "configurable" in seen[0], "the checkpoint namespace was dropped"
+
+
 def test_a_handoff_branch_can_end_the_run(tmp_path):
     """A branch pointing at an output node collapses to END, exactly as it does
     for the other two modes — the target map and the conditional-edge path map

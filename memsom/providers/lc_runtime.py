@@ -319,6 +319,19 @@ def _branch_target(lc, spec, branch: dict):
     return target if target in spec.agents else lc.END
 
 
+def _merge_subgraph_config(injected: dict, ours: dict) -> dict:
+    """What a node's ReAct subgraph is invoked with. Merge, never substitute.
+
+    A named function for two lines because the substitute-instead-of-merge
+    mistake is the quiet one: *injected* carries the subgraph's checkpoint
+    namespace, so dropping it breaks nested checkpointing and therefore resume,
+    and nothing nearby would say so. *ours* wins on the keys it names — those are
+    the run's own budget and the sequential-tools rule — and everything else
+    langgraph put there survives untouched.
+    """
+    return {**(injected or {}), **(ours or {})}
+
+
 def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx,
                 router=None):
     """One canvas agent → one parent-graph node wrapping a ReAct subgraph.
@@ -382,9 +395,11 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx,
         target_map = {branch["name"]: _branch_target(lc, spec, branch)
                       for branch in router.branches}
         else_target = target_map.get(router.else_branch, lc.END)
-        handoff = lc.HandoffTool(name=_HANDOFF_TOOL, branches=router.branches,
-                                 target_map=target_map,
-                                 router_node_id=router.node_id, ctx=ctx)
+        handoff = lc.HandoffTool(
+            name=_HANDOFF_TOOL, branches=router.branches,
+            target_map=target_map, router_node_id=router.node_id, ctx=ctx,
+            require_approval=bool(getattr(router, "require_approval", False)),
+            node_id=node_id)
         tools = [*tools, handoff]
 
     kwargs: dict = {"prompt": agent.system or None}
@@ -418,7 +433,20 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx,
     # letting the tool node fan calls across a thread pool corrupts the fsync'd
     # audit appends and races the counters. A single agent run holds one GPU
     # slot anyway, so parallel local tool calls buy little and cost correctness.
-    config = {"recursion_limit": spec.limits["max_steps"], "max_concurrency": 1}
+    #
+    # Named `subgraph_config`, and the rename is the fix rather than cosmetics.
+    # It used to be `config`, which `run_node(state, config=None)` below SHADOWS
+    # — so `subgraph.invoke(..., config)` passed langgraph's injected runtime
+    # config and this dict reached nothing at all. Both invariants above were
+    # silently not in force: the subgraph inherited the PARENT's
+    # max_concurrency, which on a fan-out graph is greater than 1.
+    #
+    # Merged into the injected config, never substituted for it: that config
+    # carries the subgraph's checkpoint namespace, so replacing it would break
+    # nested checkpointing and therefore resume — a much quieter failure than
+    # the one being fixed.
+    subgraph_config = {"recursion_limit": spec.limits["max_steps"],
+                       "max_concurrency": 1}
     agent_name = agent.agent_name
 
     wants_schema = bool(getattr(agent, "output_schema", None))
@@ -453,7 +481,9 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx,
         # releases on the ParentCommand a handoff tool raises straight through
         # this call, which a manual acquire/release would have to remember to.
         with (engine_lock if engine_lock is not None else nullcontext()):
-            result = subgraph.invoke({"messages": state["messages"]}, config)
+            result = subgraph.invoke(
+                {"messages": state["messages"]},
+                _merge_subgraph_config(config, subgraph_config))
         if wants_schema and "structured_response" in result:
             data = _jsonable(result["structured_response"])
             ctx.stats["structured"] = data      # carried into the done line

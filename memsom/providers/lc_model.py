@@ -1156,6 +1156,15 @@ class HandoffTool(BaseTool):
     #: parent already holds. Slicing rather than leaning on ``add_messages``
     #: id-dedup is the same call ``run_node`` itself makes for its normal return.
     prior: int = 0
+    #: when true, the handoff PAUSES for a human APPROVE/DENY before it routes.
+    #: This was the one tool call in memsom a human could not intercept, and it
+    #: is the highest-leverage one to be able to: handing off is how an agent
+    #: moves work into a DIFFERENT agent with DIFFERENT tools, so it is the
+    #: single action that changes what everything downstream is allowed to do.
+    require_approval: bool = False
+    #: the AGENT node this tool belongs to, for turn attribution on its audit
+    #: line — the same reason :class:`MemsomTool` carries one.
+    node_id: str = ""
 
     def __init__(self, *, name: str, branches: list, target_map: dict,
                  router_node_id: str, ctx: RunContext, **kwargs: Any) -> None:
@@ -1184,6 +1193,34 @@ class HandoffTool(BaseTool):
             return (f"unknown branch {branch!r}. Valid branches: "
                     + ", ".join(sorted(self.target_map)) + ".")
 
+        # The gate, and it is FIRST for the same load-bearing reason MemsomTool's
+        # is: on resume LangGraph re-runs the tool node from the top, so anything
+        # before interrupt() happens twice. This tool has no re-entrancy guard at
+        # all — it never touches RunContext.calls — so a gate placed after the
+        # route event below would emit TWO route events for one fork, and a fork
+        # that reads as having happened twice is worse than one nobody approved.
+        if self.require_approval:
+            from langgraph.types import interrupt
+            decision = interrupt({"kind": "approval", "tool": self.name,
+                                  "arguments": {"branch": branch,
+                                                "message": message or ""},
+                                  "id": tool_call_id or None})
+            verdict, _edited = _normalize_decision(decision)
+            if verdict != "approve":
+                # A plain string, exactly like the unknown-branch path above, and
+                # deliberately NOT a forced else-branch: "do not go there" is not
+                # "go here instead", and picking a destination the human also did
+                # not choose would be inventing a decision out of a refusal. The
+                # agent keeps its turn; if it gives up, run_node's existing else
+                # fallback already covers "never handed off".
+                #
+                # The honest consequence: a model that immediately re-calls
+                # handoff asks the human again. Bounded by max_turns, and better
+                # than silently overriding the agent's plan.
+                self._audit(ctx, tool_call_id, branch, "refused-by-user")
+                return (f"handoff to {branch!r} was REFUSED by the user. You "
+                        "still hold this turn — do something else, or stop.")
+
         # The existing route event, verbatim — same keys, same order, just a
         # third value for `mode`. RunMonitor renders `mode` as free text and
         # `read_since` never learned the vocabulary, so a handoff needs no new
@@ -1191,6 +1228,7 @@ class HandoffTool(BaseTool):
         if ctx is not None:
             ctx.sink.event({"t": "route", "router": self.router_node_id,
                             "branch": branch, "mode": "handoff", "ts": now()})
+        self._audit(ctx, tool_call_id, branch, f"handoff:{branch}")
 
         carried = list((state or {}).get("messages") or [])[self.prior:]
         carried.append(ToolMessage(content=f"handing off to {branch}",
@@ -1206,6 +1244,36 @@ class HandoffTool(BaseTool):
         from langgraph.types import Command
         return Command(goto=self.target_map[branch],
                        update={"messages": carried}, graph=Command.PARENT)
+
+    def _audit(self, ctx: RunContext, call_id: str, branch: str,
+               result: str) -> None:
+        """Record the handoff. The runner writes it; the tool never does.
+
+        A handoff used to write NOTHING here — one ``route`` event and that was
+        the whole record. Every other tool call in the runtime leaves a two-phase
+        intent/result pair, so the one call that decides which agent runs next,
+        with which tools, was the single one an audit could not see. Gating it
+        without also recording it would have produced the odd shape where a
+        REFUSED handoff is on disk and a taken one is not.
+
+        Defensive because the audit path is: a run must not die because
+        housekeeping could not write. `_execute_tool`'s intent line is allowed to
+        kill a run — that one gates the action — but this is a record of
+        something already decided.
+        """
+        if ctx is None:
+            return
+        from memsom.providers.handlers import _audit
+        try:
+            _audit(ctx.audit_path, {
+                "action": "handoff", "tool": self.name,
+                "id": call_id or "handoff",
+                "arguments": {"branch": str(branch)[:200],
+                              "router": self.router_node_id},
+                "result": result,
+            })
+        except OSError:
+            pass
 
 
 def _handoff_description(name: str, branches: list) -> str:

@@ -189,6 +189,11 @@ class RouterSpec:
     branches: list            # [{"name","when","target_node"}]
     else_branch: str          # always one of branches[*]["name"]
     source_agent: str         # node id of the agent whose output it reads
+    #: handoff mode only — pause for a human APPROVE/DENY before the branch is
+    #: taken. Lives here rather than on the feeding agent's ``tool_specs``
+    #: because the handoff tool is synthesised at graph-build time and is not a
+    #: tool node anybody wired; the router IS the thing being gated.
+    require_approval: bool = False
 
 
 @dataclass
@@ -374,7 +379,7 @@ def compile_graph(graph: dict, registry: dict, *,
     # same reason breakpoints are: an unreachable agent is first and foremost an
     # unreachable agent, and that is the error the user can act on.
     joins = _fan_joins(agents, flow_edges)
-    _require_no_gate_in_fan_out(agents, flow_edges)
+    _require_no_gate_in_fan_out(agents, flow_edges, routers)
     before, after = _validate_breakpoints(agents, routers, flow_edges)
 
     t_cfg = trigger.get("config") or {}
@@ -595,8 +600,23 @@ def _compile_router(node: dict, nodes: dict, edges: list,
             f"router {label!r} needs exactly one agent wired into it "
             f"(found {len(feeders)})")
 
+    # A gate only means something where there is a CALL to gate. `decide` spends
+    # an inference and `match` runs a regex — neither is a tool the human could
+    # stand in front of, so the flag cannot be honoured there. Refused rather
+    # than ignored: quietly dropping a safety flag leaves a canvas that looks
+    # gated and is not, which is the worse of the two failures by a distance.
+    gated = bool(cfg.get("require_approval"))
+    if gated and mode != "handoff":
+        raise ProviderError(
+            f"router {label!r} is in {mode!r} mode and cannot require approval. "
+            "Only a handoff can be gated — it is the only mode where the branch "
+            "is chosen by a TOOL CALL a human can stand in front of; decide "
+            "spends an inference and match runs a regex. Switch the router to "
+            "handoff, or remove require_approval")
+
     return RouterSpec(node_id=node["id"], mode=mode, branches=branches,
-                      else_branch=else_branch, source_agent=feeders[0])
+                      else_branch=else_branch, source_agent=feeders[0],
+                      require_approval=gated)
 
 
 def _flow_edges(agents: dict, routers: dict, nodes: dict, edges: list) -> dict:
@@ -825,7 +845,8 @@ def _attribute_join(sources: list, fans: dict, regions: dict):
     return None
 
 
-def _require_no_gate_in_fan_out(agents: dict, flow_edges: dict) -> None:
+def _require_no_gate_in_fan_out(agents: dict, flow_edges: dict,
+                                routers: dict = None) -> None:
     """Refuse an approval-gated tool on an agent that runs in parallel.
 
     Not a LangGraph limitation — it combines simultaneous interrupts from
@@ -858,6 +879,15 @@ def _require_no_gate_in_fan_out(agents: dict, flow_edges: dict) -> None:
     "one gate anywhere in a parallel region" is a rule a user can hold, and it
     stops being a rule the moment editing an unrelated branch can invalidate it.
     """
+    # A GATED HANDOFF counts, and covering it here is not optional. The handoff
+    # tool is synthesised at graph-build time and never appears in tool_specs, so
+    # without this line a gated handoff sails past every check above and lands
+    # exactly on the failure this function exists to prevent — two interrupts in
+    # one superstep, one surfaced, the resume erroring with "you must specify the
+    # interrupt id" and the human's approval recorded against a fork that never
+    # happened.
+    gated_handoff = {r.source_agent for r in (routers or {}).values()
+                     if r.mode == "handoff" and r.require_approval}
     regions = _fan_regions(agents, flow_edges)
     for source, branches in regions.items():
         for owner, region in branches.items():
@@ -868,12 +898,15 @@ def _require_no_gate_in_fan_out(agents: dict, flow_edges: dict) -> None:
             for node_id, agent in agents.items():
                 if node_id not in region:
                     continue
-                if not any(spec.get("require_approval")
-                           for spec in agent.tool_specs):
+                by_handoff = node_id in gated_handoff
+                if not by_handoff and not any(spec.get("require_approval")
+                                              for spec in agent.tool_specs):
                     continue
+                what = ("feeds a handoff router that requires approval"
+                        if by_handoff else "has a tool that requires approval")
                 raise ProviderError(
-                    f"agent {agent.agent_name!r} has a tool that requires "
-                    f"approval and runs in parallel with "
+                    f"agent {agent.agent_name!r} {what} "
+                    f"and runs in parallel with "
                     f"{len(others)} other agent(s) after "
                     f"{agents[source].agent_name!r}. Two approval gates can open "
                     "at once and memsom can only surface one, so the run would "
