@@ -26,6 +26,11 @@ ENV_SWITCH = "MEMSOM_NET_STUB"
 #: public name's NXDOMAIN from a router that has lost its upstream is not.
 PUBLIC_FALLBACK = ("1.1.1.1", "8.8.8.8")
 
+#: The same two resolvers, reached over RFC 8484 instead of cleartext UDP. See
+#: `doh.py` — these are IP literals because their certificates carry IP SANs,
+#: which is what removes the bootstrap problem.
+DOH_ENDPOINTS = ("https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query")
+
 #: Names a unicast DNS stub structurally CANNOT answer. mDNS lives on multicast
 #: 5353, NetBIOS and LLMNR elsewhere again; a single-label name depends on a
 #: search list we may not have read correctly. These fall through to the OS
@@ -60,8 +65,23 @@ class NetPolicy:
     enabled: bool = True
     #: Explicit nameservers. Empty means discover them from OS config.
     nameservers: tuple = ()
-    #: Consult PUBLIC_FALLBACK when the configured servers do not answer.
+    #: Consult a public resolver when the configured servers do not answer.
     public_fallback: bool = True
+    #: Reach that public resolver over DoH rather than cleartext UDP.
+    doh: bool = True
+    #: Where. IP literals only — see `doh.py`.
+    doh_endpoints: tuple = DOH_ENDPOINTS
+    #: May the public fallback DOWNGRADE to cleartext UDP when DoH fails?
+    #:
+    #: Off, and that is the security decision this flag exists to record. An
+    #: on-path attacker who wants a forgeable exchange only has to drop our 443
+    #: traffic to the resolver; if we then retried in cleartext they would get
+    #: exactly what they blocked us for. The availability argument for allowing
+    #: it is thin — the realistic case is a network where both ports are dead,
+    #: and there the retry fails anyway. Turn it on with
+    #: MEMSOM_NET_PLAINTEXT_FALLBACK=1 for a network that genuinely blocks 443
+    #: to public resolvers; every use is logged.
+    plaintext_public_fallback: bool = False
     #: Extra CIDRs to deny, on top of the built-in gauntlet.
     extra_denied: tuple = ()
     #: Per-server UDP wait on the SECOND pass.
@@ -109,13 +129,19 @@ def from_env(base: NetPolicy | None = None) -> NetPolicy:
     """
     policy = base or NetPolicy()
     servers = os.environ.get("MEMSOM_NET_NAMESERVERS", "").strip()
+    endpoints = os.environ.get("MEMSOM_NET_DOH_ENDPOINTS", "").strip()
     return replace(
         policy,
         enabled=_env_flag(ENV_SWITCH, policy.enabled),
         public_fallback=_env_flag("MEMSOM_NET_PUBLIC_FALLBACK",
                                   policy.public_fallback),
+        doh=_env_flag("MEMSOM_NET_DOH", policy.doh),
+        plaintext_public_fallback=_env_flag("MEMSOM_NET_PLAINTEXT_FALLBACK",
+                                            policy.plaintext_public_fallback),
         nameservers=tuple(s.strip() for s in servers.split(",") if s.strip())
         or policy.nameservers,
+        doh_endpoints=tuple(e.strip() for e in endpoints.split(",") if e.strip())
+        or policy.doh_endpoints,
     )
 
 

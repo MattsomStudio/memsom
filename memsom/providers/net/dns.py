@@ -20,13 +20,19 @@ extra steps, so every check below exists to throw something away:
 * **Every length is bounded before it is used** — label ≤63, name ≤255, RDLENGTH
   against what is actually left in the buffer.
 
-**What this deliberately is not.** No DNSSEC, no DoT, no DoH: this is plaintext
-UDP to whatever DHCP handed us, so an *on-path* attacker is no worse off than
-they were against the OS resolver. What it buys is independence from the OS
-resolver's cache — which is the thing that actually broke — and a resolution
-result we can hand straight to the connector so policy is applied to the address
-we truly dial. DoH over `net/connect.py` is the natural next step and is what
-would earn the stronger claim.
+**What this deliberately is not.** No DNSSEC and no DoT. Queries to the
+*configured* nameservers are plaintext UDP — they have to be, because a home
+router's dnsmasq does not speak anything else — so against an on-path attacker
+those are no better off than the OS resolver was. What this buys is independence
+from the OS resolver's cache, which is the thing that actually broke, and a
+resolution result handed straight to the connector so policy applies to the
+address we truly dial.
+
+The **public fallback is the exception**, and it runs over DoH (`doh.py`). That
+is the one path where we deliberately hand a name to a third party across a
+network we do not control, so it is the one path where authenticating the
+exchange is worth its cost. It does not downgrade to cleartext if DoH fails; see
+`policy.plaintext_public_fallback` for why that would hand the attacker the win.
 """
 
 from __future__ import annotations
@@ -250,6 +256,9 @@ class StubResolver:
         self._lock = threading.Lock()
         #: The last server that answered anything. See `_preferred_order`.
         self._preferred = None
+        #: Built on first fallback, not at construction — most processes never
+        #: need one, and building it imports the connector.
+        self._doh = None
 
     # -- configuration -----------------------------------------------------
 
@@ -448,14 +457,7 @@ class StubResolver:
                 ttl = min(ttl, ttl6) if v6 else ttl
 
         if not found and self._may_fall_back(name, bool(servers), nxdomain):
-            _policy.note(self.policy,
-                         f"dns: falling back to public resolvers for {name}")
-            fallback = list(_policy.PUBLIC_FALLBACK)
-            deadline = time.monotonic() + budget
-            found, ttl, _ = self._ask(fallback, name, TYPE_A, deadline)
-            if want_v6:
-                v6, _, _ = self._ask(fallback, name, TYPE_AAAA, deadline)
-                found = found + v6
+            found, ttl = self._ask_public(name, want_v6, budget)
 
         self._store(cache_key, found,
                     ttl if found else self.policy.negative_ttl_s)
@@ -465,6 +467,55 @@ class StubResolver:
                 + (" (all nameservers said it does not exist)" if nxdomain
                    else " (no nameserver answered)"))
         return found
+
+    def _public_client(self):
+        """The DoH client, built once. Imported late to keep the cycle open."""
+        if self._doh is None:
+            from memsom.providers.net import doh
+            self._doh = doh.DohClient(self.policy)
+        return self._doh
+
+    def _ask_public(self, name, want_v6, budget):
+        """The fallback, authenticated. `(addresses, ttl)`.
+
+        This is the only query we send to someone we did not configure, so it is
+        the only one worth encrypting: over cleartext UDP it leaks the name to
+        everyone on the path and trusts a packet nobody signed. On DoH failure it
+        stops rather than retrying in cleartext — a downgrade an on-path attacker
+        could force by dropping our 443 traffic, which is precisely the party the
+        encryption was for.
+        """
+        _policy.note(self.policy,
+                     f"dns: falling back to public resolvers for {name}"
+                     f" ({'DoH' if self.policy.doh else 'cleartext UDP'})")
+        if self.policy.doh:
+            try:
+                client = self._public_client()
+                _, found, ttl = client.query(name, TYPE_A, budget)
+                if want_v6:
+                    try:
+                        _, v6, _ = client.query(name, TYPE_AAAA, budget)
+                        found = list(found) + list(v6)
+                    except DnsError:
+                        pass                   # an A answer alone is usable
+                if found:
+                    return found, (ttl if ttl is not None
+                                   else self.policy.negative_ttl_s)
+            except DnsError as exc:
+                _policy.note(self.policy, f"dns: DoH fallback failed: {exc}")
+            if not self.policy.plaintext_public_fallback:
+                return [], self.policy.negative_ttl_s
+            _policy.note(self.policy,
+                         "dns: DOWNGRADING public fallback to cleartext UDP "
+                         "(MEMSOM_NET_PLAINTEXT_FALLBACK is set)")
+
+        fallback = list(_policy.PUBLIC_FALLBACK)
+        deadline = time.monotonic() + budget
+        found, ttl, _ = self._ask(fallback, name, TYPE_A, deadline)
+        if want_v6:
+            v6, _, _ = self._ask(fallback, name, TYPE_AAAA, deadline)
+            found = found + v6
+        return found, ttl
 
     def _should_hand_back(self, name: str) -> bool:
         """Names a unicast stub cannot answer — mDNS, NetBIOS, LLMNR, search."""

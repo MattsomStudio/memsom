@@ -261,6 +261,20 @@ def _resolver(monkeypatch, answers, hosts=None, **kw):
         return rcode, [ipaddress.ip_address(a) for a in found], 300, False
 
     monkeypatch.setattr(res, "_exchange_udp", fake)
+
+    # The public fallback runs over DoH now, so faking UDP alone no longer keeps
+    # a test offline — caught when this fixture let one reach the real internet
+    # and return real Cloudflare addresses. Key public answers on "doh".
+    class _FakeDoh:
+        def query(self, name, qtype, timeout=None):
+            asked.append(("doh", name, qtype))
+            try:
+                rcode, found = answers[("doh", qtype)]
+            except KeyError:
+                raise dns.DnsError("no DoH endpoint answered")
+            return rcode, [ipaddress.ip_address(a) for a in found], 300
+
+    res._doh = _FakeDoh()
     return res, asked
 
 
@@ -340,12 +354,28 @@ def test_nxdomain_for_an_internal_name_is_not_second_guessed(monkeypatch):
 
 def test_a_server_that_does_not_answer_falls_back_to_public_resolvers(monkeypatch):
     """The 2026-07-08 failure mode: the router's dnsmasq stopped answering while
-    its forwards were already correct."""
+    its forwards were already correct.
+
+    The fallback goes over DoH — see `doh.py`. It is the one query we send to a
+    party we did not configure, across a path we do not own, so it is the one
+    worth encrypting."""
     res, asked = _resolver(monkeypatch, {
-        ("1.1.1.1", dns.TYPE_A): (dns.RCODE_NOERROR, ["93.184.216.34"])})
+        ("doh", dns.TYPE_A): (dns.RCODE_NOERROR, ["93.184.216.34"])})
+    assert res.resolve("example.com", want_v6=False) == [
+        ipaddress.IPv4Address("93.184.216.34")]
+    assert ("doh", "example.com", dns.TYPE_A) in asked
+
+
+def test_the_fallback_is_cleartext_only_when_doh_is_switched_off(monkeypatch):
+    """The pre-DoH behaviour is still reachable, and still correct — but it is
+    now something you choose rather than what you get."""
+    res, asked = _resolver(monkeypatch, {
+        ("1.1.1.1", dns.TYPE_A): (dns.RCODE_NOERROR, ["93.184.216.34"])},
+        doh=False)
     assert res.resolve("example.com", want_v6=False) == [
         ipaddress.IPv4Address("93.184.216.34")]
     assert "1.1.1.1" in [server for server, _, _ in asked]
+    assert "doh" not in [server for server, _, _ in asked]
 
 
 def test_the_public_fallback_can_be_switched_off(monkeypatch):
@@ -401,7 +431,9 @@ def test_the_fallback_is_logged_rather_than_silent(monkeypatch):
     """Who answered the question changed. That must never happen quietly."""
     lines = []
     res, _ = _resolver(monkeypatch, {
-        ("1.1.1.1", dns.TYPE_A): (dns.RCODE_NOERROR, ["93.184.216.34"])},
+        ("doh", dns.TYPE_A): (dns.RCODE_NOERROR, ["93.184.216.34"])},
         log=lines.append)
     res.resolve("example.com", want_v6=False)
     assert any("falling back" in line for line in lines)
+    assert any("DoH" in line for line in lines), \
+        "the log must say which transport carried it"

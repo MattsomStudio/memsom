@@ -25,6 +25,9 @@ def collect(name: str | None = None) -> dict:
                                   or nameservers.system_nameservers(),
         "public_fallback": pol.public_fallback,
         "public_fallback_servers": list(policy.PUBLIC_FALLBACK),
+        "public_fallback_doh": pol.doh,
+        "doh_endpoints": list(pol.doh_endpoints),
+        "plaintext_public_fallback": pol.plaintext_public_fallback,
         "search_suffixes": nameservers.search_suffixes(),
         "hosts_file": str(nameservers.hosts_path()),
         "hosts_entries": {k: v for k, v in sorted(hosts.items())
@@ -54,8 +57,14 @@ def _human(report: dict) -> str:
     lines.append(f"stub resolver     : {'ON' if report['stub_enabled'] else 'OFF'}")
     lines.append("nameservers       : "
                  + (", ".join(report["nameservers_configured"]) or "NONE FOUND"))
+    if report["public_fallback_doh"]:
+        transport = "DoH " + ", ".join(report["doh_endpoints"])
+        if report["plaintext_public_fallback"]:
+            transport += "  (cleartext downgrade ALLOWED)"
+    else:
+        transport = "cleartext UDP " + ", ".join(report["public_fallback_servers"])
     lines.append(f"public fallback   : {'on' if report['public_fallback'] else 'off'}"
-                 f" ({', '.join(report['public_fallback_servers'])})")
+                 f" via {transport}")
     lines.append("search suffixes   : "
                  + (", ".join(report["search_suffixes"]) or "-"))
     lines.append(f"ipv4 route        : {report['ipv4_global_route']}")

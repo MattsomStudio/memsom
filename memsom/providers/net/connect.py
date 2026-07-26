@@ -180,7 +180,18 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
             f"{last if last is not None else 'no address was reachable'}")
 
     def _dial(self, address, timeout):
-        """A socket to one vetted address. Deliberately not `create_connection`."""
+        """A socket to one vetted address. Deliberately not `create_connection`.
+
+        `TCP_NODELAY` is set here because **the stock `HTTPConnection.connect`
+        sets it and we replaced that method**, so overriding it silently turned
+        Nagle back on for every request in the repo. The cost is not theoretical:
+        `http.client` writes the header block and the body as separate sends, and
+        with Nagle the second waits for the first's ACK — one extra round trip
+        per request. Measured 2026-07-25 against a DoH endpoint on an already
+        established connection: **563ms with Nagle, 313ms without**, on a link
+        whose RTT is ~250ms. Anything with a request body pays it — every
+        provider call, not just this one.
+        """
         family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
         sock = socket.socket(family, socket.SOCK_STREAM)
         try:
@@ -189,6 +200,7 @@ class PinnedHTTPConnection(http.client.HTTPConnection):
             if self.source_address:
                 sock.bind(self.source_address)
             sock.connect((str(address), self.port))
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             return sock
         except OSError:
             sock.close()

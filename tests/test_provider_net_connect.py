@@ -116,6 +116,26 @@ def test_the_address_dialled_is_the_address_that_was_vetted(server):
     assert resolver.calls == ["127.0.0.1"]
 
 
+def test_the_socket_keeps_tcp_nodelay(server):
+    """Replacing a base method silently drops what it did.
+
+    `http.client.HTTPConnection.connect` sets `TCP_NODELAY`; `connect()` here
+    overrides that method wholesale, so for a while every request in the repo ran
+    with Nagle back on. `http.client` writes headers and body as separate sends,
+    and Nagle makes the second wait for the first's ACK — one extra round trip on
+    anything with a body. Measured 2026-07-25 on an established connection to a
+    DoH endpoint: **563ms with Nagle, 313ms without**, RTT ~250ms.
+    """
+    conn = connect.PinnedHTTPConnection(
+        "127.0.0.1", int(server.rsplit(":", 1)[1]), timeout=10,
+        resolver=_FakeResolver({"127.0.0.1": ["127.0.0.1"]}), guard=False)
+    conn.connect()
+    try:
+        assert conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # the streaming contract every provider depends on
 # ---------------------------------------------------------------------------

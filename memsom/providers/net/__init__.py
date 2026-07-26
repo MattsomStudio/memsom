@@ -18,12 +18,16 @@ Owning resolution buys two things, and the second is the more valuable one:
    time. That gap is DNS rebinding. The connector closes it by vetting on every
    resolution and dialling a vetted address.
 
-**What this does NOT claim.** There is no DNSSEC, no DoT and no DoH here — this
-is plaintext UDP to whatever DHCP handed us, so against an *on-path* attacker it
-is no better than the OS resolver. The honest claim is: immune to a broken or
-locally-poisoned OS resolver cache, and the connected address is policy-checked.
-Not "immune to DNS poisoning". DoH over the connector is the obvious next step
-and would let the stronger claim be made honestly.
+**What this does NOT claim.** There is no DNSSEC and no DoT, and queries to the
+nameservers DHCP handed us are plaintext UDP — a home router cannot take anything
+else — so against an *on-path* attacker those lookups are no better than the OS
+resolver's. The honest claim is: immune to a broken or locally-poisoned OS
+resolver cache, and the connected address is policy-checked. Not "immune to DNS
+poisoning".
+
+The **public fallback** is the exception and runs over DoH (`doh.py`): it is the
+one lookup we send to a third party across a path we do not own, so it is the one
+worth authenticating — and it will not downgrade to cleartext to stay available.
 """
 
 from __future__ import annotations
@@ -46,7 +50,14 @@ from memsom.providers.net.connect import (
     urlopen,
 )
 from memsom.providers.net.dns import DnsError, StubResolver
+from memsom.providers.net.doh import (
+    DEFAULT_ENDPOINTS,
+    DohClient,
+    DohError,
+    DohResolver,
+)
 from memsom.providers.net.policy import (
+    DOH_ENDPOINTS,
     ENV_SWITCH,
     INTERNAL_SUFFIXES,
     PRIVATE_SUFFIXES,
@@ -57,13 +68,18 @@ from memsom.providers.net.policy import (
 )
 
 __all__ = [
+    "DEFAULT_ENDPOINTS",
     "DENIED",
+    "DOH_ENDPOINTS",
     "ENV_SWITCH",
     "INTERNAL_SUFFIXES",
     "MAX_REDIRECTS",
     "PRIVATE_SUFFIXES",
     "PUBLIC_FALLBACK",
     "DnsError",
+    "DohClient",
+    "DohError",
+    "DohResolver",
     "NetPolicy",
     "NetRefused",
     "StubResolver",
