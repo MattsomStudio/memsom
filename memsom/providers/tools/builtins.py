@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memsom.providers.base import run_no_window
+from memsom.providers import defense
 from memsom.providers.net import connect as net
 from memsom.providers.tools.base import Tool, ToolContext, ToolError, truncate_output
 
@@ -104,6 +105,24 @@ class HttpFetch(Tool):
 
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         scope = getattr(ctx, "scope", None) or {}
+
+        # Plaintext HTTP has no authentication, so anyone on the path — a café
+        # router, an ISP, a VPN provider — writes whatever they like into the
+        # response, and that response becomes an agent's context. HTTPS makes
+        # that a certificate problem instead of a free-for-all.
+        #
+        # NOT refused by default, deliberately. `scope.py`'s stated invariant is
+        # that a run declaring no scope behaves exactly as it did before scope
+        # existed; LAN devices routinely have no TLS, and silently breaking every
+        # existing graph would be a breaking change wearing a safety feature's
+        # clothes. Opt in with `scope.require_https`, and the result is marked
+        # either way so the model is never told a plaintext page is trustworthy.
+        if scheme == "http" and scope.get("require_https"):
+            raise ToolError(
+                f"refused: {url} is plaintext http and this run requires https. "
+                f"Anything on the network path can rewrite that page, and the "
+                f"page becomes your context. Drop require_https on the trigger "
+                f"to allow it deliberately.")
         try:
             # The GUARDED path: this URL came from the model, so the address it
             # resolves to is judged before a socket opens, and every redirect hop
@@ -142,7 +161,22 @@ class HttpFetch(Tool):
             raise ToolError(f"read failed: {exc}") from exc
         finally:
             resp.close()
-        return f"HTTP {status} {reason}\ncontent-type: {ctype}\n\n{body}"
+
+        # This text is about to become an agent's context, and that agent holds
+        # shell and handoff. Everything from here is untrusted DATA, never
+        # instructions — see memsom.providers.defense.
+        body, info = defense.defend(body)
+        notice = defense.summarise(info)
+
+        header = f"HTTP {status} {reason}\ncontent-type: {ctype}"
+        if urllib.parse.urlsplit(final).scheme == "http":
+            # Say it every time. A model that is not told the channel was
+            # unauthenticated has no way to weigh the content correctly.
+            header += ("\ntransport: PLAINTEXT HTTP — unauthenticated, any host "
+                       "on the network path could have written this")
+        if notice:
+            header += "\n" + notice
+        return f"{header}\n\n{body}"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +268,16 @@ class WebSearch(Tool):
             snippet = snippets[i - 1] if i - 1 < len(snippets) else ""
             blocks.append(
                 f"{i}. {_clean(title)}\n{_unwrap_ddg(html.unescape(href))}\n{snippet}")
-        return _cap("\n\n".join(blocks), ctx.max_output_bytes)
+
+        # Titles and snippets are written by whoever owns the result page, which
+        # is to say by anyone who can rank for a query. Same untrusted-data rule
+        # as http_fetch; a search result is not a smaller threat than a fetch,
+        # just a shorter one.
+        defended, info = defense.defend("\n\n".join(blocks))
+        notice = defense.summarise(info)
+        if notice:
+            defended = f"{notice}\n\n{defended}"
+        return _cap(defended, ctx.max_output_bytes)
 
 
 # ---------------------------------------------------------------------------

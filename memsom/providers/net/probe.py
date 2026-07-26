@@ -2,10 +2,10 @@
 
 `AI_ADDRCONFIG` answers the second question and reports it as the first, and that
 is precisely the bug this subpackage was built for. Measured 2026-07-25: a
-router-advertised **ULA** prefix (`fda5:3116:1d09::/48`, i.e. `fd00::/8` — private,
-not globally routable) was enough to convince Windows it was IPv6-capable, so it
-accepted an AAAA-only answer for a host and every connection attempt died at
-`WinError 10051, network unreachable`. The address existed; the route never did.
+router-advertised **ULA** prefix (`fd00::/8` — private, not globally routable)
+was enough to convince Windows it was IPv6-capable, so it accepted an AAAA-only
+answer for a host and every connection attempt then died at `WinError 10051,
+network unreachable`. The address existed; the route never did.
 
 So we ask the question that matters — *is there a route* — by opening a UDP
 socket and connecting it. A `SOCK_DGRAM` connect sends nothing; it only forces

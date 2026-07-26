@@ -415,8 +415,8 @@ def _scope_of(trigger_config: dict) -> dict:
     Unknown keys are dropped rather than rejected. A scope is a safety
     declaration, and refusing to compile a graph because someone wrote
     ``"host"`` for ``"hosts"`` would turn a typo into a dead canvas — but
-    silently honouring it would be worse, so only the two known dimensions are
-    ever read, and what was read rides on the start meta where it can be seen.
+    silently honouring it would be worse, so only the known dimensions are ever
+    read, and what was read rides on the start meta where it can be seen.
     """
     raw = trigger_config.get("scope") or {}
     if not isinstance(raw, dict):
@@ -428,6 +428,11 @@ def _scope_of(trigger_config: dict) -> dict:
             cleaned = [str(e).strip() for e in entries if str(e).strip()]
             if cleaned:
                 out[key] = cleaned
+    # A boolean rather than a list: "refuse plaintext http". Off by default so an
+    # existing graph keeps working; see HttpFetch.run for why that default is the
+    # honest one rather than the timid one.
+    if raw.get("require_https") is True:
+        out["require_https"] = True
     return out
 
 
