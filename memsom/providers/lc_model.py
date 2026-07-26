@@ -250,10 +250,39 @@ class RunContext:
     #: local VRAM; empty for a graph whose engines are all remote. Two nodes on
     #: ONE 12 GB card are not parallelism, they are an OOM with extra steps.
     engine_locks: dict = field(default_factory=dict)
+    #: router node ids whose handoff a human REFUSED in this run. Keyed by node
+    #: rather than a bool for the same reason ``node_loop`` is: under fan-out two
+    #: agents can each hold a gated router, and one refusal must not stop the
+    #: other's fallback. Consulted by ``lc_runtime.run_node`` — see
+    #: :meth:`mark_handoff_denied`.
+    denied_handoffs: set = field(default_factory=set)
     #: guards every counter above. Not the sidecar — that has its own, because
     #: the sidecar lock is held across a file write and this one must never be.
     _lock: Any = field(default_factory=threading.Lock, repr=False,
                        compare=False)
+
+    def mark_handoff_denied(self, router_id: str) -> None:
+        """Record that a human refused ``router_id``'s handoff.
+
+        The refusal has to outlive the tool call because the tool's own answer
+        is only a *string* handed back to the model — the agent keeps its turn
+        by design. What must not happen is the agent then declining to route at
+        all and the run taking the router's ELSE branch anyway: else exists so a
+        router cannot hang, and a router that cannot hang is not a licence to
+        move work into another agent that a human just refused to move it into.
+
+        Survives a pause by construction rather than by persistence: a resume
+        re-enters the node the gate paused inside, so the ``interrupt()`` that
+        returns the refusal and the else-fallback that consults this flag are in
+        the SAME ``run_node`` frame, holding the SAME (freshly built) context.
+        """
+        with self._lock:
+            self.denied_handoffs.add(router_id)
+
+    def handoff_denied(self, router_id: str) -> bool:
+        """True when this run's ``router_id`` handoff was refused by a human."""
+        with self._lock:
+            return router_id in self.denied_handoffs
 
     def load_data(self) -> None:
         """Rehydrate ``data`` from the sidecar written by a previous segment.
@@ -1263,12 +1292,24 @@ class HandoffTool(BaseTool):
                 # deliberately NOT a forced else-branch: "do not go there" is not
                 # "go here instead", and picking a destination the human also did
                 # not choose would be inventing a decision out of a refusal. The
-                # agent keeps its turn; if it gives up, run_node's existing else
-                # fallback already covers "never handed off".
+                # agent keeps its turn.
                 #
                 # The honest consequence: a model that immediately re-calls
                 # handoff asks the human again. Bounded by max_turns, and better
                 # than silently overriding the agent's plan.
+                #
+                # What this used to leave open, and no longer does: "if it gives
+                # up, run_node's existing else fallback already covers 'never
+                # handed off'" was true and was the hole. MEASURED on the seeded
+                # TEST 5 graph — deny the handoff to `deep`, the agent answers in
+                # prose instead of re-calling the tool, and run_node routes to
+                # `else` (= `quick`) with no second gate. The refusal cost the
+                # model its chosen branch and nothing else; DENY and
+                # APPROVE-AS-EDITED-to-quick reached the same node. Marking the
+                # router here is what lets run_node tell "never handed off" (else
+                # is right) apart from "was refused" (else is the bypass).
+                if ctx is not None:
+                    ctx.mark_handoff_denied(self.router_node_id)
                 self._audit(ctx, tool_call_id, branch, "refused-by-user")
                 return (f"handoff to {branch!r} was REFUSED by the user. You "
                         "still hold this turn — do something else, or stop.")

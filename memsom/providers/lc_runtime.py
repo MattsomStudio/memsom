@@ -495,6 +495,18 @@ def _agent_node(lc, spec, node_id: str, agent, registry: dict, ctx,
         new_messages = result["messages"][prior:]
         if router is None:
             return {"messages": new_messages}
+        # A REFUSED handoff does not get the else branch. Everything below this
+        # is the "agent never routed" path, and else exists so that path cannot
+        # hang the graph — but a human who denied the handoff denied moving work
+        # into another agent, not merely into that one branch. Taking else after
+        # a refusal turns the gate into a branch preference: on the seeded TEST 5
+        # graph, DENY and APPROVE-AS-EDITED both landed on `quick`. The run stops
+        # instead, with its own event so the monitor can say why rather than the
+        # feed simply ending. See RunContext.mark_handoff_denied.
+        if ctx.handoff_denied(router.node_id):
+            ctx.sink.event({"t": "route_refused", "router": router.node_id,
+                            "branch": router.else_branch, "ts": now()})
+            return lc.Command(goto=lc.END, update={"messages": new_messages})
         # Reaching here with a handoff router configured means the agent never
         # called the tool (or named a branch that does not exist and then gave
         # up): the ELSE branch, by the same contract `_router_fn` follows — a

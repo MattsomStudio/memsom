@@ -4176,11 +4176,72 @@ def test_denying_a_handoff_does_not_take_the_branch(tmp_path):
     events, status, _ = _settle(runner, rid, "done", "error")
 
     assert status == "done"
-    # B never ran; the run fell to the else branch (C) the ordinary way
     assert "B" not in [e["id"] for e in events if e["t"] == "node"]
     esc = [e for e in events if e["t"] == "route" and e["branch"] == "esc"]
     assert esc == [], "a denied handoff routed anyway"
     assert _handoff_audit(tmp_path) == ["refused-by-user"]
+
+
+def test_a_denied_handoff_does_not_fall_through_to_the_else_branch(tmp_path):
+    """The refusal must cost the agent the ROUTER, not just its chosen branch.
+
+    Deny used to leave the else fallback armed, so an agent that answered in
+    prose instead of re-calling the tool routed anyway — else exists so a router
+    cannot hang, and that made it an ungated way into exactly the thing the
+    human refused. Observed live on the seeded TEST 5 graph: deny `deep`, land
+    on `quick`, which is where APPROVE-AS-EDITED also landed. A refusal and an
+    approval must not reach the same node.
+
+    ``once=True`` is the whole scenario: the agent hands off, is refused, and
+    then gives up rather than re-calling the tool.
+    """
+    adapter = _HandoffAdapter("esc", once=True)
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_handoff_doc(else_branch="ok"),
+                                     _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "deny")
+    events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    # NEITHER target ran: not the refused branch, and not the else branch. A
+    # set, because a resumed run replays the node it paused inside and emits a
+    # second `node` line for it — "A twice" is the documented shape here.
+    assert {e["id"] for e in events if e["t"] == "node"} == {"A"}
+    assert [e for e in events if e["t"] == "route"] == [], \
+        "a denied handoff still routed somewhere"
+    # and it says so, rather than the feed just stopping
+    refused = [e for e in events if e["t"] == "route_refused"]
+    assert len(refused) == 1
+    assert refused[0]["branch"] == "ok", "should name the else it did not take"
+    assert _handoff_audit(tmp_path) == ["refused-by-user"]
+
+
+def test_a_deny_does_not_poison_a_later_approved_handoff(tmp_path):
+    """The refusal disarms the FALLBACK, not the router.
+
+    An agent that answers the refusal by proposing a different handoff is doing
+    the right thing, and the human gets asked again. That second decision has to
+    be able to route — otherwise "deny once" silently becomes "this run can
+    never hand off", which is a different (and unannounced) policy.
+
+    ``once=False`` makes the agent re-call the tool after being refused.
+    """
+    adapter = _HandoffAdapter("esc", once=False)
+    runner = _runner(tmp_path, adapter)
+    rid = runner.start(compile_graph(_gated_handoff_doc(else_branch="ok"),
+                                     _registry(adapter)), "manual")
+    _settle(runner, rid, "paused")
+    runner.resume(rid, "deny")
+    _settle(runner, rid, "paused")          # asked again, as designed
+    runner.resume(rid, "approve")
+    events, status, _ = _settle(runner, rid, "done", "error")
+
+    assert status == "done"
+    assert [e["branch"] for e in events if e["t"] == "route"] == ["esc"]
+    assert "B" in [e["id"] for e in events if e["t"] == "node"]
+    assert [e for e in events if e["t"] == "route_refused"] == []
+    assert _handoff_audit(tmp_path) == ["refused-by-user", "handoff:esc"]
 
 
 def test_every_handoff_is_audited_even_when_it_is_not_gated(tmp_path):
