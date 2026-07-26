@@ -17,6 +17,7 @@ import json
 import urllib.error
 import urllib.request
 
+from memsom.providers.net import connect as _net
 from memsom.providers.base import (
     Capabilities,
     ModelInfo,
@@ -156,7 +157,7 @@ class OllamaAdapter(Provider):
                 self.base + "/api/chat",
                 data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     req, timeout=params.get("timeout", 600)) as resp:
                 for raw in resp:
                     raw = raw.strip()
@@ -219,7 +220,7 @@ class OllamaAdapter(Provider):
 
     def _get(self, path: str, timeout: float = 5) -> dict:
         try:
-            with urllib.request.urlopen(self.base + path, timeout=timeout) as resp:
+            with _net.open_configured(self.base + path, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,
                 TimeoutError, json.JSONDecodeError) as exc:
@@ -230,7 +231,7 @@ class OllamaAdapter(Provider):
             req = urllib.request.Request(
                 self.base + path, data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _net.open_configured(req, timeout=timeout) as resp:
                 data = resp.read().decode("utf-8")
             return json.loads(data) if data.strip() else {}
         except (urllib.error.URLError, urllib.error.HTTPError, OSError,

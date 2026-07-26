@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 
 from memsom.providers import oai
+from memsom.providers.net import connect as _net
 from memsom.providers.base import (
     Capabilities,
     ModelInfo,
@@ -129,7 +130,7 @@ class CodexAdapter(Provider):
                 data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {key}"})
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     req, timeout=params.get("timeout", 600)) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -151,7 +152,7 @@ class CodexAdapter(Provider):
             req = urllib.request.Request(
                 self.api_base + path,
                 headers={"Authorization": f"Bearer {key or ''}"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _net.open_configured(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise ProviderError(f"{exc.code}") from exc

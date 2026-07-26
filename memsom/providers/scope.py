@@ -34,11 +34,11 @@ Three properties, in the order they matter:
 
 from __future__ import annotations
 
-import fnmatch
-import ipaddress
-import socket
+import ipaddress  # noqa: F401  (tests reach through this module for it)
 import urllib.parse
 from pathlib import Path
+
+from memsom.providers.net import addrs
 
 #: Denied with no declaration, and *only* with no matching declaration.
 #:
@@ -56,12 +56,12 @@ from pathlib import Path
 #: is how a guardrail becomes theatre. The NAS is not here either: it belongs on
 #: the list and its address is the operator's to supply, not this module's to
 #: guess.
-_SEATBELT = (
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("fe80::/10"),
-)
+#:
+#: The list itself now lives in `net/addrs.py`, because the CONNECTOR has to
+#: enforce it too and two copies of a deny list is how one of them goes stale.
+#: This module decides whether a call is in scope; `net` decides what a socket is
+#: allowed to reach. Same rules, two questions.
+_SEATBELT = addrs.DENIED
 
 #: Marks a tool whose reach a target rule cannot bound. Not an omission — the
 #: whole point of writing it down is that `test_every_builtin_tool_type_is_in_
@@ -95,12 +95,14 @@ def unscoped_tools(tool_types) -> list:
     return sorted({t for t in tool_types if _TARGETS.get(t) == UNSCOPED})
 
 
-def _as_ip(host: str):
-    """*host* as an ip address, or None if it is a name."""
-    try:
-        return ipaddress.ip_address(host.strip("[]"))
-    except ValueError:
-        return None
+#: Address parsing and matching live in `net/addrs.py` — same functions, one
+#: implementation, shared with the connector that does the actual enforcing.
+#: `as_ip` there is strictly stronger than the version this module used to carry:
+#: it also decodes `2130706433`, `0x7f000001`, `0177.0.0.1` and `127.1`, which
+#: used to fall through as if they were hostnames.
+_as_ip = addrs.as_ip
+_entry_matches = addrs.entry_matches
+_seatbelt_hit = addrs.seatbelt_hit
 
 
 def _resolved_ips(host: str) -> list:
@@ -110,49 +112,30 @@ def _resolved_ips(host: str) -> list:
     pointing `evil.com` at 127.0.0.1, which would make the seatbelt decorative
     against anyone actually trying.
 
-    **TOCTOU remains and this does not close it.** urllib resolves again when it
-    connects, so a rebinding attacker with a short TTL can still answer
-    differently the second time. This raises the cost of the naive attack; it is
-    not a guarantee, and calling it one would be the overclaim this codebase
-    keeps refusing to make.
+    **This is the advisory half, and it is no longer the load-bearing one.** The
+    guarantee now lives at the connector (`net/connect.py`), which vets the
+    addresses it is about to dial — so the rebinding window this docstring used
+    to apologise for is closed where it matters, by re-checking rather than by
+    hoping. What remains here is a fast, early "this call is out of scope" answer
+    for the model, and it stays deliberately empty-on-failure: a DNS blip must
+    not be reported to the model as a forbidden target.
+
+    It shares the connector's resolver, which buys two things. The obvious one is
+    a **bounded** lookup: `socket.getaddrinfo` has no timeout parameter and sits
+    outside every run budget — measured on this box 2026-07-25, a single
+    `getaddrinfo("anywhere.test")` took **11.4 seconds** and blocked the agent
+    thread for all of it. The subtler one is that this check and the connection
+    now consult the same cache, so the advisory answer and the enforced one
+    rarely disagree.
     """
     try:
-        infos = socket.getaddrinfo(host, None)
-    except (OSError, UnicodeError):
+        from memsom.providers.net import connect as _net
+        return list(_net.shared_resolver().resolve(host, deadline_s=2.0))
+    except Exception:
+        # Deliberately broad and deliberately silent. Anything at all going
+        # wrong here means "no opinion", never "refused" — and never an
+        # exception into the tool-dispatch path.
         return []
-    out = []
-    for info in infos:
-        address = _as_ip(str(info[4][0]))
-        if address is not None and address not in out:
-            out.append(address)
-    return out
-
-
-def _entry_matches(entry: str, host: str, ips: list) -> bool:
-    """Does one scope entry cover *host*? CIDR by network, else glob by name."""
-    entry = entry.strip()
-    if not entry:
-        return False
-    try:
-        network = ipaddress.ip_network(entry, strict=False)
-    except ValueError:
-        # a name pattern: match the literal host, case-insensitively
-        return fnmatch.fnmatch(host.lower(), entry.lower())
-    # A CIDR entry matches by NETWORK, never by string prefix — "10.0.0.0/24"
-    # must not admit "10.0.0.50" because the text happens to start the same way.
-    return any(address in network for address in ([_as_ip(host)] + ips)
-               if address is not None)
-
-
-def _seatbelt_hit(host: str, ips: list):
-    """The seatbelt network *host* lands in, or None."""
-    for address in [_as_ip(host)] + ips:
-        if address is None:
-            continue
-        for network in _SEATBELT:
-            if address in network:
-                return network
-    return None
 
 
 def _check_host(scope: dict, url: str) -> str:

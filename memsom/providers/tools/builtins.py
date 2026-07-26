@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from memsom.providers.base import run_no_window
+from memsom.providers.net import connect as net
 from memsom.providers.tools.base import Tool, ToolContext, ToolError, truncate_output
 
 #: repo root (…/memsom), used as cwd for CLI shell-outs so `-m` imports resolve.
@@ -46,17 +47,26 @@ def _cap(text: str, max_bytes: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-class _CappedRedirects(urllib.request.HTTPRedirectHandler):
-    """urllib's default follows 10 redirects and any scheme the target names.
-    Cap at 3 and refuse a hop off http/https (a redirect to file:// or ftp://
-    is how a fetch tool gets turned into a local file reader)."""
+def _rescope(ctx: ToolContext, tool_type: str):
+    """A per-redirect-hop scope check, or None when there is nothing to check.
 
-    max_redirections = 3
+    The hole this closes: the old redirect handler validated the *scheme* of each
+    hop and nothing else, so a public URL that answered `302 Location:
+    http://127.0.0.1:7788/api/agents/run` sailed through the scope gate — which
+    had only ever seen the original, innocent URL — and reached the panel's own
+    control plane, where an agent can start runs and approve its own gates.
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):
-            raise ToolError(f"redirect to non-http(s) url refused: {newurl}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+    The connector re-vets the ADDRESS of every hop for free (each hop is a new
+    connection). This adds back the part the connector does not own: the run's
+    declared scope.
+    """
+    from memsom.providers.scope import check as scope_check
+
+    def on_hop(newurl: str):
+        return scope_check(getattr(ctx, "scope", None), tool_type,
+                           {"url": newurl})
+
+    return on_hop
 
 
 class HttpFetch(Tool):
@@ -93,14 +103,26 @@ class HttpFetch(Tool):
         max_bytes = int(self.options.get("max_bytes", 65536))
 
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        opener = urllib.request.build_opener(_CappedRedirects)
+        scope = getattr(ctx, "scope", None) or {}
         try:
-            resp = opener.open(req, timeout=ctx.timeout_s)
+            # The GUARDED path: this URL came from the model, so the address it
+            # resolves to is judged before a socket opens, and every redirect hop
+            # is judged again. `waivers` carries the run's declared scope.hosts,
+            # which is how an operator deliberately unbuckles the seatbelt.
+            resp = net.urlopen(req, timeout=ctx.timeout_s, guard=True,
+                               waivers=tuple(scope.get("hosts") or ()),
+                               on_hop=_rescope(ctx, self.type))
         except urllib.error.HTTPError as exc:
             # non-2xx is information for the model, not a tool failure.
             resp = exc
         except ToolError:
             raise
+        except net.NetRefused as exc:
+            # Already a human-readable explanation of WHY. Wrapping it in
+            # "fetch failed: <urlopen error ...>" is how today's outage cost
+            # twenty minutes of diagnosis that one clear sentence would have
+            # ended.
+            raise ToolError(str(exc)) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ToolError(f"fetch failed: {exc}") from exc
 
@@ -185,8 +207,15 @@ class WebSearch(Tool):
                + urllib.parse.quote_plus(query))
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=ctx.timeout_s) as resp:
+            # The host here is FIXED (html.duckduckgo.com) and the model can only
+            # influence the query, so `scope._TARGETS` leaves web_search
+            # unchecked on purpose. It still routes through the connector — the
+            # point of that is not the gauntlet, it is not depending on the OS
+            # resolver, which is what took this tool down today.
+            with net.urlopen(req, timeout=ctx.timeout_s, guard=False) as resp:
                 page = resp.read().decode("utf-8", errors="replace")
+        except net.NetRefused as exc:
+            raise ToolError(f"search fetch failed: {exc}") from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ToolError(f"search fetch failed: {exc}") from exc
 

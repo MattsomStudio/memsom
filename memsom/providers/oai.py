@@ -12,6 +12,7 @@ import json
 import urllib.error
 import urllib.request
 
+from memsom.providers.net import connect as _net
 from memsom.providers.base import ProviderError, Sink
 
 
@@ -19,7 +20,7 @@ def list_models(base: str, timeout: float = 5, headers: dict | None = None) -> l
     """GET /v1/models -> list of model id strings."""
     try:
         req = urllib.request.Request(base + "/v1/models", headers=headers or {})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _net.open_configured(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             TimeoutError, json.JSONDecodeError) as exc:
@@ -98,7 +99,7 @@ def chat_once(base: str, model: str, messages: list, params: dict, sink: Sink,
         req = urllib.request.Request(
             base + "/v1/chat/completions",
             data=json.dumps(body).encode("utf-8"), headers=hdr)
-        with urllib.request.urlopen(req, timeout=params.get("timeout", 600)) as resp:
+        with _net.open_configured(req, timeout=params.get("timeout", 600)) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
             TimeoutError, json.JSONDecodeError) as exc:
@@ -155,7 +156,7 @@ def chat_stream(base: str, model: str, messages: list, params: dict, sink: Sink,
         req = urllib.request.Request(
             base + "/v1/chat/completions",
             data=json.dumps(body).encode("utf-8"), headers=hdr)
-        with urllib.request.urlopen(req, timeout=params.get("timeout", 600)) as resp:
+        with _net.open_configured(req, timeout=params.get("timeout", 600)) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):

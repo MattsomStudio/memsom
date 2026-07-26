@@ -24,6 +24,7 @@ import urllib.request
 from pathlib import Path
 
 from memsom.providers import gguf, oai
+from memsom.providers.net import connect as _net
 from memsom.providers.base import (
     Capabilities,
     LaunchOption,
@@ -140,7 +141,7 @@ class LlamaCppAdapter(Provider):
     def status(self) -> ProviderStatus:
         t0 = now()
         try:
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     self.base + "/health",
                     timeout=self.spec.get("status_timeout_s", 0.75)):
                 pass

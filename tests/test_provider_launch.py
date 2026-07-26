@@ -410,7 +410,10 @@ class _FakeResp:
 
 def _stream(monkeypatch, chunks):
     from memsom.providers import oai
-    monkeypatch.setattr(oai.urllib.request, "urlopen",
+    # The transport seam moved: oai now goes through the app-owned connector
+    # (memsom.providers.net) rather than urllib directly, so that the OS
+    # resolver is never in the path. Patch what the module actually calls.
+    monkeypatch.setattr(oai._net, "open_configured",
                         lambda *a, **k: _FakeResp(_sse(chunks)))
     sink = ListSink()
     stats = oai.chat_stream("http://x", "m", [{"role": "user", "content": "hi"}],
@@ -452,11 +455,11 @@ def test_sampling_params_ride_every_request_so_they_change_mid_chat(monkeypatch)
     from memsom.providers import oai
     sent = {}
 
-    def fake_urlopen(req, timeout=None):
+    def fake_urlopen(req, timeout=None, **kwargs):
         sent.update(json.loads(req.data.decode()))
         return _FakeResp(_sse([{"choices": [{"delta": {"content": "ok"}}]}]))
 
-    monkeypatch.setattr(oai.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(oai._net, "open_configured", fake_urlopen)
     oai.chat_stream("http://x", "m", [{"role": "user", "content": "hi"}],
                     {"temperature": 1.75, "top_p": 0.4, "max_tokens": 99},
                     ListSink())

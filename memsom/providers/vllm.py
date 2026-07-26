@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 
 from memsom.providers import oai
+from memsom.providers.net import connect as _net
 from memsom.providers.base import (
     Capabilities,
     ModelInfo,
@@ -39,7 +40,7 @@ class VllmAdapter(Provider):
     def status(self) -> ProviderStatus:
         t0 = now()
         try:
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     self.base + "/health",
                     timeout=self.spec.get("status_timeout_s", 0.75)):
                 pass

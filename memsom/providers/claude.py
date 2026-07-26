@@ -24,6 +24,7 @@ import subprocess
 import urllib.error
 import urllib.request
 
+from memsom.providers.net import connect as _net
 from memsom.providers.base import (
     Capabilities,
     ModelInfo,
@@ -151,7 +152,7 @@ class ClaudeAdapter(Provider):
                 data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json",
                          "x-api-key": key, "anthropic-version": _API_VERSION})
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     req, timeout=params.get("timeout", 600)) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -208,7 +209,7 @@ class ClaudeAdapter(Provider):
                 data=json.dumps(body).encode("utf-8"),
                 headers={"Content-Type": "application/json",
                          "x-api-key": key, "anthropic-version": _API_VERSION})
-            with urllib.request.urlopen(
+            with _net.open_configured(
                     req, timeout=params.get("timeout", 600)) as resp:
                 for raw in resp:
                     line = raw.decode("utf-8").strip() if isinstance(raw, bytes) \
@@ -274,7 +275,7 @@ class ClaudeAdapter(Provider):
             req = urllib.request.Request(
                 self.api_base + path,
                 headers={"x-api-key": key or "", "anthropic-version": _API_VERSION})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _net.open_configured(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raise ProviderError(f"{exc.code}") from exc
