@@ -35,6 +35,15 @@ than dismissed on principle — at threshold 3.5 it cost 8 false positives and
 added **0** catches the shapes did not already have. See `_SECRET_PATTERNS`.
 
 Values are synthetic. Nothing here has ever been a live credential.
+
+**Why the tokens are written split** — `"ghp_" "16Chars..."` rather than one
+literal. Testing a scrubber needs realistically-shaped tokens, but GitHub's push
+protection scans the file's TEXT and cannot tell a fixture from a credential, so
+a contiguous literal blocks every push of this branch for everyone. Python's
+adjacent-literal concatenation hands the scrubber the identical value at runtime,
+which is the only thing under test. Joining them back up will look like tidying
+and will make the repo unpushable — the failure arrives at someone else's `git
+push`, not here.
 """
 
 from __future__ import annotations
