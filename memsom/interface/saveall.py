@@ -24,6 +24,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from memsom.childenv import child_env
 from memsom.lifecycle import forget
 
 # Detached + no console window: survives the parent, never flashes a terminal.
@@ -80,11 +81,23 @@ def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-sonnet-5
             "-p", "/saveall"]
     logfh = open(log, "w", encoding="utf-8")
     try:
+        # env: the credential denylist (S7 / F-19). This is the site that most
+        # needs it — the child is DETACHED, outlives the session, and its stdout
+        # already goes to a LOG FILE, so anything it holds is one careless
+        # `claude --debug` away from being written down.
+        #
+        # ANTHROPIC_* is kept because this child IS an Anthropic client: it may
+        # legitimately authenticate with them, and dropping them would break
+        # /saveall at 2am on a machine that authenticates by env var rather than
+        # by the OAuth credentials in ~/.claude. That exception belongs here, at
+        # the call site, rather than as a hole in the shared list. MEASURED on
+        # this box: both are unset, so today this changes nothing either way.
         proc = subprocess.Popen(
             argv, stdout=logfh, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, creationflags=_DETACHED,
             cwd=resume_cwd or os.environ.get("USERPROFILE") or None,
             close_fds=True,
+            env=child_env(keep=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")),
             # POSIX: new session (setsid) so the save survives a SessionEnd
             # /clear teardown that would otherwise kill the hook's children.
             start_new_session=(sys.platform != "win32"))
