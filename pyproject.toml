@@ -45,22 +45,20 @@ dependencies = []
 # is known to accept. Bump only after re-testing.
 bge = ["FlagEmbedding>=1.4.0"]
 
-# Panel server system-telemetry module (memsom.interface.telemetry): per-process
-# RAM/GPU sampling needs psutil. Opt-in ONLY — the core stays zero-dependency and
-# the telemetry module degrades its psutil-backed sections gracefully when this
-# extra isn't installed (see memsom/interface/telemetry.py).
-panel = ["psutil>=7"]
+# System-telemetry module (memsom.interface.telemetry): per-process RAM/GPU
+# sampling needs psutil. Opt-in ONLY — the core stays zero-dependency and the
+# telemetry module degrades its psutil-backed sections gracefully when this
+# extra isn't installed (see memsom/interface/telemetry.py). The panel server
+# is its main consumer, but the module itself still lives here, so the extra
+# does too; memsom-panel re-declares it as its own `telemetry` extra.
+telemetry = ["psutil>=7"]
 
-# The AGENTS graph runtime (memsom.providers.lc_runtime + lc_model): runs a
-# canvas of agents on LangGraph's StateGraph. Opt-in ONLY — the core stays
-# zero-dependency, the import is lazy (confined to those two modules, reached
-# only when a run actually starts), and a machine without this extra gets a
-# ProviderError naming it rather than a boot-time failure. langchain-core and
-# langgraph-prebuilt arrive transitively as langgraph's own dependencies.
-# langgraph-checkpoint-sqlite is the durable checkpointer behind pause/resume
-# (approval gates + resume-after-crash); it is LangGraph's own package, so it
-# is upkeep we don't own — the point of adopting LangGraph in the first place.
-agents = ["langgraph>=1.2,<2", "langgraph-checkpoint-sqlite>=2,<4"]
+# NOTE — the `panel` and `agents` extras were REMOVED at the 2026-07-30 split.
+# The panel server, the model-backend adapters, and the LangGraph agent canvas
+# now live in the separate memsom-panel package (repo: memsom-agentic-os), and
+# attach to this CLI through the `memsom.commands` entry-point group rather
+# than by import. See _register_plugin_commands() in memsom/interface/cli.py.
+# `pip install memsom-panel` restores the `memsom panel` subcommand.
 
 [project.urls]
 Repository = "https://github.com/MattsomStudio/memsom"

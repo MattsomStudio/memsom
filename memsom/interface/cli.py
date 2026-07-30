@@ -74,10 +74,42 @@ from memsom.bridge import claude as memsom_claude
 from memsom.bridge import wire_claude as memsom_wire_claude
 from memsom.interface import audit as memsom_audit
 from memsom.interface import dashboard as memsom_dashboard
-from memsom.interface import panel as memsom_panel
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.integrity import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
+
+
+# ---------------------------------------------------------------------------
+# Plugin subcommands — the `memsom.commands` entry-point group.
+#
+# memsom is a provenance memory store; it deliberately owns no machine-side
+# control plane. `memsom panel` (the HTTP server, the model-backend adapters,
+# voice, kernels, and the agent canvas) lives in the separate memsom-panel
+# package and attaches here, so this repo stays stdlib-only and the panel can
+# be rewritten in another language behind the same CLI surface.
+#
+# A plugin exposes the same `register(sub)` contract every in-tree subcommand
+# module uses. A plugin that is absent simply means that subcommand does not
+# exist; a plugin that raises is reported once on stderr and skipped, because a
+# broken optional subcommand must never take down the core CLI.
+# ---------------------------------------------------------------------------
+
+def _register_plugin_commands(sub) -> None:
+    """Attach every `memsom.commands` entry point to the subparser *sub*."""
+    try:
+        from importlib.metadata import entry_points
+    except ImportError:                                    # pragma: no cover
+        return
+    try:
+        found = entry_points(group="memsom.commands")
+    except Exception:                                      # pragma: no cover
+        return
+    for ep in sorted(found, key=lambda e: e.name):
+        try:
+            ep.load()(sub)
+        except Exception as exc:                           # pragma: no cover
+            print(f"memsom: skipping subcommand '{ep.name}': {exc}",
+                  file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +694,7 @@ def main(argv=None):
     memsom_wire_claude.register(sub)
     memsom_audit.register(sub)
     memsom_dashboard.register(sub)
-    memsom_panel.register(sub)
+    _register_plugin_commands(sub)
     memsom_tombstone.register(sub)
     memsom_contradict.register(sub)
     memsom_facts.register(sub)
