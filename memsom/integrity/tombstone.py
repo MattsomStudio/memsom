@@ -23,6 +23,7 @@ from pathlib import Path
 
 import memsom
 from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, default_memory_dir
+from memsom.paths import UnsafePath, safe_join
 
 ENDORSED_PREFIXES = ("user_", "feedback_", "personal_")
 
@@ -61,17 +62,22 @@ def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file
     old plaintext readable through blame. The result dict then carries 'erased'
     (count of nodes whose payload was destroyed)."""
     stem = stem[:-3] if stem.endswith(".md") else stem
-    filename = f"{stem}.md"
-    mem_root = Path(mem_dir).resolve()
-    local = mem_root / filename
-    # Containment: a crafted stem ("../../.claude/CLAUDE.md") must never resolve
-    # outside the memory dir. This is the documented agent surface and the store
+    # Containment: a crafted stem ("../../.claude/CLAUDE.md") must never reach
+    # the memory dir's parent. This is the documented agent surface and the store
     # treats ingested content as untrusted, so a prompt-injected stem must not be
     # able to escape and delete arbitrary files (the pin guard is also bypassable
     # by a "../" prefix, so this check has to come first).
-    if not local.resolve().is_relative_to(mem_root):
+    #
+    # safe_join decides on the STRING and only touches the disk once the path is
+    # already proved contained. The previous form built `mem_root / filename` and
+    # then called `.resolve()` on it — which, for a stem naming a UNC share,
+    # performed the network round trip before the containment test ran.
+    try:
+        local = safe_join(mem_dir, f"{stem}.md")
+    except (UnsafePath, OSError, ValueError):
         return {"status": "refused-traversal", "stem": stem,
                 "node_id": None, "revoked": 0, "file_deleted": False}
+    mem_root = Path(mem_dir).resolve()
     fm = {}
     existed_before = local.exists()      # for accurate file_deleted when hard-erase unlinks first
     if existed_before:

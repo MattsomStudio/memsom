@@ -63,6 +63,7 @@ import urllib.parse
 from pathlib import Path, PurePosixPath
 
 import memsom
+from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
 from memsom.interface import ingest as memsom_ingest
 from memsom.retrieval import relate as memsom_relate
@@ -650,15 +651,24 @@ def export_note(conn, vault, *, node_id=None, query=None, folder="memsom",
             content = "(no answer composed — no live sources matched)"
         title = title or query
 
-    # Containment: the resolved target must stay inside the vault. _within never
-    # raises (cross-drive paths on Windows return False rather than ValueError).
-    out_dir = (vault / folder).resolve()
-    if not _within(vault, out_dir):
-        raise ValueError("folder escapes the vault")
+    # Containment runs on the STRING, before any syscall. `folder` and `title`
+    # are model-authored (mcp__memsom__obsidian_export), and the previous form —
+    # `(vault / folder).resolve()` followed by `_within` — had two problems, not
+    # one: pathlib's `/` DISCARDS `vault` the moment `folder` carries a drive or
+    # a UNC prefix, and the `.resolve()` that follows opens an outbound SMB
+    # session for `\\host\share` before `_within` gets to refuse it.
+    #
+    # `_slugify` already strips separators out of `title`, so the second call is
+    # belt-and-braces. `folder` had no such filter and was the live hole.
+    try:
+        out_dir = safe_join(vault, folder) if folder else vault
+    except UnsafePath as exc:
+        raise ValueError(f"folder escapes the vault: {exc}") from exc
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = (out_dir / f"{_slugify(title)}.md").resolve()
-    if not _within(vault, out_path):
-        raise ValueError("output path escapes the vault")
+    try:
+        out_path = safe_join(out_dir, f"{_slugify(title)}.md")
+    except UnsafePath as exc:
+        raise ValueError(f"output path escapes the vault: {exc}") from exc
 
     if out_path.exists() and not _note_is_memsom_authored(out_path):
         raise ValueError(

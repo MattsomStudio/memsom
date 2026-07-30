@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import memsom
+from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
 
 
@@ -61,15 +62,22 @@ def _now_iso():
 
 
 def _unlink_within(root, relpath):
-    """Unlink ``root/relpath`` iff it resolves INSIDE *root*. Returns one of
+    """Unlink ``root/relpath`` iff it is contained by *root*. Returns one of
     'purged' | 'noop' | 'failed'. A path that escapes the root (crafted '../'
     bridge_path/obsidian_path — the store treats ingested content as untrusted)
-    is 'failed', never followed. Best-effort: OS errors are 'failed', not raised."""
+    is 'failed', never followed. Best-effort: OS errors are 'failed', not raised.
+
+    Containment is decided by ``paths.safe_join`` on the STRING, before any
+    syscall. The previous form resolved ``root / relpath`` and then asked
+    ``is_relative_to`` — a correct predicate applied one step too late, because
+    a ``bridge_path`` of ``\\\\host\\share\\x`` makes that resolve open an
+    outbound SMB session and offer this process's credentials before anything
+    has decided it wanted to."""
     try:
-        root = Path(root).resolve()
-        target = (root / relpath).resolve()
-        if not target.is_relative_to(root):
-            return "failed"                    # traversal attempt — surfaced, not followed
+        target = safe_join(root, str(relpath))
+    except (UnsafePath, OSError, ValueError):
+        return "failed"                        # traversal attempt — surfaced, not followed
+    try:
         if target.exists():
             target.unlink()
             return "purged"
