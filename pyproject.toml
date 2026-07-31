@@ -45,13 +45,14 @@ dependencies = []
 # is known to accept. Bump only after re-testing.
 bge = ["FlagEmbedding>=1.4.0"]
 
-# System-telemetry module (memsom.interface.telemetry): per-process RAM/GPU
-# sampling needs psutil. Opt-in ONLY — the core stays zero-dependency and the
-# telemetry module degrades its psutil-backed sections gracefully when this
-# extra isn't installed (see memsom/interface/telemetry.py). The panel server
-# is its main consumer, but the module itself still lives here, so the extra
-# does too; memsom-panel re-declares it as its own `telemetry` extra.
-telemetry = ["psutil>=7"]
+# NOTE -- the `telemetry` extra was REMOVED on 2026-07-31 along with
+# memsom/interface/telemetry.py, which moved into memsom-panel
+# (memsom_panel/telemetry.py). It had zero consumers in this package and three
+# in the panel; it was 421 lines of subprocess/psutil/ctypes/urllib living in
+# the top layer of a store this file's own comments describe as zero-dependency
+# and stdlib-only. An extra that installs psutil for a module that is no longer
+# here would be a deprecation notice with a package manager attached.
+# `pip install memsom-panel[telemetry]` is where that dependency lives now.
 
 # NOTE — the `panel` and `agents` extras were REMOVED at the 2026-07-30 split.
 # The panel server, the model-backend adapters, and the LangGraph agent canvas
