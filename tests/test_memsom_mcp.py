@@ -26,6 +26,10 @@ from memsom.interface import mcp as memsom_mcp
 HERE = Path(__file__).resolve().parent.parent
 MCP_MODULE = "memsom.interface.mcp"
 
+#: Placeholder for the configured vault inside the argv pin below, substituted
+#: at run time. See TestToolArgvMappings.setUpClass.
+VAULT_SLOT = "<configured-vault>"
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -129,21 +133,26 @@ class TestHandleInProcess(Base):
         })
         self.assertIsNone(resp)
 
-    def test_tools_call_ingest_text_stores_node(self):
-        """ingest_text tool stores a node at the declared channel; isError false."""
-        resp = memsom_mcp.handle({
+    def _ingest_text(self, **arguments):
+        return memsom_mcp.handle({
             "jsonrpc": "2.0",
             "id": 10,
             "method": "tools/call",
-            "params": {
-                "name": "ingest_text",
-                "arguments": {
-                    "text": "Nebula requires a lighthouse node with a reachable public IP.",
-                    "channel": "endorsed",
-                    "source_ref": "mcp_test_ref",
-                },
-            },
+            "params": {"name": "ingest_text", "arguments": arguments},
         })
+
+    def test_tools_call_ingest_text_stores_node(self):
+        """ingest_text tool stores a node at the declared channel; isError false.
+
+        Was written with `channel: "endorsed"`. That is the one channel this
+        transport may no longer stamp — a tool call is not the operator
+        vouching for a fact — so the case moved down to
+        `test_tools_call_ingest_text_refuses_endorsed` and this one keeps the
+        stores-a-node property on a channel the transport actually has.
+        """
+        resp = self._ingest_text(
+            text="Nebula requires a lighthouse node with a reachable public IP.",
+            channel="user", source_ref="mcp_test_ref")
         self.assertFalse(resp["result"]["isError"],
                          f"ingest_text returned error: {resp['result']['content'][0]['text']}")
         # The node should now be in the DB
@@ -151,7 +160,31 @@ class TestHandleInProcess(Base):
             "SELECT id, channel FROM nodes WHERE source_ref = 'mcp_test_ref'"
         ).fetchone()
         self.assertIsNotNone(row, "ingest_text should have stored a node")
-        self.assertEqual(row[1], "endorsed")
+        self.assertEqual(row[1], "user")
+
+    def test_tools_call_ingest_text_refuses_endorsed(self):
+        """The inverted half, and the inversion IS the fix. `endorsed` is pinned
+        in the always-loaded index and never shed by the byte budget, which is
+        exactly why it was the channel worth forging. Refused as a client error
+        with an explanation, not a crash."""
+        resp = self._ingest_text(text="a claim", channel="endorsed",
+                                 source_ref="mcp_endorsed_ref")
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("endorsed", resp["result"]["content"][0]["text"])
+        self.assertIsNone(self.conn.execute(
+            "SELECT id FROM nodes WHERE source_ref = 'mcp_endorsed_ref'"
+        ).fetchone())
+
+    def test_tools_call_ingest_text_refuses_the_bridge_namespace(self):
+        """A `memory:` source_ref mints an entry with the bridge importer's
+        identity and none of its lifecycle — nothing on disk, so no reconcile
+        sweep can ever take it back out of the always-loaded index."""
+        resp = self._ingest_text(text="a claim", channel="user",
+                                 source_ref="memory:standing-order")
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIsNone(self.conn.execute(
+            "SELECT id FROM nodes WHERE source_ref = 'memory:standing-order'"
+        ).fetchone())
 
     def test_tools_call_verify_stale_apply_marks_and_dry_run_does_not(self):
         """verify_stale threads apply through; dry-run (default) writes nothing."""
@@ -357,16 +390,46 @@ class TestToolArgvMappings(unittest.TestCase):
         ("ingest_text", {"text": "t", "channel": "user", "source_ref": "x"},
          ["ingest-text", "t", "--channel", "user", "--ref", "x"]),
         ("obsidian_sync", {}, ["obsidian-sync"]),
-        ("obsidian_sync", {"vault": "/v", "channel": "user", "no_prune": True},
-         ["obsidian-sync", "/v", "--channel", "user", "--no-prune"]),
+        ("obsidian_sync", {"vault": VAULT_SLOT, "channel": "user", "no_prune": True},
+         ["obsidian-sync", VAULT_SLOT, "--channel", "user", "--no-prune"]),
         ("obsidian_export", {}, ["obsidian-export"]),
         ("obsidian_export",
-         {"node": 5, "query": "q", "vault": "/v", "folder": "f", "title": "t"},
-         ["obsidian-export", "5", "--query", "q", "--vault", "/v",
+         {"node": 5, "query": "q", "vault": VAULT_SLOT, "folder": "f", "title": "t"},
+         ["obsidian-export", "5", "--query", "q", "--vault", VAULT_SLOT,
           "--folder", "f", "--title", "t"]),
         ("verify_stale", {}, ["verify-stale"]),
         ("verify_stale", {"apply": True}, ["verify-stale", "--apply"]),
     ]
+
+    @classmethod
+    def setUpClass(cls):
+        """A real vault on disk, because the vault argument is no longer a free
+        string. It is fenced to $MEMDAG_OBSIDIAN_VAULT and resolved through the
+        contained-path primitive, so the literal `"/v"` these two cases used to
+        carry now pins the argv of a call that is refused. The slot is
+        substituted at run time; the pin itself is unchanged in shape."""
+        from memsom.bridge.obsidian import VAULT_ENV
+
+        cls._env = VAULT_ENV
+        cls._prev_vault = os.environ.get(VAULT_ENV)
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls._vault = str(Path(cls._tmp.name).resolve())
+        os.environ[VAULT_ENV] = cls._vault
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._prev_vault is None:
+            os.environ.pop(cls._env, None)
+        else:
+            os.environ[cls._env] = cls._prev_vault
+        cls._tmp.cleanup()
+
+    def _fill(self, value):
+        if isinstance(value, dict):
+            return {k: self._fill(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._fill(v) for v in value]
+        return self._vault if value == VAULT_SLOT else value
 
     def test_every_tool_has_at_least_one_case(self):
         covered = {name for name, _, _ in self.CASES}
@@ -375,7 +438,9 @@ class TestToolArgvMappings(unittest.TestCase):
     def test_argv_mappings(self):
         for name, arguments, expected in self.CASES:
             with self.subTest(tool=name, arguments=arguments):
-                self.assertEqual(memsom_mcp._tool_argv(name, arguments), expected)
+                self.assertEqual(
+                    memsom_mcp._tool_argv(name, self._fill(arguments)),
+                    self._fill(expected))
 
     def test_unknown_tool_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -505,9 +570,22 @@ class TestDispatchEndToEnd(Base):
             "SELECT redacted FROM nodes WHERE id = ?", (child,)).fetchone()
         self.assertEqual(row[0], 0, "cascade omitted must leave descendants intact")
 
-    def test_obsidian_sync_ingests_vault_note(self):
+    def _configured_vault(self):
+        """The vault the OPERATOR configured, which is now the only one a call
+        may name. Was any directory the arguments pointed at."""
+        from memsom.bridge.obsidian import VAULT_ENV
+
         vault = Path(self.tmp.name) / "vault"
-        vault.mkdir()
+        vault.mkdir(exist_ok=True)
+        prev = os.environ.get(VAULT_ENV)
+        os.environ[VAULT_ENV] = str(vault)
+        self.addCleanup(
+            lambda: os.environ.__setitem__(VAULT_ENV, prev) if prev is not None
+            else os.environ.pop(VAULT_ENV, None))
+        return vault
+
+    def test_obsidian_sync_ingests_vault_note(self):
+        vault = self._configured_vault()
         (vault / "lighthouse.md").write_text(
             "Nebula lighthouse hosts run on UDP 4242.", encoding="utf-8")
         is_error, text = self._call(
@@ -517,9 +595,25 @@ class TestDispatchEndToEnd(Base):
             "SELECT COUNT(*) FROM nodes WHERE content LIKE '%UDP 4242%'").fetchone()
         self.assertGreaterEqual(row[0], 1, "sync should ingest the vault note")
 
+    def test_obsidian_sync_refuses_a_directory_outside_the_vault(self):
+        """The property under change, pinned end to end rather than only at the
+        argv layer: `sync_vault` walks what it is handed, ingests every markdown
+        file under it and stamps the lot, so naming a directory was enough to
+        turn arbitrary on-disk text into trust-stamped, retrievable memory."""
+        self._configured_vault()
+        outside = Path(self.tmp.name) / "elsewhere"
+        outside.mkdir()
+        (outside / "notes.md").write_text("secret pager duty rota", encoding="utf-8")
+        is_error, text = self._call(
+            "obsidian_sync", {"vault": str(outside), "channel": "user"})
+        self.assertTrue(is_error, text)
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE content LIKE '%pager duty%'").fetchone()
+        self.assertEqual(row[0], 0, "a refused sync must ingest nothing")
+
     def test_obsidian_export_writes_note(self):
-        vault = Path(self.tmp.name) / "vault"
-        (vault / "memsom").mkdir(parents=True)
+        vault = self._configured_vault()
+        (vault / "memsom").mkdir(parents=True, exist_ok=True)
         nid = self._seed()
         is_error, text = self._call(
             "obsidian_export", {"node": nid, "vault": str(vault), "title": "mcp-export-test"})

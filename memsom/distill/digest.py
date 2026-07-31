@@ -118,7 +118,35 @@ def _rows(conn):
     # and quarantined/archived nodes are out of every other read pool — they must
     # not resurface in the brain either.
     clauses, params = memsom_schema.taint_filter_clauses(conn)
-    where = " AND ".join(clauses + ["source_ref LIKE 'memory:%'"])
+    clauses = clauses + ["source_ref LIKE 'memory:%'"]
+    # RECONCILER OWNERSHIP. Nothing renders into the always-loaded MEMORY.md
+    # that no reconcile sweep can also take back out.
+    #
+    # There are exactly two sweeps over the `memory:` namespace, and between
+    # them they own a strictly SMALLER set than this query used to return:
+    #
+    #   import_memory_dir  -> `memory:%` AND NOT `memory:literal:%`
+    #                         AND bridge_path IS NOT NULL   (a file on disk)
+    #   import_literals    -> `memory:literal:%`            (a line in the index)
+    #
+    # A `memory:` node with a NULL bridge_path and no `literal:` infix therefore
+    # fell in the gap: rendered here, swept by neither. `insert_node` never sets
+    # bridge_path — only the file importer does, immediately after — so ANY
+    # other caller that declares a `memory:` source_ref lands in that gap by
+    # default. A stamping entry point reachable by a tool call (MCP
+    # `ingest_text` takes both `channel` and `source_ref` from its arguments) put
+    # a permanent, un-sweepable line into the brain on both machines: endorsed
+    # is pinned, so the byte budget never sheds it either, and with no file on
+    # disk there is nothing for a human to notice or delete.
+    #
+    # The predicate is the fix rather than the entry-point refusal alone,
+    # because it is the one that holds for entry points nobody has written yet.
+    # ingest.py refuses the namespace at the door as well; this is the half that
+    # does not depend on remembering.
+    if memsom_schema.column_exists(conn, "nodes", "bridge_path"):
+        clauses.append(
+            "(bridge_path IS NOT NULL OR source_ref LIKE 'memory:literal:%')")
+    where = " AND ".join(clauses)
     return conn.execute(
         f"SELECT content, channel, source_ref, {tcol}, {rcol}, {scol}, {zcol} "
         f"FROM nodes WHERE {where}",

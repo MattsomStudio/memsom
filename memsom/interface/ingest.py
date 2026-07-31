@@ -120,6 +120,45 @@ def enforce_channel_ceiling(channel: str) -> str:
         )
     return channel
 
+
+#: `source_ref` prefix the bridge importer owns exclusively.
+BRIDGE_NAMESPACE = "memory:"
+
+
+def enforce_source_ref_namespace(source_ref) -> None:
+    """Refuse a caller-declared ``source_ref`` in the bridge's own namespace.
+
+    ``memory:<stem>`` is the identity the bridge importer mints for a file in
+    the memory directory, and ``memory:literal:<hash>`` for a line in the index.
+    Those two prefixes are what the digest reads to build the ALWAYS-LOADED
+    MEMORY.md, and what the two reconcile sweeps use to take an entry back out
+    again when its file or its index line disappears.
+
+    A caller who declares that prefix here mints an entry with the bridge's
+    authority and none of its lifecycle: ``insert_node`` leaves ``bridge_path``
+    NULL, so ``import_memory_dir``'s sweep (which requires ``bridge_path IS NOT
+    NULL``) cannot see it, and without the ``literal:`` infix neither can
+    ``import_literals``. Stamped ``endorsed`` it is also pinned, so the byte
+    budget never sheds it. The result is a permanent line in the brain, on every
+    machine the store replicates to, with no file on disk for a human to notice.
+
+    That is reachable from a tool call: MCP ``ingest_text`` takes both
+    ``channel`` and ``source_ref`` straight from its arguments, so one call from
+    a model reading an attacker's page is enough. This function is the door;
+    ``digest._rows`` carries the structural half (it renders only nodes a sweep
+    can also reach), because a door only helps at the doors somebody remembered.
+    """
+    if source_ref and str(source_ref).strip().lower().startswith(BRIDGE_NAMESPACE):
+        raise ValueError(
+            f"source_ref {str(source_ref)!r} claims the reserved "
+            f"{BRIDGE_NAMESPACE!r} namespace, which the memory-directory bridge "
+            f"importer owns. Entries under that prefix render into the "
+            f"always-loaded index and are reconciled against files on disk; one "
+            f"minted here would have no file, so no sweep could ever remove it. "
+            f"Write the memory to a file in the memory directory and let the "
+            f"bridge import it, or choose a different source_ref."
+        )
+
 # ---------------------------------------------------------------------------
 # Migration
 # ---------------------------------------------------------------------------
@@ -307,7 +346,11 @@ def ingest_text(
 
     # Caller-layer trust guards: refuse an over-ceiling channel (F-13) and pin the
     # integrity label to the channel (F-14) — never trust a caller-supplied label.
+    # Then refuse a source_ref claiming the bridge importer's namespace: this is
+    # the only entry point where the REF is caller-declared as well as the
+    # channel, and the pair is what mints an un-sweepable line in the brain.
     enforce_channel_ceiling(channel)
+    enforce_source_ref_namespace(source_ref)
     label = authoritative_label(channel)
 
     if not chunk or len(text) <= chunk_chars:

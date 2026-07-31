@@ -210,8 +210,12 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "text": {"type": "string"},
-                "channel": {"type": "string", "description": "endorsed|user|agent-derived|external"},
-                "source_ref": {"type": "string"},
+                "channel": {"type": "string",
+                            "description": "user|agent-derived|external "
+                                           "(endorsed is above this transport's ceiling)"},
+                "source_ref": {"type": "string",
+                               "description": "free-form reference; the 'memory:' "
+                                              "prefix is reserved for the bridge importer"},
             },
             "required": ["text", "channel"],
         },
@@ -222,8 +226,12 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "vault": {"type": "string", "description": "Vault path (default: $MEMDAG_OBSIDIAN_VAULT)"},
-                "channel": {"type": "string", "description": "Default channel for un-stamped notes (default: user)"},
+                "vault": {"type": "string",
+                          "description": "Vault path (default: $MEMDAG_OBSIDIAN_VAULT). "
+                                         "Must be inside the configured vault."},
+                "channel": {"type": "string",
+                            "description": "Default channel for un-stamped notes "
+                                           "(default: user; endorsed is refused)"},
                 "no_prune": {"type": "boolean", "description": "Do not tombstone notes deleted from the vault"},
             },
             "required": [],
@@ -258,6 +266,92 @@ TOOLS = [
 ]
 
 TOOL_NAMES = {t["name"] for t in TOOLS}
+
+
+# ---------------------------------------------------------------------------
+# Transport trust policy
+# ---------------------------------------------------------------------------
+#
+# `ingest_text`'s own description says "channel set by transport, never
+# inferred" — and this transport was setting it to whatever the caller asked
+# for, on BOTH stamping tools. That is not the transport declaring a trust
+# level; it is the transport forwarding the caller's claim about itself.
+#
+# THIS transport is a model holding a tool list. Its callers include a model
+# that has just read a web page, a vault note, or a recalled transcript. The
+# channel that means "the operator personally vouched for this" is not a claim
+# such a caller can make, so the transport caps itself below it. Everything
+# else is unchanged: `user`, `agent-derived` and `external` all still stamp.
+#
+# `endorsed` specifically is the rank that is PINNED in the always-loaded index
+# and never shed by the byte budget, which is what made it the payload of
+# choice. Overridable by the OPERATOR, who starts this process — not by the
+# arguments of a call it receives.
+MCP_CHANNEL_CEILING_ENV = "MEMSOM_MCP_CHANNEL_CEILING"
+_DEFAULT_MCP_CHANNEL_CEILING = "user"
+
+
+def _mcp_channel_ceiling():
+    """The highest channel rank this transport may stamp. Never None."""
+    import memsom
+
+    raw = (os.environ.get(MCP_CHANNEL_CEILING_ENV) or "").strip().lower()
+    if raw in memsom.RANK:
+        return memsom.RANK[raw]
+    return memsom.RANK[_DEFAULT_MCP_CHANNEL_CEILING]
+
+
+def _checked_channel(raw):
+    """Validate a caller-declared channel against this transport's ceiling."""
+    import memsom
+
+    key = str(raw).strip().lower()
+    if key not in memsom.RANK:
+        raise ValueError(
+            f"unknown channel: {raw!r} (expected one of "
+            f"{'|'.join(memsom.RANK)})")
+    ceil = _mcp_channel_ceiling()
+    if memsom.RANK[key] > ceil:
+        raise ValueError(
+            f"refused: this transport may not stamp channel {key!r}. A tool "
+            f"call is not the operator vouching for a fact, and {key!r} is "
+            f"trusted above what a tool call can establish. Ceiling is "
+            f"{memsom.NAME[ceil].lower()!r}; the operator raises it with "
+            f"{MCP_CHANNEL_CEILING_ENV}.")
+    return key
+
+
+def _checked_vault(raw):
+    """Validate a caller-supplied vault path against the configured vault.
+
+    The vault argument used to be any directory on disk. `obsidian_sync` walks
+    what it is given, ingests every markdown file under it, and stamps the lot
+    at a channel the same caller chose — so naming a directory was enough to
+    turn arbitrary on-disk text into retrievable, trust-stamped memory, and
+    naming a directory of attacker-written files was enough to do it with
+    attacker-written text.
+
+    The operator names the vault, in the environment, once. A caller may still
+    pass a path — a subfolder is a legitimate narrowing — but only one that is
+    provably inside it. With no vault configured there is no root to prove
+    containment against, so a caller-supplied path is refused outright rather
+    than silently trusted.
+    """
+    from memsom.bridge.obsidian import VAULT_ENV
+    from memsom.paths import UnsafePath, safe_join
+
+    root = (os.environ.get(VAULT_ENV) or "").strip()
+    if not root:
+        raise ValueError(
+            f"refused: a vault path was supplied but no vault is configured. "
+            f"Set {VAULT_ENV} to the vault this server may read; a path from a "
+            f"tool call is not allowed to choose which directory on disk "
+            f"becomes memory.")
+    try:
+        return str(safe_join(root, str(raw), allow_absolute=True))
+    except UnsafePath as exc:
+        raise ValueError(
+            f"refused: vault path is outside {VAULT_ENV} ({exc})") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +460,8 @@ def _tool_argv(name, arguments):
         return argv
 
     if name == "ingest_text":
-        argv = ["ingest-text", arguments["text"], "--channel", str(arguments["channel"])]
+        argv = ["ingest-text", arguments["text"],
+                "--channel", _checked_channel(arguments["channel"])]
         if arguments.get("source_ref"):
             argv += ["--ref", str(arguments["source_ref"])]
         return argv
@@ -374,9 +469,9 @@ def _tool_argv(name, arguments):
     if name == "obsidian_sync":
         argv = ["obsidian-sync"]
         if arguments.get("vault"):
-            argv.append(str(arguments["vault"]))
+            argv.append(_checked_vault(arguments["vault"]))
         if arguments.get("channel"):
-            argv += ["--channel", str(arguments["channel"])]
+            argv += ["--channel", _checked_channel(arguments["channel"])]
         if arguments.get("no_prune"):
             argv.append("--no-prune")
         return argv
@@ -388,7 +483,7 @@ def _tool_argv(name, arguments):
         if arguments.get("query"):
             argv += ["--query", str(arguments["query"])]
         if arguments.get("vault"):
-            argv += ["--vault", str(arguments["vault"])]
+            argv += ["--vault", _checked_vault(arguments["vault"])]
         if arguments.get("folder"):
             argv += ["--folder", str(arguments["folder"])]
         if arguments.get("title"):
