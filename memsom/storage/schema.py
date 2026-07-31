@@ -33,7 +33,15 @@ NAME = memsom.NAME
 
 # Security gate: every table/column name that is f-string-interpolated into
 # PRAGMA or ALTER statements must be a plain SQL identifier.
-_IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+#
+# `\Z`, not `$`. In Python `$` is a LINE anchor: it also matches immediately
+# before a trailing newline, and `re.match` does not imply `fullmatch`, so
+# `^…$` accepted `"nodes\n"`. Not reachable from a request here — the callers
+# pass module constants and names read back from PRAGMA table_info — but it is
+# the same defect the identifier fences in the panel package carried, and a
+# fence that is exact everywhere except in one file is the shape that gets
+# copied. `tests/test_identifier_fence_anchors.py` fails on the next one.
+_IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\Z')
 
 
 def _check_ident(name: str) -> None:
