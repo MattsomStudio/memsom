@@ -1,0 +1,93 @@
+# import-linter — REFACTOR SPEC. Expected RED. Not wired into CI.
+#
+#   lint-imports --config .importlinter-goals
+#
+# This file is the definition of done for memsom's internal layering. Green here
+# means the refactor is finished. Watch the violation count shrink.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS IS RED: measured 2026-07-31, memsom's eight subpackages have NINE
+# mutual (two-way) dependency pairs. Any single one makes a `layers` contract
+# impossible, because a layering is by definition acyclic.
+#
+#   integrity  <-> interface    (1 / 16)   <- ONE import: gate.py:35 -> interface.blame
+#   bridge     <-> distill      (1 / 6)
+#   bridge     <-> retrieval    (2 / 1)
+#   distill    <-> lifecycle    (1 / 2)
+#   federation <-> interface    (3 / 2)
+#   bridge     <-> interface    (4 / 15)
+#   bridge     <-> integrity    (5 / 7)
+#   lifecycle  <-> retrieval    (5 / 2)
+#   integrity  <-> retrieval    (9 / 6)    <- genuinely two-way, the hard one
+#
+# Read the ratios: four of the nine are a single import going the wrong way
+# against a dozen going the right way. Those are cheap.
+#
+# THE ROOT CAUSE is that two directories each hold two layers:
+#
+#   interface/  holds the CLI (top)            AND  ingest (bottom -- the real
+#               write path, imported by bridge and federation)
+#   bridge/     holds obsidian + chats (top)   AND  bridge_import (a shared
+#               primitive, imported by integrity, distill and retrieval)
+#
+# Split those two and most of the nine collapse. Suggested destination: a
+# `memsom/kernel/` (or extend the frozen core) holding ingest + bridge_import,
+# below everything else.
+# ---------------------------------------------------------------------------
+
+[importlinter]
+root_package = memsom
+
+[importlinter:contract:memsom-layers]
+name = memsom internal layering (REFACTOR TARGET)
+type = layers
+layers =
+    memsom.interface
+    memsom.bridge
+    memsom.federation : memsom.distill
+    memsom.lifecycle
+    memsom.retrieval
+    memsom.integrity
+    memsom.storage
+
+# ---------------------------------------------------------------------------
+# acyclic_siblings. ADDED 2026-07-31 by refactor Phase 0.
+#
+# LAYERS DO NOT STOP SIBLINGS. `memsom.federation : memsom.distill` above puts
+# those two on the SAME level, and a `layers` contract says nothing about edges
+# WITHIN a level -- so `federation -> distill` and `distill -> federation` are
+# both legal under memsom-layers, and a mutual pair between them would leave
+# every contract green while the package is not layerable.
+#
+# That is not hypothetical here: two of the nine measured mutual pairs
+# (`bridge <-> distill`, `distill <-> lifecycle`) show the shape already exists
+# in this package, and the two modules sharing a level are the ones with no
+# contract watching them at all.
+#
+# Independence is the right type for a same-level pair.
+#
+# MEASURED 2026-07-31, and the result corrected this comment's first draft:
+# there is NO direct edge either way, and the contract is still BROKEN -- both
+# directions are reachable INDIRECTLY, and every single chain routes through
+# `memsom.interface`:
+#
+#   distill.digest -> bridge.bridge_import -> bridge.obsidian
+#                  -> interface.cli -> federation.broker
+#   federation.broker -> interface.mcp -> interface.cli -> distill.llm
+#
+# So this contract reports nothing that `memsom-layers` is not already
+# reporting: it is red for the same root cause (interface/ holds the CLI at the
+# top AND ingest at the bottom, see the header). It becomes an INDEPENDENT
+# signal the moment that split lands -- at which point a direct
+# federation<->distill edge would be the only way to break it, and that is the
+# edge nothing else in this file watches.
+#
+# Written down because "green on arrival" was the guess and it was wrong; the
+# useful fact is WHY it is red, not that it is.
+# ---------------------------------------------------------------------------
+[importlinter:contract:acyclic-siblings-mid]
+name = acyclic_siblings - same-level packages never import each other
+type = independence
+modules =
+    memsom.federation
+    memsom.distill

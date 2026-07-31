@@ -1,0 +1,70 @@
+# import-linter contracts — ENFORCED. These are green today; a break is a bug.
+#
+#   pip install import-linter
+#   lint-imports                     # picks this file up automatically
+#
+# Aspirational contracts that are red today live in .importlinter-goals and are
+# NOT wired into CI. Run them deliberately to watch the refactor land:
+#   lint-imports --config .importlinter-goals
+#
+# ---------------------------------------------------------------------------
+# FOOTGUN, read before editing: in a `forbidden` contract a bare module name
+# means THAT MODULE ONLY, not its descendants. `source_modules = memsom` checks
+# memsom/__init__.py and nothing else. To cover a package you must also list
+# `memsom.**`. A contract that silently checks one file still reports KEPT, so
+# it looks like enforcement and is amnesty. Control-tested 2026-07-31.
+# `layers` contracts are the opposite -- they do cover descendants.
+#
+# SECOND FOOTGUN: `allow_indirect_imports = True` on a `forbidden` contract
+# narrows it to DIRECT imports only. On `seam-direction` -- the rule the whole
+# 2026-07-30 split rests on -- that would mean memsom could import memsom_panel
+# through any one intermediate module and the contract would still report KEPT.
+# Nothing here sets it, and nothing here should. If a contract ever seems to
+# need it, the contract is wrong or the import is; fix one of those.
+# ---------------------------------------------------------------------------
+
+[importlinter]
+root_package = memsom
+# memsom_panel is not a root package here on purpose: memsom must lint cleanly
+# on a machine where the panel is not installed at all.
+include_external_packages = True
+
+# ---------------------------------------------------------------------------
+# The rule the 2026-07-30 split rests on. memsom is the public, stdlib-only
+# provenance store; memsom_panel is the machine-side control plane that imports
+# it. One-way BY DESIGN -- and until this file, that design was enforced by a
+# docstring at memsom/childenv.py:5 and nothing else.
+# ---------------------------------------------------------------------------
+[importlinter:contract:seam-direction]
+name = memsom never imports memsom_panel (the split seam)
+type = forbidden
+source_modules =
+    memsom
+    memsom.**
+forbidden_modules =
+    memsom_panel
+    memsom_panel.**
+
+# ---------------------------------------------------------------------------
+# ARCHITECTURE.md:108 -- "Frozen core is byte-identical across all builds;
+# features are additive-only." The core cannot depend on a feature layer, or it
+# is not a core. Prose until now.
+#
+# NOTE the deliberate absence of `memsom.**` below: the source is the frozen
+# core module ITSELF (memsom/__init__.py), not the whole package. Adding the
+# wildcard would make every intra-package import a violation. This is the one
+# place the bare form is correct.
+# ---------------------------------------------------------------------------
+[importlinter:contract:frozen-core]
+name = the frozen core imports no feature subpackage
+type = forbidden
+source_modules =
+    memsom
+forbidden_modules =
+    memsom.interface
+    memsom.retrieval
+    memsom.integrity
+    memsom.lifecycle
+    memsom.bridge
+    memsom.distill
+    memsom.federation

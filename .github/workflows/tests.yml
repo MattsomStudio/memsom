@@ -53,6 +53,52 @@ jobs:
       - name: Gate 3 broker selfcheck
         run: python -m memsom.federation.broker --selfcheck
 
+  # ---------------------------------------------------------------------
+  # Architectural contracts. `.importlinter` documents itself as ENFORCED
+  # ("a break is a bug") and was GREEN AND UNTRACKED until 2026-07-31 — which
+  # is the same category of non-enforcement as an unwired goals file: a rule
+  # that only holds on one dev box is a preference.
+  #
+  # Invoked as the console script ON PURPOSE. MEASURED on the dev box:
+  # `python -m importlinter.cli lint-imports` prints NOTHING and exits 0, i.e.
+  # a permanently, silently green gate. Same note as the panel repo's ci.yml.
+  #
+  # Fails loudly if the config is missing rather than passing — a gate that
+  # cannot find its rules must not report success.
+  #
+  # `.importlinter-goals` is deliberately NOT run here: it is RED by design.
+  # Its violation count is ratcheted from the panel repo
+  # (memsom-agentic-os/scripts/goals_ratchet.py), which is where the refactor
+  # driving it lives.
+  # ---------------------------------------------------------------------
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install import-linter
+        run: python -m pip install --upgrade pip && python -m pip install import-linter
+
+      # include_external_packages = True in .importlinter means the graph
+      # builder must be able to import the package itself.
+      - name: Install memsom
+        run: python -m pip install -e .
+
+      - name: Import contracts (enforced)
+        shell: bash
+        run: |
+          if [ ! -f .importlinter ]; then
+            echo "::error::.importlinter is not tracked. It exists on the dev box"
+            echo "::error::but was never committed. Run: git add .importlinter"
+            exit 1
+          fi
+          lint-imports --config .importlinter
+
   # Server-side enforcement of the author-identifying-token gate across ALL git
   # history. The pre-push hook (.githooks/pre-push) is opt-in per clone and never
   # runs on a contributor's (or fork PR author's) machine — this job is where the
