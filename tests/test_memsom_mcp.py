@@ -30,6 +30,10 @@ MCP_MODULE = "memsom.interface.mcp"
 #: at run time. See TestToolArgvMappings.setUpClass.
 VAULT_SLOT = "<configured-vault>"
 
+#: Same trick for the export directory: `export` no longer takes a free path,
+#: so the pin carries the fenced destination rather than the caller's string.
+EXPORT_SLOT = "<export-dir>"
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -368,9 +372,13 @@ class TestToolArgvMappings(unittest.TestCase):
         ("recompute", {"id": 5}, ["recompute", "5"]),
         ("consolidate", {}, ["consolidate"]),
         ("check", {}, ["check"]),
-        ("export", {"path": "/tmp/out.jsonl"}, ["export", "/tmp/out.jsonl"]),
-        ("export", {"path": "/tmp/out.jsonl", "since": "2026-01-01T00:00:00Z"},
-         ["export", "/tmp/out.jsonl", "--since", "2026-01-01T00:00:00Z"]),
+        # The literal "/tmp/out.jsonl" these two cases used to carry now pins
+        # the argv of a call that is REFUSED: an export dumps every node's
+        # content, so the destination is the server's, not the caller's. The
+        # pin's shape is unchanged; only the destination moved.
+        ("export", {"path": "out.jsonl"}, ["export", EXPORT_SLOT]),
+        ("export", {"path": "out.jsonl", "since": "2026-01-01T00:00:00Z"},
+         ["export", EXPORT_SLOT, "--since", "2026-01-01T00:00:00Z"]),
         ("neighborhood", {"id": 5}, ["neighborhood", "5"]),
         ("neighborhood",
          {"id": 5, "hops": 3, "min_integrity": "user", "clearance": "secret"},
@@ -416,20 +424,34 @@ class TestToolArgvMappings(unittest.TestCase):
         cls._vault = str(Path(cls._tmp.name).resolve())
         os.environ[VAULT_ENV] = cls._vault
 
+        cls._prev_exports = os.environ.get(memsom_mcp.MCP_EXPORT_DIR_ENV)
+        cls._exports_tmp = tempfile.TemporaryDirectory()
+        cls._exports = Path(cls._exports_tmp.name).resolve()
+        os.environ[memsom_mcp.MCP_EXPORT_DIR_ENV] = str(cls._exports)
+
     @classmethod
     def tearDownClass(cls):
         if cls._prev_vault is None:
             os.environ.pop(cls._env, None)
         else:
             os.environ[cls._env] = cls._prev_vault
+        if cls._prev_exports is None:
+            os.environ.pop(memsom_mcp.MCP_EXPORT_DIR_ENV, None)
+        else:
+            os.environ[memsom_mcp.MCP_EXPORT_DIR_ENV] = cls._prev_exports
         cls._tmp.cleanup()
+        cls._exports_tmp.cleanup()
 
     def _fill(self, value):
         if isinstance(value, dict):
             return {k: self._fill(v) for k, v in value.items()}
         if isinstance(value, list):
             return [self._fill(v) for v in value]
-        return self._vault if value == VAULT_SLOT else value
+        if value == VAULT_SLOT:
+            return self._vault
+        if value == EXPORT_SLOT:
+            return str(self._exports / "out.jsonl")
+        return value
 
     def test_every_tool_has_at_least_one_case(self):
         covered = {name for name, _, _ in self.CASES}
@@ -526,10 +548,17 @@ class TestDispatchEndToEnd(Base):
         self.assertFalse(is_error, text)
 
     def test_export_writes_changeset_file(self):
+        """The destination is the server's now, so the test names a file rather
+        than a path — but it still asserts the bytes land and are non-empty."""
         self._seed()
-        out = Path(self.tmp.name) / "changeset.jsonl"
-        is_error, text = self._call("export", {"path": str(out)})
+        exports = Path(self.tmp.name) / "exports"
+        os.environ[memsom_mcp.MCP_EXPORT_DIR_ENV] = str(exports)
+        try:
+            is_error, text = self._call("export", {"path": "changeset.jsonl"})
+        finally:
+            os.environ.pop(memsom_mcp.MCP_EXPORT_DIR_ENV, None)
         self.assertFalse(is_error, text)
+        out = exports / "changeset.jsonl"
         self.assertTrue(out.exists(), "export should write the changeset file")
         self.assertTrue(out.read_text(encoding="utf-8").strip(),
                         "changeset should not be empty")

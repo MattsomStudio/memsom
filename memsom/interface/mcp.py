@@ -134,7 +134,12 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Output file path"},
+                # ASCII only, deliberately: selfcheck() prints tool descriptions
+                # with ensure_ascii=False and, unlike serve_stdio(), does not
+                # reconfigure stdout to UTF-8 -- so on Windows a non-ASCII
+                # character here is written as cp1252 and the reader cannot
+                # decode it. See the note in the S3 report.
+                "path": {"type": "string", "description": "Output .jsonl FILENAME, written under the server's export directory. A path outside it is refused, not redirected: an export contains every node's content, so a tool call does not get to choose where the whole store lands."},
                 "since": {"type": "string", "description": "ISO-8601 timestamp; export only nodes created after this"},
             },
             "required": ["path"],
@@ -290,6 +295,23 @@ TOOL_NAMES = {t["name"] for t in TOOLS}
 MCP_CHANNEL_CEILING_ENV = "MEMSOM_MCP_CHANNEL_CEILING"
 _DEFAULT_MCP_CHANNEL_CEILING = "user"
 
+# Where a MODEL-driven export may land. `export` dumps every node's content —
+# the whole store, not a summary — through `open(path, "w")`, and the path was
+# a free string authored by the LLM. That made one tool call two primitives at
+# once: write the entire memory DAG anywhere on disk (including into a
+# bidirectionally-replicated tree, which puts it on another machine without the
+# tool making a single outbound connection), and truncate any file the process
+# can write, because "w" does not care what was there.
+#
+# A human typing `memsom export <path>` at a shell is choosing a destination
+# with their own hands and stays unconstrained; the CLI is untouched. A model
+# choosing one is repeating whatever text is in its context. Fence the model,
+# not the human.
+#
+# The operator names the directory, in the environment, once — same shape as
+# the vault fence below.
+MCP_EXPORT_DIR_ENV = "MEMSOM_MCP_EXPORT_DIR"
+
 
 def _mcp_channel_ceiling():
     """The highest channel rank this transport may stamp. Never None."""
@@ -352,6 +374,55 @@ def _checked_vault(raw):
     except UnsafePath as exc:
         raise ValueError(
             f"refused: vault path is outside {VAULT_ENV} ({exc})") from exc
+
+
+def _mcp_export_dir():
+    """The one directory a model-driven export may write into.
+
+    Defaults beside the store rather than under the vault: an export is a full
+    dump of every node's content, and the vault is a replicated tree, so the
+    default destination must not be one that leaves the machine on its own.
+    """
+    from pathlib import Path
+
+    import memsom
+
+    raw = (os.environ.get(MCP_EXPORT_DIR_ENV) or "").strip()
+    return Path(raw) if raw else memsom.DATA_DIR / "exports"
+
+
+def _checked_export_path(raw):
+    """Validate a caller-supplied export path against the export directory.
+
+    Refused, never sanitized — the same rule the identifier fences follow.
+    Silently rewriting `…/Vault/dump.jsonl` to a basename would make a tool
+    call that did something other than what it said, and the caller would have
+    no way to tell a fenced write from an honoured one. An error the model can
+    read is worth more than a redirect it cannot see.
+
+    A relative name, a subpath, or an absolute path already inside the
+    directory are all accepted; a drive letter, a UNC share, `..`, a device
+    name or anything else that escapes is not. The `.jsonl` requirement is not
+    cosmetic: it keeps the truncating `open(path, "w")` off any other file that
+    happens to live in the same directory.
+    """
+    from memsom.paths import UnsafePath, safe_join
+
+    root = _mcp_export_dir()
+    text = str(raw)
+    if not text.lower().endswith(".jsonl"):
+        raise ValueError(
+            f"refused: export path must name a .jsonl file, got {text!r}")
+    # The fence proves containment on the STRING before touching the disk, so
+    # the directory is created only once the name is known to be acceptable.
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        return str(safe_join(root, text, allow_absolute=True))
+    except UnsafePath as exc:
+        raise ValueError(
+            f"refused: an export writes the whole store, so a tool call may "
+            f"only place it under {root} (set {MCP_EXPORT_DIR_ENV} to move "
+            f"that). {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +493,7 @@ def _tool_argv(name, arguments):
         return ["check"]
 
     if name == "export":
-        argv = ["export", str(arguments["path"])]
+        argv = ["export", _checked_export_path(arguments["path"])]
         if arguments.get("since"):
             argv += ["--since", str(arguments["since"])]
         return argv
