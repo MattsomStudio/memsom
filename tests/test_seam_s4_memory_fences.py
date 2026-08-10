@@ -748,6 +748,12 @@ class FilelessNodeReconcileTest(StoreCase):
         "retrievable forever, with no sweep, no audit finding and no "
         "operator-visible artefact. strict=True: when this goes green the "
         "defect is fixed and the marker must come off."))
+    # `python -m unittest discover` (the exit-gate runner) does not read
+    # pytest markers, so the xfail above is invisible to it and this test
+    # would hard-fail CI. `expectedFailure` is unittest's own spelling of
+    # the same "known red" contract; strict=True already matches its
+    # unexpected-success-is-an-error behaviour.
+    @unittest.expectedFailure
     def test_fileless_memory_node_is_reconcilable(self):
         """Every entry in the `memory:` namespace must have an exit.
 

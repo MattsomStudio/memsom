@@ -162,6 +162,12 @@ class TheMemoryNamespacePredicateHasOneOwner(unittest.TestCase):
             "demanding the marker come off -- the gate must not quietly stay "
             "yellow after it is fixed."),
     )
+    # `python -m unittest discover` (the exit-gate runner) does not read
+    # pytest markers, so the xfail above is invisible to it and this test
+    # would hard-fail CI. `expectedFailure` is unittest's own spelling of
+    # the same "known red" contract; strict=True already matches its
+    # unexpected-success-is-an-error behaviour.
+    @unittest.expectedFailure
     def test_no_module_hand_rolls_a_memory_predicate(self):
         found = survey()
         detail = "\n".join(

@@ -1,0 +1,887 @@
+{
+  "cases": 220,
+  "digest": "f9276cabf171398372eaea16821cc3f6a755307ed010f7dd6dd8c7d989f1382d",
+  "oracle_commit": "7862fa8d9ed26f5917603b8a23ee8938aea2ce30",
+  "outcomes": {
+    "candidate_sentences(\"sql injection attempt' OR '1'='1\")": {
+      "ok": true,
+      "value": "[\"sql injection attempt' OR '1'='1.\"]"
+    },
+    "candidate_sentences('   ')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('# Heading\\n\\nBody text follows the heading.')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('- bullet one\\n- bullet two\\n* bullet three')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('<script>alert(1)</script> embedded markup')": {
+      "ok": true,
+      "value": "['<script>alert(1)</script> embedded markup.']"
+    },
+    "candidate_sentences('> a quoted blockquote line')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.')": {
+      "ok": true,
+      "value": "['A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.']"
+    },
+    "candidate_sentences('Emoji test \ud83d\ude00 in the middle of a sentence.')": {
+      "ok": true,
+      "value": "['Emoji test \ud83d\ude00 in the middle of a sentence.']"
+    },
+    "candidate_sentences('Hello. This is a normal sentence. And another one!')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('Line one\\nLine two\\nLine three.')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('No terminal punctuation here')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('Question? Answer! Statement.')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('Tabs\\tand\\tmultiple   spaces.')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('Trailing punctuation....')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('[mem:1|user] a sentence that already looks like a citation')": {
+      "ok": true,
+      "value": "['[mem:1|user] a sentence that already looks like a citation.']"
+    },
+    "candidate_sentences('\\n\\n\\n')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('```code fence\\nx = 1\\n```')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('a')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "candidate_sentences('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')": {
+      "ok": true,
+      "value": "['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.']"
+    },
+    "compose('',[(1, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('',[(1, 'Hello. This is a normal sentence. And another one!', 'user', 0, None), (2, 'No terminal punctuation here', 'external', 0, 'https://evil/x'), (3, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 2 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:1|user]\\n- No terminal punctuation here. [mem:2|external]', [1, 2])"
+    },
+    "compose('',[(10, '> a quoted blockquote line', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- > a quoted blockquote line. [mem:10|endorsed]', [10])"
+    },
+    "compose('',[(11, '```code fence\\nx = 1\\n```', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- ```code fence. [mem:11|external]', [11])"
+    },
+    "compose('',[(12, '# Heading\\n\\nBody text follows the heading.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- # Heading. [mem:12|agent-derived]', [12])"
+    },
+    "compose('',[(13, 'Question? Answer! Statement.', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Question? Answer! Statement. [mem:13|user]', [13])"
+    },
+    "compose('',[(14, 'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002. [mem:14|endorsed]', [14])"
+    },
+    "compose('',[(15, 'Emoji test \ud83d\ude00 in the middle of a sentence.', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Emoji test \ud83d\ude00 in the middle of a sentence. [mem:15|external]', [15])"
+    },
+    "compose('',[(16, 'Tabs\\tand\\tmultiple   spaces.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Tabs\\tand\\tmultiple   spaces. [mem:16|agent-derived]', [16])"
+    },
+    "compose('',[(17, 'Trailing punctuation....', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Trailing punctuation. [mem:17|user]', [17])"
+    },
+    "compose('',[(18, 'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here. [mem:18|endorsed]', [18])"
+    },
+    "compose('',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+    },
+    "compose('',[(2, '   ', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('',[(20, \"sql injection attempt' OR '1'='1\", 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "(\"Q: \\nA (composed from 1 live sources):\\n- sql injection attempt' OR '1'='1. [mem:20|agent-derived]\", [20])"
+    },
+    "compose('',[(21, '<script>alert(1)</script> embedded markup', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- <script>alert(1)</script> embedded markup. [mem:21|user]', [21])"
+    },
+    "compose('',[(3, '\\n\\n\\n', 'external', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('',[(4, 'a', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- a. [mem:4|agent-derived]', [4])"
+    },
+    "compose('',[(5, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. [mem:5|user]', [5])"
+    },
+    "compose('',[(6, 'Hello. This is a normal sentence. And another one!', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:6|endorsed]', [6])"
+    },
+    "compose('',[(7, 'No terminal punctuation here', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- No terminal punctuation here. [mem:7|external]', [7])"
+    },
+    "compose('',[(8, 'Line one\\nLine two\\nLine three.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- Line one. [mem:8|agent-derived]', [8])"
+    },
+    "compose('',[(9, '- bullet one\\n- bullet two\\n* bullet three', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- - bullet one. [mem:9|user]', [9])"
+    },
+    "compose('',[])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('How does Nebula hole punching work?',[(1, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('How does Nebula hole punching work?',[(1, 'Hello. This is a normal sentence. And another one!', 'user', 0, None), (2, 'No terminal punctuation here', 'external', 0, 'https://evil/x'), (3, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 2 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:1|user]\\n- No terminal punctuation here. [mem:2|external]', [1, 2])"
+    },
+    "compose('How does Nebula hole punching work?',[(10, '> a quoted blockquote line', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- > a quoted blockquote line. [mem:10|endorsed]', [10])"
+    },
+    "compose('How does Nebula hole punching work?',[(11, '```code fence\\nx = 1\\n```', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- ```code fence. [mem:11|external]', [11])"
+    },
+    "compose('How does Nebula hole punching work?',[(12, '# Heading\\n\\nBody text follows the heading.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- # Heading. [mem:12|agent-derived]', [12])"
+    },
+    "compose('How does Nebula hole punching work?',[(13, 'Question? Answer! Statement.', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Question? Answer! Statement. [mem:13|user]', [13])"
+    },
+    "compose('How does Nebula hole punching work?',[(14, 'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002. [mem:14|endorsed]', [14])"
+    },
+    "compose('How does Nebula hole punching work?',[(15, 'Emoji test \ud83d\ude00 in the middle of a sentence.', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Emoji test \ud83d\ude00 in the middle of a sentence. [mem:15|external]', [15])"
+    },
+    "compose('How does Nebula hole punching work?',[(16, 'Tabs\\tand\\tmultiple   spaces.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Tabs\\tand\\tmultiple   spaces. [mem:16|agent-derived]', [16])"
+    },
+    "compose('How does Nebula hole punching work?',[(17, 'Trailing punctuation....', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Trailing punctuation. [mem:17|user]', [17])"
+    },
+    "compose('How does Nebula hole punching work?',[(18, 'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here. [mem:18|endorsed]', [18])"
+    },
+    "compose('How does Nebula hole punching work?',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+    },
+    "compose('How does Nebula hole punching work?',[(2, '   ', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('How does Nebula hole punching work?',[(20, \"sql injection attempt' OR '1'='1\", 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "(\"Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- sql injection attempt' OR '1'='1. [mem:20|agent-derived]\", [20])"
+    },
+    "compose('How does Nebula hole punching work?',[(21, '<script>alert(1)</script> embedded markup', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- <script>alert(1)</script> embedded markup. [mem:21|user]', [21])"
+    },
+    "compose('How does Nebula hole punching work?',[(3, '\\n\\n\\n', 'external', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('How does Nebula hole punching work?',[(4, 'a', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- a. [mem:4|agent-derived]', [4])"
+    },
+    "compose('How does Nebula hole punching work?',[(5, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. [mem:5|user]', [5])"
+    },
+    "compose('How does Nebula hole punching work?',[(6, 'Hello. This is a normal sentence. And another one!', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:6|endorsed]', [6])"
+    },
+    "compose('How does Nebula hole punching work?',[(7, 'No terminal punctuation here', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- No terminal punctuation here. [mem:7|external]', [7])"
+    },
+    "compose('How does Nebula hole punching work?',[(8, 'Line one\\nLine two\\nLine three.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- Line one. [mem:8|agent-derived]', [8])"
+    },
+    "compose('How does Nebula hole punching work?',[(9, '- bullet one\\n- bullet two\\n* bullet three', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- - bullet one. [mem:9|user]', [9])"
+    },
+    "compose('How does Nebula hole punching work?',[])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(1, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(1, 'Hello. This is a normal sentence. And another one!', 'user', 0, None), (2, 'No terminal punctuation here', 'external', 0, 'https://evil/x'), (3, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 2 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:1|user]\\n- No terminal punctuation here. [mem:2|external]', [1, 2])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(10, '> a quoted blockquote line', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- > a quoted blockquote line. [mem:10|endorsed]', [10])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(11, '```code fence\\nx = 1\\n```', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- ```code fence. [mem:11|external]', [11])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(12, '# Heading\\n\\nBody text follows the heading.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- # Heading. [mem:12|agent-derived]', [12])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(13, 'Question? Answer! Statement.', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Question? Answer! Statement. [mem:13|user]', [13])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(14, 'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002. [mem:14|endorsed]', [14])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(15, 'Emoji test \ud83d\ude00 in the middle of a sentence.', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Emoji test \ud83d\ude00 in the middle of a sentence. [mem:15|external]', [15])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(16, 'Tabs\\tand\\tmultiple   spaces.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Tabs\\tand\\tmultiple   spaces. [mem:16|agent-derived]', [16])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(17, 'Trailing punctuation....', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Trailing punctuation. [mem:17|user]', [17])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(18, 'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here. [mem:18|endorsed]', [18])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(2, '   ', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(20, \"sql injection attempt' OR '1'='1\", 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "(\"Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- sql injection attempt' OR '1'='1. [mem:20|agent-derived]\", [20])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(21, '<script>alert(1)</script> embedded markup', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- <script>alert(1)</script> embedded markup. [mem:21|user]', [21])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(3, '\\n\\n\\n', 'external', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(4, 'a', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- a. [mem:4|agent-derived]', [4])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(5, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. [mem:5|user]', [5])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(6, 'Hello. This is a normal sentence. And another one!', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:6|endorsed]', [6])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(7, 'No terminal punctuation here', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- No terminal punctuation here. [mem:7|external]', [7])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(8, 'Line one\\nLine two\\nLine three.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- Line one. [mem:8|agent-derived]', [8])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(9, '- bullet one\\n- bullet two\\n* bullet three', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- - bullet one. [mem:9|user]', [9])"
+    },
+    "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('unrelated query with no keyword overlap',[(1, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('unrelated query with no keyword overlap',[(1, 'Hello. This is a normal sentence. And another one!', 'user', 0, None), (2, 'No terminal punctuation here', 'external', 0, 'https://evil/x'), (3, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 2 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:1|user]\\n- No terminal punctuation here. [mem:2|external]', [1, 2])"
+    },
+    "compose('unrelated query with no keyword overlap',[(10, '> a quoted blockquote line', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- > a quoted blockquote line. [mem:10|endorsed]', [10])"
+    },
+    "compose('unrelated query with no keyword overlap',[(11, '```code fence\\nx = 1\\n```', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- ```code fence. [mem:11|external]', [11])"
+    },
+    "compose('unrelated query with no keyword overlap',[(12, '# Heading\\n\\nBody text follows the heading.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- # Heading. [mem:12|agent-derived]', [12])"
+    },
+    "compose('unrelated query with no keyword overlap',[(13, 'Question? Answer! Statement.', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Question? Answer! Statement. [mem:13|user]', [13])"
+    },
+    "compose('unrelated query with no keyword overlap',[(14, 'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002. [mem:14|endorsed]', [14])"
+    },
+    "compose('unrelated query with no keyword overlap',[(15, 'Emoji test \ud83d\ude00 in the middle of a sentence.', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Emoji test \ud83d\ude00 in the middle of a sentence. [mem:15|external]', [15])"
+    },
+    "compose('unrelated query with no keyword overlap',[(16, 'Tabs\\tand\\tmultiple   spaces.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Tabs\\tand\\tmultiple   spaces. [mem:16|agent-derived]', [16])"
+    },
+    "compose('unrelated query with no keyword overlap',[(17, 'Trailing punctuation....', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Trailing punctuation. [mem:17|user]', [17])"
+    },
+    "compose('unrelated query with no keyword overlap',[(18, 'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here. [mem:18|endorsed]', [18])"
+    },
+    "compose('unrelated query with no keyword overlap',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+    },
+    "compose('unrelated query with no keyword overlap',[(2, '   ', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('unrelated query with no keyword overlap',[(20, \"sql injection attempt' OR '1'='1\", 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "(\"Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- sql injection attempt' OR '1'='1. [mem:20|agent-derived]\", [20])"
+    },
+    "compose('unrelated query with no keyword overlap',[(21, '<script>alert(1)</script> embedded markup', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- <script>alert(1)</script> embedded markup. [mem:21|user]', [21])"
+    },
+    "compose('unrelated query with no keyword overlap',[(3, '\\n\\n\\n', 'external', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('unrelated query with no keyword overlap',[(4, 'a', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- a. [mem:4|agent-derived]', [4])"
+    },
+    "compose('unrelated query with no keyword overlap',[(5, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. [mem:5|user]', [5])"
+    },
+    "compose('unrelated query with no keyword overlap',[(6, 'Hello. This is a normal sentence. And another one!', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:6|endorsed]', [6])"
+    },
+    "compose('unrelated query with no keyword overlap',[(7, 'No terminal punctuation here', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- No terminal punctuation here. [mem:7|external]', [7])"
+    },
+    "compose('unrelated query with no keyword overlap',[(8, 'Line one\\nLine two\\nLine three.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- Line one. [mem:8|agent-derived]', [8])"
+    },
+    "compose('unrelated query with no keyword overlap',[(9, '- bullet one\\n- bullet two\\n* bullet three', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- - bullet one. [mem:9|user]', [9])"
+    },
+    "compose('unrelated query with no keyword overlap',[])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('what is the CA passphrase?',[(1, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('what is the CA passphrase?',[(1, 'Hello. This is a normal sentence. And another one!', 'user', 0, None), (2, 'No terminal punctuation here', 'external', 0, 'https://evil/x'), (3, '', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 2 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:1|user]\\n- No terminal punctuation here. [mem:2|external]', [1, 2])"
+    },
+    "compose('what is the CA passphrase?',[(10, '> a quoted blockquote line', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- > a quoted blockquote line. [mem:10|endorsed]', [10])"
+    },
+    "compose('what is the CA passphrase?',[(11, '```code fence\\nx = 1\\n```', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- ```code fence. [mem:11|external]', [11])"
+    },
+    "compose('what is the CA passphrase?',[(12, '# Heading\\n\\nBody text follows the heading.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- # Heading. [mem:12|agent-derived]', [12])"
+    },
+    "compose('what is the CA passphrase?',[(13, 'Question? Answer! Statement.', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Question? Answer! Statement. [mem:13|user]', [13])"
+    },
+    "compose('what is the CA passphrase?',[(14, 'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002. [mem:14|endorsed]', [14])"
+    },
+    "compose('what is the CA passphrase?',[(15, 'Emoji test \ud83d\ude00 in the middle of a sentence.', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Emoji test \ud83d\ude00 in the middle of a sentence. [mem:15|external]', [15])"
+    },
+    "compose('what is the CA passphrase?',[(16, 'Tabs\\tand\\tmultiple   spaces.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Tabs\\tand\\tmultiple   spaces. [mem:16|agent-derived]', [16])"
+    },
+    "compose('what is the CA passphrase?',[(17, 'Trailing punctuation....', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Trailing punctuation. [mem:17|user]', [17])"
+    },
+    "compose('what is the CA passphrase?',[(18, 'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here. [mem:18|endorsed]', [18])"
+    },
+    "compose('what is the CA passphrase?',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+    },
+    "compose('what is the CA passphrase?',[(2, '   ', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('what is the CA passphrase?',[(20, \"sql injection attempt' OR '1'='1\", 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "(\"Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- sql injection attempt' OR '1'='1. [mem:20|agent-derived]\", [20])"
+    },
+    "compose('what is the CA passphrase?',[(21, '<script>alert(1)</script> embedded markup', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- <script>alert(1)</script> embedded markup. [mem:21|user]', [21])"
+    },
+    "compose('what is the CA passphrase?',[(3, '\\n\\n\\n', 'external', 0, None)])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "compose('what is the CA passphrase?',[(4, 'a', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- a. [mem:4|agent-derived]', [4])"
+    },
+    "compose('what is the CA passphrase?',[(5, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. [mem:5|user]', [5])"
+    },
+    "compose('what is the CA passphrase?',[(6, 'Hello. This is a normal sentence. And another one!', 'endorsed', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Hello. This is a normal sentence. And another one!. [mem:6|endorsed]', [6])"
+    },
+    "compose('what is the CA passphrase?',[(7, 'No terminal punctuation here', 'external', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- No terminal punctuation here. [mem:7|external]', [7])"
+    },
+    "compose('what is the CA passphrase?',[(8, 'Line one\\nLine two\\nLine three.', 'agent-derived', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- Line one. [mem:8|agent-derived]', [8])"
+    },
+    "compose('what is the CA passphrase?',[(9, '- bullet one\\n- bullet two\\n* bullet three', 'user', 0, None)])": {
+      "ok": true,
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- - bullet one. [mem:9|user]', [9])"
+    },
+    "compose('what is the CA passphrase?',[])": {
+      "ok": true,
+      "value": "(None, [])"
+    },
+    "prose_lines(\"sql injection attempt' OR '1'='1\")": {
+      "ok": true,
+      "value": "[\"sql injection attempt' OR '1'='1\"]"
+    },
+    "prose_lines('   ')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "prose_lines('# Heading\\n\\nBody text follows the heading.')": {
+      "ok": true,
+      "value": "['Body text follows the heading.']"
+    },
+    "prose_lines('')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "prose_lines('- bullet one\\n- bullet two\\n* bullet three')": {
+      "ok": true,
+      "value": "['- bullet one', '- bullet two', '* bullet three']"
+    },
+    "prose_lines('<script>alert(1)</script> embedded markup')": {
+      "ok": true,
+      "value": "['<script>alert(1)</script> embedded markup']"
+    },
+    "prose_lines('> a quoted blockquote line')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "prose_lines('A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.')": {
+      "ok": true,
+      "value": "['A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.']"
+    },
+    "prose_lines('Emoji test \ud83d\ude00 in the middle of a sentence.')": {
+      "ok": true,
+      "value": "['Emoji test \ud83d\ude00 in the middle of a sentence.']"
+    },
+    "prose_lines('Hello. This is a normal sentence. And another one!')": {
+      "ok": true,
+      "value": "['Hello. This is a normal sentence. And another one!']"
+    },
+    "prose_lines('Line one\\nLine two\\nLine three.')": {
+      "ok": true,
+      "value": "['Line one', 'Line two', 'Line three.']"
+    },
+    "prose_lines('No terminal punctuation here')": {
+      "ok": true,
+      "value": "['No terminal punctuation here']"
+    },
+    "prose_lines('Question? Answer! Statement.')": {
+      "ok": true,
+      "value": "['Question? Answer! Statement.']"
+    },
+    "prose_lines('Tabs\\tand\\tmultiple   spaces.')": {
+      "ok": true,
+      "value": "['Tabs\\tand\\tmultiple   spaces.']"
+    },
+    "prose_lines('Trailing punctuation....')": {
+      "ok": true,
+      "value": "['Trailing punctuation....']"
+    },
+    "prose_lines('Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002')": {
+      "ok": true,
+      "value": "['Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002']"
+    },
+    "prose_lines('[mem:1|user] a sentence that already looks like a citation')": {
+      "ok": true,
+      "value": "['[mem:1|user] a sentence that already looks like a citation']"
+    },
+    "prose_lines('\\n\\n\\n')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "prose_lines('```code fence\\nx = 1\\n```')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "prose_lines('a')": {
+      "ok": true,
+      "value": "['a']"
+    },
+    "prose_lines('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')": {
+      "ok": true,
+      "value": "['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']"
+    },
+    "snippet(\"sql injection attempt' OR '1'='1\",80)": {
+      "ok": true,
+      "value": "\"sql injection attempt' OR '1'='1\""
+    },
+    "snippet('   ',80)": {
+      "ok": true,
+      "value": "''"
+    },
+    "snippet('# Heading\\n\\nBody text follows the heading.',80)": {
+      "ok": true,
+      "value": "'Body text follows the heading.'"
+    },
+    "snippet('',80)": {
+      "ok": true,
+      "value": "''"
+    },
+    "snippet('- bullet one\\n- bullet two\\n* bullet three',80)": {
+      "ok": true,
+      "value": "'- bullet one'"
+    },
+    "snippet('<script>alert(1)</script> embedded markup',80)": {
+      "ok": true,
+      "value": "'<script>alert(1)</script> embedded markup'"
+    },
+    "snippet('> a quoted blockquote line',80)": {
+      "ok": true,
+      "value": "'> a quoted blockquote line'"
+    },
+    "snippet('A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.',80)": {
+      "ok": true,
+      "value": "'A very very very very very very very very very very very very long single senten'"
+    },
+    "snippet('Emoji test \ud83d\ude00 in the middle of a sentence.',80)": {
+      "ok": true,
+      "value": "'Emoji test \ud83d\ude00 in the middle of a sentence.'"
+    },
+    "snippet('Hello. This is a normal sentence. And another one!',80)": {
+      "ok": true,
+      "value": "'Hello. This is a normal sentence. And another one!'"
+    },
+    "snippet('Line one\\nLine two\\nLine three.',80)": {
+      "ok": true,
+      "value": "'Line one'"
+    },
+    "snippet('No terminal punctuation here',80)": {
+      "ok": true,
+      "value": "'No terminal punctuation here'"
+    },
+    "snippet('Question? Answer! Statement.',80)": {
+      "ok": true,
+      "value": "'Question? Answer! Statement.'"
+    },
+    "snippet('Tabs\\tand\\tmultiple   spaces.',80)": {
+      "ok": true,
+      "value": "'Tabs and multiple spaces.'"
+    },
+    "snippet('Trailing punctuation....',80)": {
+      "ok": true,
+      "value": "'Trailing punctuation....'"
+    },
+    "snippet('Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002',80)": {
+      "ok": true,
+      "value": "'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002'"
+    },
+    "snippet('[mem:1|user] a sentence that already looks like a citation',80)": {
+      "ok": true,
+      "value": "'[mem:1|user] a sentence that already looks like a citation'"
+    },
+    "snippet('\\n\\n\\n',80)": {
+      "ok": true,
+      "value": "''"
+    },
+    "snippet('```code fence\\nx = 1\\n```',80)": {
+      "ok": true,
+      "value": "'code fence x = 1'"
+    },
+    "snippet('a',80)": {
+      "ok": true,
+      "value": "'a'"
+    },
+    "snippet('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',80)": {
+      "ok": true,
+      "value": "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
+    },
+    "stems(\"sql injection attempt' OR '1'='1\")": {
+      "ok": true,
+      "value": "['1', 'attemp', 'inject', 'sql']"
+    },
+    "stems('   ')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "stems('# Heading\\n\\nBody text follows the heading.')": {
+      "ok": true,
+      "value": "['body', 'follow', 'headin', 'text']"
+    },
+    "stems('')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "stems('- bullet one\\n- bullet two\\n* bullet three')": {
+      "ok": true,
+      "value": "['bullet', 'one', 'three', 'two']"
+    },
+    "stems('<script>alert(1)</script> embedded markup')": {
+      "ok": true,
+      "value": "['1', 'alert', 'embedd', 'markup', 'script']"
+    },
+    "stems('> a quoted blockquote line')": {
+      "ok": true,
+      "value": "['blockq', 'line', 'quoted']"
+    },
+    "stems('A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.')": {
+      "ok": true,
+      "value": "['eventu', 'going', 'here', 'indeed', 'keeps', 'long', 'senten', 'single', 'stop', 'stoppi', 'that', 'time', 'until', 'very', 'withou']"
+    },
+    "stems('Emoji test \ud83d\ude00 in the middle of a sentence.')": {
+      "ok": true,
+      "value": "['emoji', 'middle', 'senten', 'test']"
+    },
+    "stems('Hello. This is a normal sentence. And another one!')": {
+      "ok": true,
+      "value": "['anothe', 'hello', 'normal', 'one', 'senten', 'this']"
+    },
+    "stems('Line one\\nLine two\\nLine three.')": {
+      "ok": true,
+      "value": "['line', 'one', 'three', 'two']"
+    },
+    "stems('No terminal punctuation here')": {
+      "ok": true,
+      "value": "['here', 'no', 'punctu', 'termin']"
+    },
+    "stems('Question? Answer! Statement.')": {
+      "ok": true,
+      "value": "['answer', 'questi', 'statem']"
+    },
+    "stems('Tabs\\tand\\tmultiple   spaces.')": {
+      "ok": true,
+      "value": "['multip', 'spaces', 'tabs']"
+    },
+    "stems('Trailing punctuation....')": {
+      "ok": true,
+      "value": "['punctu', 'traili']"
+    },
+    "stems('Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002')": {
+      "ok": true,
+      "value": "['caf', 'na', 'r', 'sum', 'unicod', 've']"
+    },
+    "stems('[mem:1|user] a sentence that already looks like a citation')": {
+      "ok": true,
+      "value": "['1', 'alread', 'citati', 'like', 'looks', 'mem', 'senten', 'that', 'user']"
+    },
+    "stems('\\n\\n\\n')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "stems('```code fence\\nx = 1\\n```')": {
+      "ok": true,
+      "value": "['1', 'code', 'fence', 'x']"
+    },
+    "stems('a')": {
+      "ok": true,
+      "value": "[]"
+    },
+    "stems('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')": {
+      "ok": true,
+      "value": "['aaaaaa']"
+    },
+    "strip_furniture(\"sql injection attempt' OR '1'='1\")": {
+      "ok": true,
+      "value": "\"sql injection attempt' OR '1'='1\""
+    },
+    "strip_furniture('   ')": {
+      "ok": true,
+      "value": "'   '"
+    },
+    "strip_furniture('# Heading\\n\\nBody text follows the heading.')": {
+      "ok": true,
+      "value": "'# Heading\\n\\nBody text follows the heading.'"
+    },
+    "strip_furniture('')": {
+      "ok": true,
+      "value": "''"
+    },
+    "strip_furniture('- bullet one\\n- bullet two\\n* bullet three')": {
+      "ok": true,
+      "value": "'- bullet one\\n- bullet two\\n* bullet three'"
+    },
+    "strip_furniture('<script>alert(1)</script> embedded markup')": {
+      "ok": true,
+      "value": "'<script>alert(1)</script> embedded markup'"
+    },
+    "strip_furniture('> a quoted blockquote line')": {
+      "ok": true,
+      "value": "'> a quoted blockquote line'"
+    },
+    "strip_furniture('A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.')": {
+      "ok": true,
+      "value": "'A very very very very very very very very very very very very long single sentence that keeps going and going without stopping for a very long time indeed until eventually it does stop here.'"
+    },
+    "strip_furniture('Emoji test \ud83d\ude00 in the middle of a sentence.')": {
+      "ok": true,
+      "value": "'Emoji test \ud83d\ude00 in the middle of a sentence.'"
+    },
+    "strip_furniture('Hello. This is a normal sentence. And another one!')": {
+      "ok": true,
+      "value": "'Hello. This is a normal sentence. And another one!'"
+    },
+    "strip_furniture('Line one\\nLine two\\nLine three.')": {
+      "ok": true,
+      "value": "'Line one\\nLine two\\nLine three.'"
+    },
+    "strip_furniture('No terminal punctuation here')": {
+      "ok": true,
+      "value": "'No terminal punctuation here'"
+    },
+    "strip_furniture('Question? Answer! Statement.')": {
+      "ok": true,
+      "value": "'Question? Answer! Statement.'"
+    },
+    "strip_furniture('Tabs\\tand\\tmultiple   spaces.')": {
+      "ok": true,
+      "value": "'Tabs\\tand\\tmultiple   spaces.'"
+    },
+    "strip_furniture('Trailing punctuation....')": {
+      "ok": true,
+      "value": "'Trailing punctuation....'"
+    },
+    "strip_furniture('Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002')": {
+      "ok": true,
+      "value": "'Unicode: caf\u00e9 na\u00efve r\u00e9sum\u00e9. \u4e2d\u6587\u53e5\u5b50\u3002'"
+    },
+    "strip_furniture('[mem:1|user] a sentence that already looks like a citation')": {
+      "ok": true,
+      "value": "'[mem:1|user] a sentence that already looks like a citation'"
+    },
+    "strip_furniture('\\n\\n\\n')": {
+      "ok": true,
+      "value": "'\\n\\n\\n'"
+    },
+    "strip_furniture('```code fence\\nx = 1\\n```')": {
+      "ok": true,
+      "value": "'code fence\\nx = 1\\n'"
+    },
+    "strip_furniture('a')": {
+      "ok": true,
+      "value": "'a'"
+    },
+    "strip_furniture('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')": {
+      "ok": true,
+      "value": "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
+    }
+  }
+}
