@@ -9,7 +9,7 @@ A wheel from this phase's own last-green commit, stored **outside** this
 repo's tree:
 
 ```
-C:\Users\usr9f2\memsom-refactor\known-good-wheel\memsom-0.2.0-py3-none-any.whl
+%USERPROFILE%\memsom-refactor\known-good-wheel\memsom-0.2.0-py3-none-any.whl
 ```
 
 Built with `python -m pip wheel . --no-deps -w <that dir>` from
@@ -23,7 +23,7 @@ fixed, increasingly stale baseline.
 Freeze onto the known-good wheel:
 
 ```
-pip install --force-reinstall C:\Users\usr9f2\memsom-refactor\known-good-wheel\memsom-0.2.0-py3-none-any.whl
+pip install --force-reinstall %USERPROFILE%\memsom-refactor\known-good-wheel\memsom-0.2.0-py3-none-any.whl
 ```
 
 Return to the editable working tree:
@@ -43,7 +43,7 @@ python scripts/live_probe.py
 `scripts/live_probe.py` reads `importlib.metadata`'s `direct_url.json` for
 the globally installed `memsom` distribution, not the `memsom` a given
 script actually imports. On this machine that global editable pointer
-resolves to **`C:\Users\usr9f2\memsom`, the LIVE repo** -- not this copy, and
+resolves to **`%USERPROFILE%\memsom`, the LIVE repo** -- not this copy, and
 not any wheel. Running the probe from inside `memsom-refactor-work` still
 correctly shows `memsom-refactor-work\memsom\__init__.py` as the module a
 plain `import memsom` picks up (Python puts the script's own directory /

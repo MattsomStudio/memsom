@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(r"C:\Users\usr9f2\memsom")
+REPO = Path(__file__).resolve().parents[2]
 PKG = REPO / "memsom"
 
 # The two frozen-core tables. Rows in these are history.

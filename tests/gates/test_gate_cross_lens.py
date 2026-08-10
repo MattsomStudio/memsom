@@ -174,7 +174,7 @@ def test_mcp_obsidian_export_node_arg_cannot_inject_an_option():
     is parsed as the --vault OPTION and never meets `_checked_vault`. The
     containment root becomes caller-chosen, which paths.py explicitly names as
     the thing it cannot defend."""
-    payload = {"node": r"--vault=C:\Users\usr9f2\.claude", "query": "x",
+    payload = {"node": r"--vault=C:\Users\test\.claude", "query": "x",
                "folder": ".", "title": "poc"}
     try:
         argv = memsom_mcp._tool_argv("obsidian_export", payload)

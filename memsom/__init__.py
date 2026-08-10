@@ -33,7 +33,16 @@ FALLBACK = HOME / "external_fallback.txt"
 # intentionally keep the legacy name across the memsom rename — they are private
 # on-disk plumbing, and renaming them would orphan existing installs' data for
 # zero user-visible benefit. Do NOT "fix" these to memsom.
-DATA_DIR = Path(os.environ.get("MEMDAG_HOME") or Path.home() / ".memdag")
+def _data_dir():
+    return Path(os.environ.get("MEMDAG_HOME") or Path.home() / ".memdag")
+
+
+def __getattr__(name):  # PEP 562: memsom.DATA_DIR resolves MEMDAG_HOME at access time,
+    if name == "DATA_DIR":  # not once at import -- an import before a test pins the env
+        return _data_dir()  # (unittest discover's package walk, e.g.) no longer freezes it.
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 RANK = {"endorsed": 3, "user": 2, "agent-derived": 1, "external": 0}
 NAME = {3: "ENDORSED", 2: "USER", 1: "AGENT-DERIVED", 0: "EXTERNAL"}
 STOP = {"how", "should", "i", "a", "an", "the", "do", "does", "what", "my",
@@ -73,7 +82,7 @@ CASCADE_CTE = """WITH RECURSIVE descendants(id) AS (
 
 
 def db_path():
-    return Path(os.environ.get("MEMDAG_DB") or DATA_DIR / "memdag.db")
+    return Path(os.environ.get("MEMDAG_DB") or _data_dir() / "memdag.db")
 
 
 def now_iso():
