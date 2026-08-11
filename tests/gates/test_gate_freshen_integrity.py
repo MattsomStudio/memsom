@@ -104,7 +104,7 @@ def test_freshen_without_recipe_refloors_integrity(conn):
 
 
 def test_check_action_denies_after_freshen(conn):
-    """gate.check_action is "THE ONLY place the floor is enforced" (gate.py).
+    """gate.check_action is an advisory node-integrity oracle (gate.py, MS-40).
 
     It must not allow an endorsed-floor action on a node whose only live parent
     is external.

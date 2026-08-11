@@ -292,5 +292,5 @@ def test_control_check_action_has_no_exception_handler():
     src = inspect.getsource(memsom_gate.check_action)
     tree = ast.parse(src.lstrip())
     assert not [n for n in ast.walk(tree) if isinstance(n, ast.Try)], (
-        "check_action grew an exception handler -- the only enforcement point "
-        "must never be able to degrade to allow")
+        "check_action grew an exception handler -- the advisory node-integrity "
+        "oracle must never be able to degrade to allow")

@@ -1,9 +1,14 @@
 """memsom_gate — action-time integrity floor enforcement (Move 4).
 
-check_action() is the ONLY place the floor is enforced. READ paths
-(ask/explain/profile/blame/compose) never gate — they always return
-their answer regardless of integrity level. The display profile never
-feeds this function — it takes only (conn, node_id, required_floor).
+check_action() is an ADVISORY node-integrity oracle, invoked only via the
+CLI `check-action` subcommand or the MCP `check_action` tool — it has zero
+internal callers. READ paths (ask/explain/profile/blame/compose) never gate
+— they always return their answer regardless of integrity level. The display
+profile never feeds this function — it takes only (conn, node_id,
+required_floor). Runtime enforcement of Gate #3 (what a session may *do*) is
+`memsom_capgate.check_capability`, interposed by the broker and the
+native-tool hooks before a consequential call is forwarded; see MS-40 /
+ARCHITECTURE.md.
 
 The signature itself enforces the invariant: there is no parameter
 through which a profile/histogram could influence the decision.
@@ -98,8 +103,10 @@ def _parse_required(value) -> int:
 def check_action(conn, node_id, required_floor) -> dict:
     """Check whether *node_id* meets *required_floor* and log the decision.
 
-    This is THE ONLY place the floor is enforced.  READ paths must never
-    call this function.
+    This is an advisory oracle with zero internal callers (CLI/MCP only,
+    MS-40) — not Gate #3's runtime enforcement, which is
+    `memsom_capgate.check_capability`. READ paths must never call this
+    function.
 
     Parameters
     ----------
@@ -257,7 +264,8 @@ def cmd_gate_log(args):
 def register(subparsers):
     p = subparsers.add_parser(
         "check-action",
-        help="action-time integrity gate: allow/deny by floor (the ONLY gate)",
+        help="advisory node-integrity oracle: allow/deny by floor (CLI/MCP only; "
+             "Gate #3 runtime enforcement is check_capability, not this)",
     )
     p.add_argument("id", type=int)
     p.add_argument(

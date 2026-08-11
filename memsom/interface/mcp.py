@@ -176,7 +176,9 @@ TOOLS = [
     },
     {
         "name": "check_action",
-        "description": "Action-time integrity gate: allow/deny by floor, with weakest-leaf culprit. The ONLY gate.",
+        "description": "Advisory node-integrity oracle: allow/deny by floor, with "
+                        "weakest-leaf culprit. CLI/MCP only, zero internal callers -- "
+                        "Gate #3's runtime enforcement is check_capability, not this.",
         "inputSchema": {
             "type": "object",
             "properties": {

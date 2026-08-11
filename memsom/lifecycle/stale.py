@@ -454,8 +454,8 @@ def freshen(conn, node_id):
             # MS-03: re-floor BOTH axes before un-staling — mirrors what
             # regenerate() itself does on its success path (rederive.py:
             # memsom.derive_node's min(parents) + memsom_confid.recompute_conf).
-            # Without this, check_action — documented as THE only enforcement
-            # point — kept reading the STALE stored label after an un-stale that
+            # Without this, check_action (the advisory node-integrity oracle;
+            # MS-40) kept reading the STALE stored label after an un-stale that
             # rewired onto a lower-integrity parent, and allowed. `regenerate`
             # returns None on five paths; the DOMINANT one is no recipe, which is
             # what the frozen-core `ask` and every federation import produce.
