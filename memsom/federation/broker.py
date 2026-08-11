@@ -49,6 +49,7 @@ from memsom.integrity import capgate as memsom_capgate
 from memsom.kernel import policy as memsom_policy
 from memsom.storage import schema as memsom_schema
 from memsom.storage import session as memsom_session
+from memsom import tuning as memsom_tuning
 
 SERVER_NAME = "memsom-broker"
 SERVER_VERSION = "0.1.0"
@@ -94,7 +95,7 @@ def _get_mcp_dispatch():
 # ---------------------------------------------------------------------------
 
 def default_config_path() -> Path:
-    env = os.environ.get("MEMDAG_BROKER_CONFIG")
+    env = memsom_tuning.resolve("federation.broker_config_path")
     if env:
         return Path(env).expanduser()
     return Path.home() / ".memdag" / "broker.json"

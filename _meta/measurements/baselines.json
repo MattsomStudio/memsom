@@ -74,11 +74,11 @@
     "value": 1
   },
   "env_ratchet.reads_outside_tuning": {
-    "control": "tuning.py does not exist before Phase 8; this baseline is the full-repo count today, not yet a real violation total",
-    "note": "Phase 8 builds interface/tuning.py; the target of 0 only becomes meaningful once every knob has migrated there.",
+    "control": "MEASURED at Phase 8: every remaining bare os.environ/getenv site outside tuning.py is one of the four named exceptions.",
+    "note": "Phase 8 built memsom/tuning.py and migrated every knob read into it; the exceptions are named and justified in the module's own docstring.",
     "source": "python scripts/env_ratchet.py",
     "target": 0,
-    "value": 51
+    "value": 0
   },
   "failopen.unannotated_excepts": {
     "control": "control-tested: planting an unannotated bare except in a scratch file raises the count by 1; adding the `# FAILOPEN:` line above it drops it back",

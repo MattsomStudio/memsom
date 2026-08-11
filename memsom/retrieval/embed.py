@@ -43,11 +43,11 @@ blob_to_colbert(blob, n_tokens, dim) -> list
 unload()                               # drop the model, free VRAM
 """
 
-import os
 import struct
 import sqlite3
 
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -70,7 +70,7 @@ def backend() -> str:
 
     Unknown / unset -> 'ollama' (back-compat: the historical default path).
     """
-    raw = (os.environ.get("MEMDAG_EMBED_BACKEND") or "").strip().lower()
+    raw = (memsom_tuning.resolve("embed.backend") or "").strip().lower()
     return raw if raw in VALID_BACKENDS else DEFAULT_BACKEND
 
 
@@ -95,7 +95,7 @@ def active_model_name() -> str:
 
 def colbert_candidates() -> int:
     """Re-rank window size from MEMDAG_COLBERT_CANDIDATES (default 100)."""
-    raw = os.environ.get("MEMDAG_COLBERT_CANDIDATES")
+    raw = memsom_tuning.resolve("retrieval.colbert_candidates")
     if raw is None or not raw.strip():
         return DEFAULT_COLBERT_CANDIDATES
     try:
@@ -111,7 +111,7 @@ def _maxlen() -> int:
     Caps ColBERT per-token storage (~2 KB/token fp16) and encode cost. The
     chunker already bounds content; this is the explicit storage valve.
     """
-    raw = os.environ.get("MEMDAG_COLBERT_MAXLEN")
+    raw = memsom_tuning.resolve("retrieval.colbert_maxlen")
     if raw is None or not raw.strip():
         return DEFAULT_MAXLEN
     try:
@@ -126,7 +126,7 @@ def _device():
 
     None -> let FlagEmbedding auto-select (cuda if available, else cpu).
     """
-    raw = (os.environ.get("MEMDAG_BGE_DEVICE") or "").strip()
+    raw = (memsom_tuning.resolve("retrieval.bge_device") or "").strip()
     return raw or None
 
 

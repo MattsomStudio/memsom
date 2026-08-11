@@ -30,7 +30,6 @@ Env knobs:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -38,10 +37,11 @@ import memsom
 from memsom.bridge import bridge_import as bi
 from memsom.distill import digest as digest
 from memsom.lifecycle import forget as forget
+from memsom import tuning as memsom_tuning
 
 
 def _is_author() -> bool:
-    return os.environ.get("MEMDAG_BRIDGE_AUTHOR", "1") != "0"
+    return memsom_tuning.resolve("bridge.author") != "0"
 
 
 def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes) -> None:

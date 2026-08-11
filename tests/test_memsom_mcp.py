@@ -73,10 +73,10 @@ class TestHandleInProcess(Base):
         self.assertIn("name", si)
         self.assertIn("version", si)
 
-    def test_tools_list_returns_18_tools(self):
+    def test_tools_list_returns_19_tools(self):
         resp = memsom_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
-        self.assertEqual(len(tools), 18)
+        self.assertEqual(len(tools), 19)
         names = {t["name"] for t in tools}
         self.assertEqual(names, memsom_mcp.TOOL_NAMES)
 
@@ -407,6 +407,7 @@ class TestToolArgvMappings(unittest.TestCase):
           "--folder", "f", "--title", "t"]),
         ("verify_stale", {}, ["verify-stale"]),
         ("verify_stale", {"apply": True}, ["verify-stale", "--apply"]),
+        ("features", {}, ["features", "--json"]),
     ]
 
     @classmethod

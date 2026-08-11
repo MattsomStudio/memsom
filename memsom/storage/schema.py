@@ -24,9 +24,9 @@ RANK, NAME  (from memsom)
 
 import re
 import sqlite3
-import os
 
 import memsom
+from memsom import tuning as memsom_tuning
 
 # Re-exports
 RANK = memsom.RANK
@@ -477,7 +477,7 @@ def clearance_ceiling():
     permissive, matching channel_ceiling's directionality (it can only
     tighten, never loosen).
     """
-    raw = os.environ.get(CLEARANCE_CEILING_ENV)
+    raw = memsom_tuning.resolve("integrity.clearance_ceiling")
     if raw is None or not raw.strip():
         return None
     key = raw.strip().lower()

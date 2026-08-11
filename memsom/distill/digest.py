@@ -39,6 +39,7 @@ from memsom.kernel.frontmatter import parse_index_entries, parse_primary_index
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 from memsom.kernel.paths import default_memory_dir
 from memsom.lifecycle import forget as _forget
+from memsom import tuning as memsom_tuning
 
 # Default section display order. Carries no user-specific taxonomy so the shipped
 # module is identity-free; override with a comma-separated $MEMDAG_DIGEST_SECTIONS.
@@ -77,7 +78,7 @@ SHRINK_FLOOR = 0.5
 
 
 def _shrink_floor() -> float:
-    raw = os.environ.get("MEMDAG_DIGEST_SHRINK_FLOOR")
+    raw = memsom_tuning.resolve("distill.digest_shrink_floor")
     if raw:
         try:
             v = float(raw)
@@ -91,7 +92,7 @@ def _shrink_floor() -> float:
 def _section_order():
     """Section display order: $MEMDAG_DIGEST_SECTIONS (comma-separated) if set,
     else the generic SECTIONS default."""
-    env = os.environ.get("MEMDAG_DIGEST_SECTIONS")
+    env = memsom_tuning.resolve("distill.digest_sections")
     if env:
         return [s.strip() for s in env.split(",") if s.strip()]
     return SECTIONS
@@ -270,7 +271,7 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
     """
     if budget is None:
         budget = BUDGET
-    title = title or os.environ.get("MEMDAG_DIGEST_TITLE", DEFAULT_TITLE)
+    title = title or memsom_tuning.resolve("distill.digest_title")
     all_entries = [_entry(*r) for r in _rows(conn)]
     hot = _select_hot(all_entries)
     if excluded_out is not None:

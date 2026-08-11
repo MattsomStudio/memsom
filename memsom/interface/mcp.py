@@ -16,9 +16,10 @@ import argparse
 import contextlib
 import io
 import json
-import os
 import sys
 import traceback
+
+from memsom import tuning as memsom_tuning
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +276,16 @@ TOOLS = [
     },
 ]
 
+TOOLS.append({
+    "name": "features",
+    "description": "Report every optional capability's live state (disabled|absent|degraded|active|error), never silently.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+})
+
 TOOL_NAMES = {t["name"] for t in TOOLS}
 
 
@@ -323,7 +334,7 @@ def _mcp_channel_ceiling():
     import memsom
     from memsom.kernel.lattice import parse_rank
 
-    raw = (os.environ.get(MCP_CHANNEL_CEILING_ENV) or "").strip()
+    raw = (memsom_tuning.resolve("mcp.channel_ceiling") or "").strip()
     n = parse_rank(raw) if raw else None
     return n if n is not None else memsom.RANK[_DEFAULT_MCP_CHANNEL_CEILING]
 
@@ -367,7 +378,7 @@ def _checked_vault(raw):
     from memsom.bridge.obsidian import VAULT_ENV
     from memsom.paths import UnsafePath, safe_join
 
-    root = (os.environ.get(VAULT_ENV) or "").strip()
+    root = (memsom_tuning.resolve("obsidian.vault") or "").strip()
     if not root:
         raise ValueError(
             f"refused: a vault path was supplied but no vault is configured. "
@@ -392,7 +403,7 @@ def _mcp_export_dir():
 
     import memsom
 
-    raw = (os.environ.get(MCP_EXPORT_DIR_ENV) or "").strip()
+    raw = (memsom_tuning.resolve("mcp.export_dir") or "").strip()
     return Path(raw) if raw else memsom.DATA_DIR / "exports"
 
 
@@ -581,6 +592,9 @@ def _tool_argv(name, arguments):
         if arguments.get("apply"):
             argv.append("--apply")
         return argv
+
+    if name == "features":
+        return ["features", "--json"]
 
     raise ValueError(f"unknown tool: {name!r}")
 

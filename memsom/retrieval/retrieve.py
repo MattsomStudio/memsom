@@ -30,7 +30,6 @@ main(argv=None)
 
 import argparse
 import math
-import os
 import struct
 import sys
 import json
@@ -42,6 +41,7 @@ from memsom.storage import schema as memsom_schema
 from memsom.kernel import events as memsom_events
 from memsom.integrity import confid as memsom_confid
 from memsom.retrieval import llm as memsom_llm
+from memsom import tuning as memsom_tuning
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -132,11 +132,11 @@ def _alnum_words(text: str) -> list:
 # ---------------------------------------------------------------------------
 
 def _embed_model():
-    return os.environ.get("MEMDAG_EMBED_MODEL") or DEFAULT_EMBED_MODEL
+    return memsom_tuning.resolve("retrieval.embed_model") or DEFAULT_EMBED_MODEL
 
 
 def _embed_url():
-    return os.environ.get("MEMDAG_EMBED_URL") or DEFAULT_EMBED_URL
+    return memsom_tuning.resolve("retrieval.embed_url") or DEFAULT_EMBED_URL
 
 
 def _call_ollama_embed(text: str, timeout: int = 10):
@@ -911,7 +911,7 @@ def _cmd_reindex(args):
         conn.close()
     # VRAM hygiene: a batch reindex is the canonical place a 2.2GB bge model gets
     # loaded. Unload it after if asked, so it doesn't evict the daily driver.
-    if (os.environ.get("MEMDAG_BGE_UNLOAD") or "").strip().lower() in ("1", "true", "yes", "on"):
+    if (memsom_tuning.resolve("retrieval.bge_unload") or "").strip().lower() in ("1", "true", "yes", "on"):
         from memsom.retrieval import embed as memsom_embed
         memsom_embed.unload()
 

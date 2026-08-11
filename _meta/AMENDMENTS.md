@@ -118,3 +118,71 @@ MEASURED at this commit: `lint-imports --config .importlinter` -> `3 kept, 0 bro
 `scripts/gate_writeowner.py --check` both `OK`; `pytest tests/gates -q` -> `77 passed`;
 `_meta/tools/differential.py --check` -> identical to the oracle (0 changed, 0 new, 0 lost) --
 confirming all four are structural, not behaviour changes.
+
+---
+
+## A-16 -- Phase 8 ("the two APIs"): tuning.py's rank, five judgment calls
+
+**Date:** 2026-08-11
+**Affects:** phase-8, `memsom/tuning.py`, `memsom/interface/features.py`, `.importlinter`,
+`scripts/env_ratchet.py`
+**Supersedes:** nothing -- PLAN.md Sec2.2's code-comment placed `tuning.py` at "rank 1"; this
+resolves that against the Phase-0-committed `scripts/env_ratchet.py`, which already assumed a
+different path (`interface/tuning.py`) before Phase 8 existed to build the module.
+
+1. **`tuning.py` is a NEW layer, inserted directly above `kernel` and below `effects:storage`
+   (a 10th rank, not a literal "rank 1").** Neither of the two pre-existing candidates worked:
+   `interface/tuning.py` (rank 8, matching the Phase-0 script) cannot be imported by any of the ~40
+   call sites below rank 8 (upward import, forbidden); a literal rank-1 placement alongside
+   `effects`/`storage` would need `lifecycle/forget.py`'s canonical-file logic reachable from below
+   it, which is backwards (`forget.py` is rank 4). A dedicated layer just above `kernel` lets every
+   other rank import it downward, while `kernel` itself cannot reach it -- matching kernel's own
+   "stdlib only" rule, since `tuning.py` is a real registry (dataclasses, a lock, a dict), not a
+   kernel primitive. `.importlinter`'s `memsom-layers` contract was extended with this one new entry;
+   `scripts/env_ratchet.py`'s `_OWNER` was corrected from `interface/tuning.py` to `tuning.py` to
+   match.
+2. **Four exemptions from "no bare os.environ outside tuning.py", not oversights:** `MEMDAG_HOME` /
+   `MEMDAG_DB` (anywhere -- `storage/db.py`'s own resolution plus `interface/audit.py`'s setdefault
+   and `federation/broker.py --selfcheck`'s pin; tuning.py would need the data dir already resolved
+   to find a canonical.json override, which is circular), `kernel/paths.py`'s
+   `MEMDAG_BRIDGE_MEMORY_DIR` (kernel is rank 0, cannot import the new tuning layer upward -- the
+   knob is still registered in `tuning.py` for `tuning list` visibility, duplicated rather than
+   shared), `$PATH` anywhere (an OS executable-search variable, not a memsom knob), and
+   `childenv.py`'s whole-`os.environ` copy for child-process sanitization (a security boundary, not
+   a named-key lookup). `scripts/env_ratchet.py`'s docstring carries the same four, in full.
+   MEASURED: 48 bare `os.environ`/`getenv` sites at Phase 8's start, 40 genuine migrations, 8
+   exempted across these four categories; `python scripts/env_ratchet.py --check` -> 0.
+3. **The 13 `forget.py` params + `memory_budget` are NOT in the tuning registry.** PLAN.md Sec1.7
+   protects `forget.py`'s pure core + `DEFAULTS` (the golden parity test); Sec2.2 says the registry
+   "wraps `load_params`; it does not replace it," but `load_params` lives at rank 4 and the new
+   tuning layer sits below rank 1 -- it cannot call upward into it. Rather than duplicate
+   `load_params`'s file-read/precedence logic into `tuning.py` (drift risk against a protected,
+   tested function) or modify the protected function itself, this phase leaves the canonical block
+   entirely outside the registry: `memsom tuning list/get/set` cover only the ~40 migrated env-
+   sourced knobs. `tuning set` therefore refuses every key today (0 canonical-sourced knobs
+   registered) -- an honest, not silent, gap, left for a later phase or the panel's own schedule
+   (Matt's Q7) to close.
+4. **`doctor` is "rewired to the registry" via a merge at `cli.py`, not inside `doctor.py`.**
+   `lifecycle/doctor.py` (rank 4) cannot import `interface/features.py` (rank 8, the composition
+   root -- it needs to reach federation/bridge to answer "is the broker configured"). `doctor.py`
+   gained an optional `features=` parameter threaded through `gather()`/`_format()`; `cli.py` defines
+   `cmd_doctor_with_features()`, which resolves the registry and calls `memsom_doctor.gather(features=
+   ...)`, then overrides the `doctor` subparser's `func` after `memsom_doctor.register(sub)` runs
+   (`sub.choices["doctor"].set_defaults(...)`). `doctor.py` itself never imports `interface/`.
+5. **The exit gate's "kill the bge service -> `retrieval.bge` state degraded" control test does not
+   apply as literally written to this codebase's bge integration.** `retrieval/embed.py`'s bge-m3
+   path is an in-process `FlagEmbedding` model load (import + `.encode()`), not a reachable network
+   service with a health endpoint (unlike Ollama, which `doctor.py`'s `_ollama_status()` already
+   probes over HTTP). `interface/features.py`'s `_retrieval_bge()` therefore reports `disabled`
+   (backend not selected), `absent` (FlagEmbedding/torch/numpy not importable -- a cheap, cached
+   import-only probe, matching `embed.bge_available()`'s own contract), or `active`; there is no
+   cheap signal available for "selected, importable, but the last encode call actually failed" that
+   does not itself require the model load the vocabulary rule (Sec2.1) says `status()` must avoid.
+   Recorded here rather than faked with a bounded network probe against a service that, in this
+   codebase, does not exist.
+
+MEASURED at this commit: `python scripts/env_ratchet.py --check` -> 0; `lint-imports --config
+.importlinter` -> `3 kept, 0 broken`; `python scripts/mutual_pairs.py` -> `TOTAL PAIRS 0`; `python
+scripts/upward_imports.py --check` -> `0 (baseline 0)`; `pytest tests/gates -q` -> `77 passed`;
+`_meta/tools/differential.py --check` -> identical to the oracle; full suite cold x2 -> `1113 tests
+... OK (expected failures=2)`, reproducible.

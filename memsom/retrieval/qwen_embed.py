@@ -23,10 +23,10 @@ qwen_available() returns False and encode_* return None-filled lists, so the cod
 index falls back to BM25-only and never crashes.
 """
 import json
-import os
 import time
 
 from memsom.effects import net as memsom_net
+from memsom import tuning as memsom_tuning
 
 # The model tag stored in code_embeddings.model — read back with WHERE model=? so a
 # future re-embed with a different model can coexist (the dim-collision discipline).
@@ -56,7 +56,7 @@ _PROBE_TTL = 30.0
 
 
 def _url():
-    return os.environ.get("MEMSOM_QWEN_URL") or DEFAULT_URL
+    return memsom_tuning.resolve("code_rag.qwen_url") or DEFAULT_URL
 
 
 def _health_url():

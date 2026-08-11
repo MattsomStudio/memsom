@@ -77,6 +77,8 @@ from memsom.interface import audit as memsom_audit
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.lifecycle import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
+from memsom import tuning as memsom_tuning
+from memsom.interface import features as memsom_features
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +148,31 @@ def migrate_all(conn):
     # Owns operations that must run exactly once in order (e.g. the destructive
     # status-CHECK table rebuild) and is gated by PRAGMA user_version.
     memsom_schema.run_versioned_migrations(conn)
+    # Features (Phase 8, Sec2.1): record any state TRANSITION since the last
+    # migrate_all -- this is the number that catches a multi-day silent degrade.
+    memsom_features.migrate(conn)
+    memsom_features.record_transitions(conn, memsom_features.all_statuses(conn))
+
+
+def cmd_doctor_with_features(args):
+    """doctor, rewired to the registry (PLAN.md Sec2.1/Sec6 Phase 8): doctor.py
+    itself stays lifecycle-rank (it cannot import interface.features upward),
+    so the merge happens here, at the one rank both sides are reachable from."""
+    import json
+    conn = None
+    try:
+        conn = memsom.get_connection(read_only=True)
+    except Exception:
+        conn = None
+    try:
+        report = memsom_doctor.gather(features=memsom_features.all_statuses(conn))
+    finally:
+        if conn is not None:
+            conn.close()
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2))
+    else:
+        print(memsom_doctor._format(report))
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +242,7 @@ def cmd_ask(args):
         # single-shot: a per-invocation CLI reloads ~2.2GB cold (10-30s) — bge is
         # meant for batch `reindex` + the long-lived MCP/server, not one-offs.
         if getattr(args, "embed_backend", None):
-            os.environ["MEMDAG_EMBED_BACKEND"] = args.embed_backend
+            memsom_tuning.override("embed.backend", args.embed_backend)
             uses_retrieval = getattr(args, "retrieve", False) or getattr(args, "graph", False)
             if (args.embed_backend == "bge-m3" and uses_retrieval
                     and memsom_embed.bge_available()):
@@ -902,8 +929,11 @@ def main(argv=None):
     memsom_reflex.register(sub)
     memsom_chats.register(sub)
     memsom_doctor.register(sub)
+    sub.choices["doctor"].set_defaults(func=cmd_doctor_with_features)
     memsom_config.register(sub)
     memsom_obsidian.register(sub)
+    memsom_features.register(sub)
+    memsom_tuning.register(sub)
     memsom_session.register(sub)
     memsom_capgate.register(sub)
     memsom_broker.register(sub)

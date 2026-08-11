@@ -41,7 +41,6 @@ carries session_id, tool_name, tool_output.
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -49,6 +48,7 @@ import memsom
 from memsom.integrity import capgate as memsom_capgate
 from memsom.kernel import policy as memsom_policy
 from memsom.storage import session as memsom_session
+from memsom import tuning as memsom_tuning
 
 # Built-in default: ALLOW unlisted tools; gate the known consequential ones;
 # taint on the untrusted-ingress tools.  Used when no override file is present.
@@ -67,7 +67,7 @@ DEFAULT_HOOK_POLICY = {
 
 
 def hook_policy_path():
-    env = os.environ.get("MEMDAG_HOOK_POLICY")
+    env = memsom_tuning.resolve("bridge.hook_policy_path")
     if env:
         return Path(env).expanduser()
     p = Path.home() / ".memdag" / "hook_policy.json"

@@ -32,7 +32,6 @@ sys.exit; only main()/_cmd_* do I/O.  Frozen core untouched.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -41,6 +40,7 @@ import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.lifecycle import stale as memsom_stale
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom import tuning as memsom_tuning
 
 # --- config -------------------------------------------------------------------
 
@@ -71,7 +71,7 @@ DUE_RE = re.compile(
 # --- pure helpers -------------------------------------------------------------
 
 def _threshold_days() -> int:
-    raw = (os.environ.get(ENV_DAYS) or "").strip()
+    raw = (memsom_tuning.resolve("lifecycle.verify_stale_days") or "").strip()
     if not raw:
         return DEFAULT_THRESHOLD_DAYS
     try:

@@ -27,7 +27,6 @@ main(argv=None)        — thin wrapper for tests
 """
 
 import argparse
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +35,7 @@ import memsom
 from memsom.kernel import events as memsom_events
 from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def _resolve_memory_dir(memory_dir):
 def _resolve_vault(vault):
     if vault is not None:
         return vault
-    return os.environ.get("MEMDAG_OBSIDIAN_VAULT")
+    return memsom_tuning.resolve("obsidian.vault")
 
 
 def _purge_backing_files(conn, ids, memory_dir=None, vault=None):

@@ -8,7 +8,6 @@ reachability probe. Never raises on a dead Ollama or a fresh/locked DB.
 """
 
 import json
-import os
 import platform
 import sys
 from pathlib import Path
@@ -17,6 +16,7 @@ from urllib.parse import urlsplit
 import memsom
 from memsom.effects import net as memsom_net
 from memsom.effects import proc as memsom_proc
+from memsom import tuning as memsom_tuning
 
 
 def _version():
@@ -46,10 +46,10 @@ def _node_count():
 
 
 def _ollama_status():
-    embed_url = os.environ.get("MEMDAG_EMBED_URL") or "http://127.0.0.1:11434/api/embeddings"
+    embed_url = memsom_tuning.resolve("retrieval.embed_url") or "http://127.0.0.1:11434/api/embeddings"
     parts = urlsplit(embed_url)
     root = f"{parts.scheme}://{parts.netloc}"
-    model = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"
+    model = memsom_tuning.resolve("retrieval.embed_model") or "nomic-embed-text"
     try:
         body = memsom_net.fetch(root + "/api/tags", timeout=3)
         data = json.loads(body)
@@ -72,7 +72,7 @@ def _selfcheck():
         return {"returncode": None, "output": f"selfcheck failed to run: {exc}"}
 
 
-def gather():
+def gather(features=None):
     return {
         "memsom_version": _version(),
         "os": platform.platform(),
@@ -83,6 +83,7 @@ def gather():
         "node_count": _node_count(),
         "ollama": _ollama_status(),
         "selfcheck": _selfcheck(),
+        "features": features,
     }
 
 
@@ -107,6 +108,11 @@ def _format(report):
         f"selfcheck (rc={report['selfcheck']['returncode']}):",
         report["selfcheck"]["output"] or "(no output)",
     ]
+    if report.get("features") is not None:
+        lines += ["", "features:"]
+        for name in sorted(report["features"]):
+            st = report["features"][name]
+            lines.append(f"  {name:<20} {st['state']:<9} {st['detail']}")
     return "\n".join(lines)
 
 

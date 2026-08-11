@@ -69,6 +69,7 @@ from memsom.storage import schema as memsom_schema
 from memsom.integrity import ingest as memsom_ingest
 from memsom.retrieval import relate as memsom_relate
 from memsom.retrieval import retrieve as memsom_retrieve
+from memsom import tuning as memsom_tuning
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -809,7 +810,7 @@ def watch_vault(conn_factory, vault, default_channel="user", interval=1.0,
 
 
 def _default_vault(arg):
-    v = arg or os.environ.get(VAULT_ENV)
+    v = arg or memsom_tuning.resolve("obsidian.vault")
     if not v:
         raise SystemExit(
             f"no vault given (pass a path or set {VAULT_ENV})"

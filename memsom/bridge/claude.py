@@ -21,9 +21,10 @@ Target is ``~/.claude/CLAUDE.md``; override with ``$CLAUDE_MD_PATH``.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
+
+from memsom import tuning as memsom_tuning
 
 START = "<!-- memsom:managed:start -->"
 END = "<!-- memsom:managed:end -->"
@@ -164,7 +165,7 @@ def upsert(text: str, block: str):
 # --- IO ----------------------------------------------------------------------
 
 def default_path() -> Path:
-    env = os.environ.get("CLAUDE_MD_PATH")
+    env = memsom_tuning.resolve("bridge.claude_md_path")
     if env:
         return Path(env).expanduser()
     return Path.home() / ".claude" / "CLAUDE.md"

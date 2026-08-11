@@ -50,6 +50,7 @@ import memsom
 from memsom.kernel import chunking as memsom_chunking
 from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -86,7 +87,7 @@ def authoritative_label(channel: str) -> int:
 
 def channel_ceiling():
     """Return the configured max channel RANK (int 0-3) or None if unset/permissive."""
-    raw = os.environ.get(CHANNEL_CEILING_ENV)
+    raw = memsom_tuning.resolve("integrity.channel_ceiling")
     if raw is None or not raw.strip():
         return None
     from memsom.kernel.lattice import parse_rank

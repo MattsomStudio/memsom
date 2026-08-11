@@ -56,7 +56,6 @@ register(subparsers) / main(argv)               CLI: contradictions-list
 """
 
 import argparse
-import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -64,6 +63,7 @@ from datetime import datetime, timezone
 import memsom
 from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 REASON_PREFIX = "contradicted by"
 _TRUTHY = ("1", "true", "yes", "on")
@@ -81,13 +81,13 @@ _NLI_WARNED = False
 
 
 def _nli_model_name():
-    return os.environ.get("MEMDAG_CONTRADICT_NLI_MODEL") or DEFAULT_NLI_MODEL
+    return memsom_tuning.resolve("contradict.nli_model") or DEFAULT_NLI_MODEL
 
 
 def _nli_threshold():
     """Contradiction-probability cutoff. High by default (precision > recall)."""
     try:
-        return float(os.environ.get("MEMDAG_CONTRADICT_NLI_THRESHOLD", "0.85"))
+        return float(memsom_tuning.resolve("contradict.nli_threshold"))
     except ValueError:
         return 0.85
 
@@ -157,7 +157,7 @@ def _default_nli():
     scorer iff the semantic tier is opted in ($MEMDAG_CONTRADICT_NLI) AND loadable;
     otherwise None (structured-only). Kept separate from $MEMDAG_CONTRADICT so a
     user can run the cheap structured tier without the model."""
-    if str(os.environ.get("MEMDAG_CONTRADICT_NLI", "")).strip().lower() not in _TRUTHY:
+    if str(memsom_tuning.resolve("contradict.nli_enabled")).strip().lower() not in _TRUTHY:
         return None
     if not nli_available():
         return None
@@ -212,7 +212,7 @@ def _anchor():
     the backup brain 0.80 gives 0 false positives with recall intact. Lower it to
     catch differently-phrased contradictions at the cost of precision."""
     try:
-        return float(os.environ.get("MEMDAG_CONTRADICT_ANCHOR", "0.80"))
+        return float(memsom_tuning.resolve("contradict.anchor"))
     except ValueError:
         return 0.80
 
@@ -349,7 +349,7 @@ def migrate(conn):
 
 def enabled():
     """True iff $MEMDAG_CONTRADICT opts the detector in."""
-    return str(os.environ.get("MEMDAG_CONTRADICT", "")).strip().lower() in _TRUTHY
+    return str(memsom_tuning.resolve("contradict.enabled")).strip().lower() in _TRUTHY
 
 
 def _enforce_default():
@@ -357,7 +357,7 @@ def _enforce_default():
     OBSERVE-ONLY unless $MEMDAG_CONTRADICT_ENFORCE opts in -- so a precision
     regression records to the table without ever staling the brain. Enforcement is
     a deliberate choice, not a default."""
-    return str(os.environ.get("MEMDAG_CONTRADICT_ENFORCE", "")).strip().lower() in _TRUTHY
+    return str(memsom_tuning.resolve("contradict.enforce")).strip().lower() in _TRUTHY
 
 
 def _now():

@@ -27,7 +27,6 @@ register(subparsers) mounts this into a unified CLI.
 """
 
 import json
-import os
 import re
 import shutil
 import sys
@@ -39,6 +38,7 @@ from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
 from memsom.integrity import confid as memsom_confid
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 # ---------------------------------------------------------------------------
 # Migration
@@ -178,7 +178,7 @@ def distill_plan(model=None, out_dir=None):
     NOTE: ollama is DETECTED (shutil.which) but NEVER executed.  The fine-tune
     itself is the one manual GPU step that memsom deliberately does not automate.
     """
-    model = model or os.environ.get("MEMDAG_LLM_MODEL") or "qwen3-abliterated:30b-a3b"
+    model = model or memsom_tuning.resolve("llm.model") or "qwen3-abliterated:30b-a3b"
     # DISTILL-1: `model` is interpolated raw into the generated distill.ps1 (FROM
     # line + Modelfile here-string). Constrain it to the Ollama model-name charset
     # so a crafted --model / env value can't inject PowerShell into the emitted

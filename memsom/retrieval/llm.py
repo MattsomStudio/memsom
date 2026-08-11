@@ -11,12 +11,12 @@ No DB opened at import time.
 """
 
 import json
-import os
 import re
 
 import memsom
 from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
+from memsom import tuning as memsom_tuning
 
 # 127.0.0.1, not localhost — see memsom_retrieve.DEFAULT_EMBED_URL: avoids the
 # Windows ::1-then-127.0.0.1 dual-stack stall when Ollama is down. Override with
@@ -62,8 +62,8 @@ def resolve(model=None, base_url=None):
 
     Returns (model, base_url) as a 2-tuple of strings.
     """
-    m = model or os.environ.get("MEMDAG_LLM_MODEL") or DEFAULT_MODEL
-    url = base_url or os.environ.get("MEMDAG_LLM_URL") or DEFAULT_URL
+    m = model or memsom_tuning.resolve("llm.model") or DEFAULT_MODEL
+    url = base_url or memsom_tuning.resolve("llm.url") or DEFAULT_URL
     return m, url
 
 
@@ -78,7 +78,7 @@ def keep_alive():
     number 0 tells Ollama to unload immediately after the call); anything else
     (e.g. "10m", "1h") is passed through verbatim as an Ollama duration string.
     """
-    raw = os.environ.get("MEMDAG_OLLAMA_KEEP_ALIVE")
+    raw = memsom_tuning.resolve("llm.ollama_keep_alive")
     if raw is None or not raw.strip():
         return None
     raw = raw.strip()
@@ -116,7 +116,7 @@ def _cite_overlap_floor():
     from a DIFFERENT source — which shares few or no content stems with the cited
     node — falls below the floor and is rejected fail-closed.
     """
-    raw = os.environ.get("MEMDAG_LLM_CITE_OVERLAP")
+    raw = memsom_tuning.resolve("llm.cite_overlap")
     if raw is None or not raw.strip():
         return DEFAULT_CITE_OVERLAP
     try:

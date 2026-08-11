@@ -29,6 +29,7 @@ from pathlib import Path
 
 from memsom.effects import proc as memsom_proc
 from memsom.lifecycle import forget
+from memsom import tuning as memsom_tuning
 
 # Detached + no console window: survives the parent, never flashes a terminal.
 _DETACHED = 0
@@ -233,7 +234,7 @@ def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-sonnet-5
             proc = memsom_proc.popen(
                 argv, stdout=logfh, stderr=memsom_proc.STDOUT,
                 stdin=memsom_proc.DEVNULL, creationflags=_DETACHED,
-                cwd=resume_cwd or os.environ.get("USERPROFILE") or None,
+                cwd=resume_cwd or memsom_tuning.resolve("saveall.userprofile_fallback") or None,
                 close_fds=True,
                 keep=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
                 # POSIX: new session (setsid) so the save survives a SessionEnd

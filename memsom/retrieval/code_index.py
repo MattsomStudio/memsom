@@ -43,6 +43,7 @@ import memsom
 from memsom.effects import proc as memsom_proc
 from memsom.storage import schema as memsom_schema
 from memsom.retrieval import qwen_embed
+from memsom import tuning as memsom_tuning
 # Reuse retrieve.py's stdlib helpers — table-agnostic, so no duplication.
 from memsom.retrieval.retrieve import (
     tokenize, _rrf_fuse, _cosine, _vec_to_blob, _blob_to_vec, K1, B,
@@ -114,7 +115,7 @@ def _enabled() -> bool:
     flags = _read_flags()
     if "enabled" in flags:
         return bool(flags["enabled"])
-    return (os.environ.get("MEMSOM_CODE_RAG") or "").strip().lower() in (
+    return (memsom_tuning.resolve("code_rag.enabled") or "").strip().lower() in (
         "1", "true", "yes", "on")
 
 

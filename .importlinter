@@ -44,6 +44,15 @@ include_external_packages = True
 # integrity reaching effects directly (an effects boundary with a back door
 # is not a boundary) -- a `layers` contract already refuses ANY skip, so this
 # is enforced for free, not by a separate rule.
+#
+# memsom.tuning (Phase 8, PLAN.md Sec2.2, new in this phase) sits directly
+# above kernel: low enough that integrity/retrieval/lifecycle/distill/
+# federation/bridge/interface can all import it downward to centralize their
+# env reads, but not IN kernel -- kernel is stdlib-only and tuning is a real
+# registry (dataclasses, a lock, a dict). Two env reads stay outside tuning
+# regardless (storage/db.py's MEMDAG_HOME/MEMDAG_DB bootstrap, kernel/paths.py's
+# MEMDAG_BRIDGE_MEMORY_DIR) -- see memsom/tuning.py's module docstring and
+# scripts/env_ratchet.py's exemption list for why.
 # ---------------------------------------------------------------------------
 [importlinter:contract:memsom-layers]
 name = memsom internal layering
@@ -57,6 +66,7 @@ layers =
     memsom.retrieval
     memsom.integrity
     memsom.effects : memsom.storage
+    memsom.tuning
     memsom.kernel
 
 # ---------------------------------------------------------------------------

@@ -24,7 +24,6 @@ main(argv=None)
 
 import argparse
 import json
-import os
 import platform
 import sys
 
@@ -34,6 +33,7 @@ from memsom.integrity import redact as memsom_redact
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import confid as memsom_confid
 from memsom.integrity import recompute as memsom_recompute
+from memsom import tuning as memsom_tuning
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ def migrate(conn):
 
 def default_origin():
     """Return the default origin for this machine."""
-    return os.environ.get("MEMDAG_ORIGIN") or platform.node() or "unknown"
+    return memsom_tuning.resolve("federation.origin") or platform.node() or "unknown"
 
 
 # ---------------------------------------------------------------------------
