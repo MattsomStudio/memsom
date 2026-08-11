@@ -362,7 +362,12 @@ def surprise_gated_write(conn, question, threshold=0.35, sources=None,
     if began:
         conn.execute("BEGIN IMMEDIATE")
     placeholders = ",".join("?" * len(used))
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # MS-02 hardening: this re-validation omitted clearance entirely, so the
+    # primitive's now-closed default (PUBLIC) would wrongly refuse a cited
+    # parent above PUBLIC even though it was legitimately selected under the
+    # caller's own *clearance* above -- use that same value here, not the default.
+    clauses, params = memsom_schema.taint_filter_clauses(
+        conn, clearance=memsom_confid.parse_conf(clearance))
     live = {
         r[0] for r in conn.execute(
             f"SELECT id FROM nodes WHERE id IN ({placeholders}) AND "

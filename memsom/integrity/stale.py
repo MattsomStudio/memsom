@@ -60,6 +60,8 @@ import sys
 import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.retrieval import rederive as memsom_rederive
+from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import confid as memsom_confid
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +413,17 @@ def freshen(conn, node_id):
     if new_id is None:
         # Rewired to fresh parents but content is byte-identical -> the node is
         # current now; clear its stale flag in place.
+        # MS-03: re-floor BOTH axes before un-staling — mirrors what
+        # regenerate() itself does on its success path (rederive.py:
+        # memsom.derive_node's min(parents) + memsom_confid.recompute_conf).
+        # Without this, check_action — documented as THE only enforcement
+        # point — kept reading the STALE stored label after an un-stale that
+        # rewired onto a lower-integrity parent, and allowed. `regenerate`
+        # returns None on five paths; the DOMINANT one is no recipe, which is
+        # what the frozen-core `ask` and every federation import produce.
+        memsom_confid.migrate(conn)  # conf_label may not exist yet on this DB
+        memsom_recompute.recompute_node(conn, node_id)
+        memsom_confid.recompute_conf(conn, node_id)
         unstale(conn, node_id)
     with conn:
         _log(conn, "freshen-regen", node_id=node_id, related_id=new_id,

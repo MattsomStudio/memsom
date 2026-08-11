@@ -1,13 +1,10 @@
 """GATE for MS-01 -- confidentiality must gate the training export.
 
 CONTROL-TESTED: every test in this file was run WITHOUT its xfail marker
-against memsom @ 9d165b1 and FAILED. Reproduce with:
+against memsom @ 9d165b1 and FAILED, proving each was a real gap. Phase 1
+landed the fix: all three now XPASS(strict), markers removed in that commit,
+`test_control_the_gate_is_not_vacuous` stays green throughout.
 
-    pytest gates/test_gate_conf_training_export.py --runxfail -q
-
-Each is `xfail(strict=True)`, so the day the fix lands pytest reports XPASS ->
-FAILED, which is the signal to delete the marker. A gate that has never gone
-red is a hypothesis; these went red.
 
 WHAT A FIX LOOKS LIKE
 ---------------------
@@ -48,8 +45,6 @@ def _topsecret_answer(conn):
     return src, nid
 
 
-@pytest.mark.xfail(strict=True, reason="MS-01: export_training has no conf_label "
-                                       "criterion (distill.py:167)")
 def test_topsecret_content_is_not_in_the_training_export(conn):
     _topsecret_answer(conn)
     records = memsom_distill.export_training(conn, min_integrity=1)
@@ -58,8 +53,6 @@ def test_topsecret_content_is_not_in_the_training_export(conn):
         "the one sink in memsom that tombstone/redact/cascade cannot reach")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-01: reflex._tainted_node_ids omits "
-                                       "conf_label and archived (reflex.py:284)")
 def test_reflex_backstop_treats_a_topsecret_node_as_tainted(conn):
     _src, nid = _topsecret_answer(conn)
     assert nid in memsom_reflex._tainted_node_ids(conn), (
@@ -67,8 +60,6 @@ def test_reflex_backstop_treats_a_topsecret_node_as_tainted(conn):
         "selection gate -- does not consider confidentiality at all")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-02: taint_filter_clauses(clearance=None) "
-                                       "emits no conf_label clause (schema.py:457)")
 def test_taint_primitive_defaults_closed_on_confidentiality(conn):
     clauses, params = memsom_schema.taint_filter_clauses(conn)
     assert any("conf_label" in c for c in clauses), (
@@ -78,11 +69,23 @@ def test_taint_primitive_defaults_closed_on_confidentiality(conn):
         "-- rely on that default")
 
 
+def _public_answer(conn):
+    """Same shape as _topsecret_answer but stays at the DEFAULT conf_label (0,
+    PUBLIC) -- isolates the REVOKE dimension from the (now-enforced)
+    confidentiality dimension so this control keeps testing what it always
+    tested."""
+    src = memsom.insert_node(conn, SECRET, "user", source_ref="vault:ca-key")
+    nid, _ = memsom.derive_node(
+        conn, f"Q: passphrase\nA (composed from 1 live sources):\n- {SECRET} "
+              f"[mem:{src}|user]", [src])
+    return src, nid
+
+
 def test_control_the_gate_is_not_vacuous(conn):
     """GREEN today and must stay green: the export DOES discriminate on the
-    dimensions it actually implements. Proves these xfails are measuring a
-    missing criterion, not a broken export."""
-    src, _nid = _topsecret_answer(conn)
+    dimensions it actually implements -- specifically tombstone, isolated
+    from the confidentiality dimension MS-01/MS-02 added above."""
+    src, _nid = _public_answer(conn)
     assert memsom_distill.export_training(conn, min_integrity=1), "precondition"
     memsom.revoke_cascade(conn, src, "control")
     conn.commit()

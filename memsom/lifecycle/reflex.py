@@ -128,7 +128,11 @@ def eligible_consolidated(conn, min_integrity=1):
     # omitted archived=0 (distill had it, reflex didn't), so a summary chained
     # off archived/quarantine-contaminated material could export into training
     # weights. taint_filter_clauses owns every taint dimension in one place.
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # MS-01: this feeds a training export, the same irreversible sink
+    # export_training guards — pass the strictest clearance (PUBLIC) explicitly
+    # rather than relying on the primitive's default, so the intent survives
+    # even if that default is ever loosened.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=0)
     rows = conn.execute(
         "SELECT id, content, label FROM nodes"
         " WHERE channel='agent-derived'"
@@ -288,6 +292,10 @@ def _tainted_node_ids(conn):
             "SELECT id FROM nodes"
             " WHERE channel = 'external' OR status = 'quarantined'"
             "    OR tombstoned = 1 OR redacted = 1"
+            # MS-01: the backstop omitted BOTH confidentiality and archived —
+            # neither a selection-gate escape above clearance nor a
+            # consolidated-away node was ever caught here.
+            "    OR conf_label > 0 OR archived = 1"
         )
     }
 

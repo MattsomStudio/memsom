@@ -74,7 +74,6 @@ def _setup(conn):
     return trusted, untrusted, derived
 
 
-@pytest.mark.xfail(strict=True, reason="MS-13: a no-op regenerate skips the re-floor, leaving the stored label stale")
 def test_freshen_without_recipe_refloors_integrity(conn):
     """Biba low-water-mark: stored label must equal min(live parent labels).
 
@@ -94,7 +93,6 @@ def test_freshen_without_recipe_refloors_integrity(conn):
         f"freshen laundered external content to endorsed")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-13: check_action reads the stale stored label (gate.py:137)")
 def test_check_action_denies_after_freshen(conn):
     """gate.check_action is "THE ONLY place the floor is enforced" (gate.py).
 

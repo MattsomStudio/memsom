@@ -177,15 +177,23 @@ def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
     if row is None:
         raise ValueError(f"unknown node id: {nid}")
 
-    if cascade:
-        targets_raw = memsom.cascade_set(conn, nid)
-        target_ids = [r[0] for r in targets_raw]
-    else:
-        target_ids = [nid]
-
     redacted_ids = []
     ts = _now_iso()
+    # MS-06: BEGIN IMMEDIATE BEFORE reading cascade_set — the target set and the
+    # writes are now ONE atomic unit, the same protection derive_node already
+    # has against the revoke cascade (memsom/__init__.py). Previously cascade_set
+    # ran unlocked, then a DEFERRED transaction opened only for the UPDATE loop —
+    # MEASURED escape rate 29/40 uninstrumented trials: a derive_node landing in
+    # that gap could cite the still-live victim and its child would never be in
+    # the already-computed target set.
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        if cascade:
+            targets_raw = memsom.cascade_set(conn, nid)
+            target_ids = [r[0] for r in targets_raw]
+        else:
+            target_ids = [nid]
         for tid in target_ids:
             r_reason = reason if tid == nid else f"cascade from node {nid}"
             conn.execute(
@@ -226,6 +234,18 @@ def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
                         'INSERT OR IGNORE INTO redaction_log(uuid, redacted_at) VALUES (?,?)',
                         (u[0], ts)
                     )
+
+    # MS-28: VACUUM once payload destruction has committed, so the freed
+    # overflow pages holding the pre-redaction bytes are reclaimed immediately
+    # rather than waiting on secure_delete to zero them on some LATER,
+    # unrelated write. VACUUM needs no pending transaction (we are back in
+    # autocommit here) and takes its own lock; best-effort — a concurrent
+    # holder blocking it must never fail the redaction that already committed.
+    if redacted_ids:
+        try:
+            conn.execute("VACUUM")
+        except Exception:  # noqa: BLE001
+            pass
 
     return sorted(redacted_ids)
 

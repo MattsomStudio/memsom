@@ -36,6 +36,7 @@ from pathlib import Path
 import memsom
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
+from memsom.integrity import confid as memsom_confid
 from memsom.storage import schema as memsom_schema
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ def migrate(conn):
     """Ensure redact and quarantine columns are present. No new columns of its own."""
     memsom_redact.migrate(conn)
     memsom_quarantine.migrate(conn)
+    memsom_confid.migrate(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +166,13 @@ def export_training(conn, min_integrity=1):
     archived_clause = ""
     if memsom_schema.column_exists(conn, "nodes", "archived"):
         archived_clause = " AND archived=0"
+    # MS-01: training weights are an IRREVERSIBLE sink — no tombstone/redact/
+    # cascade can claw content back out once baked in. The confidentiality axis
+    # gets the strictest reading here, not the loosest: only PUBLIC (conf_label
+    # 0) content is ever exported, regardless of integrity floor.
+    conf_clause = ""
+    if memsom_schema.column_exists(conn, "nodes", "conf_label"):
+        conf_clause = " AND conf_label <= 0"
     rows = conn.execute(
         "SELECT id, content FROM nodes"
         " WHERE channel='agent-derived'"
@@ -171,6 +180,7 @@ def export_training(conn, min_integrity=1):
         "   AND redacted=0"
         "   AND status != 'quarantined'"
         + archived_clause +
+        conf_clause +
         "   AND label >= ?"
         " ORDER BY id",
         (floor,)

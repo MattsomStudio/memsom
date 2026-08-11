@@ -95,13 +95,15 @@ def migrate(conn):
     added_by TEXT,
     added_at TEXT
   );""")
-    # Auto-trust this machine so local round-trips always work.
-    with conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO trusted_origins(origin,descr,added_by,added_at)"
-            " VALUES (?,?,?,?)",
-            (default_origin(), "self (auto-registered)", "system", memsom.now_iso())
-        )
+    # MS-14: self-origin auto-trust deliberately REMOVED. migrate() runs at the
+    # top of every import_changeset() call, so an unconditional self-INSERT
+    # here meant an operator's explicit
+    # `DELETE FROM trusted_origins WHERE origin=default_origin()` was undone by
+    # the very next import — there was no configuration in which federation was
+    # default-deny for a changeset claiming to BE this machine (default_origin()
+    # reads $MEMDAG_ORIGIN, which a caller controls). import_changeset refuses
+    # any changeset whose header origin equals default_origin() outright, so
+    # this machine never needs to trust itself as a federation peer.
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +426,12 @@ def import_changeset(conn, changeset):
     # --- Trust determination ---
     header_origin = changeset.get("origin")
     trusted = is_trusted(conn, header_origin)
+    # MS-14: a changeset literally claiming to BE this machine is never
+    # legitimate federation traffic (you do not import your own export back
+    # into yourself over the wire) — refuse it outright regardless of the
+    # allowlist, so trust in "self" can never be forged via $MEMDAG_ORIGIN.
+    if header_origin is not None and header_origin == default_origin():
+        trusted = False
 
     # FED-1: track UUIDs ACTUALLY INSERTED as new nodes this import (populated in
     # Pass 1), NOT the UUIDs merely *claimed* in the attacker-supplied nodes array.
@@ -582,8 +590,13 @@ def import_changeset(conn, changeset):
                 # tombstone/redact/quarantine what it owns.
                 # header_origin is the CHANGESET header (not the node-dict field —
                 # that is attacker-controlled and is NOT used for authz).
+                # MS-11: a bare origin-name compare never consulted `trusted`, so
+                # de-listing an origin was not a revocation — it kept destroy/
+                # redact/quarantine power over every node still stamped with its
+                # name. Trust is a PRECONDITION, not implied by the name matching.
                 owned = (
-                    header_origin is not None
+                    trusted
+                    and header_origin is not None
                     and header_origin == local_origin
                 )
 

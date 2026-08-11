@@ -95,6 +95,12 @@ def get_connection(path=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")  # per-connection, OFF by default
+    # MS-28: without secure_delete, `UPDATE nodes SET content=''` (redact) leaves
+    # the original overflow pages on the freelist with their bytes intact —
+    # recoverable from the raw .db file. secure_delete makes SQLite overwrite
+    # freed content with zeros instead. Per-connection PRAGMA, so every opener
+    # of this store gets it, not just the redact path.
+    conn.execute("PRAGMA secure_delete = ON")
     # busy_timeout: a BEGIN IMMEDIATE (derive_node / revoke_cascade) that meets a
     # concurrent writer should WAIT for the lock, not fail-fast with SQLITE_BUSY.
     # A long revoke_cascade holds the write lock for the duration of its recursive
@@ -122,17 +128,38 @@ def insert_node(conn, content, channel, label=None, source_ref=None):
 def derive_node(conn, content, parent_ids):
     if not parent_ids:
         raise ValueError("derived node needs at least one parent")
+    # MS-05: widen the liveness check from tombstoned-only to the full taint
+    # set (redacted / quarantined / archived) — a redacted or quarantined
+    # parent could otherwise still be derived from (MS-06's delivery
+    # mechanism). Deferred import: the frozen core must not gain a load-time
+    # dependency on storage.schema; column_exists is a plain read, harmless
+    # before BEGIN IMMEDIATE below. Columns are optional — a bare frozen-core
+    # DB with none of the extension modules migrated has none of them, and
+    # there is nothing to exclude.
+    from memsom.storage import schema as memsom_schema
+    redacted_col = "redacted" if memsom_schema.column_exists(conn, "nodes", "redacted") else "0"
+    status_col = "status" if memsom_schema.column_exists(conn, "nodes", "status") else "'live'"
+    archived_col = "archived" if memsom_schema.column_exists(conn, "nodes", "archived") else "0"
     qmarks = ",".join("?" * len(parent_ids))
     with conn:  # liveness check + node + edges are ONE unit, write-locked up front:
         if not conn.in_transaction:  # a revoke can't land between check and insert (TOCTOU)
             conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(f"SELECT id, label, tombstoned FROM nodes WHERE id IN ({qmarks})",
-                            tuple(parent_ids)).fetchall()
+        rows = conn.execute(
+            f"SELECT id, label, tombstoned, {redacted_col}, {status_col}, {archived_col}"
+            f" FROM nodes WHERE id IN ({qmarks})",
+            tuple(parent_ids)).fetchall()
         if len(rows) != len(set(parent_ids)):
             raise ValueError("unknown parent id")
-        if any(t for _, _, t in rows):
-            raise ValueError("tombstoned parent")
-        label = min(l for _, l, _ in rows)
+        for _id, _label, tombstoned, redacted, status, archived in rows:
+            if tombstoned:
+                raise ValueError("tombstoned parent")
+            if redacted:
+                raise ValueError("redacted parent")
+            if status == "quarantined":
+                raise ValueError("quarantined parent")
+            if archived:
+                raise ValueError("archived parent")
+        label = min(r[1] for r in rows)
         nid = insert_node(conn, content, "agent-derived", label)
         conn.executemany("INSERT INTO edges(child, parent) VALUES (?,?)",
                          [(nid, p) for p in set(parent_ids)])

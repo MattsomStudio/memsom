@@ -221,15 +221,23 @@ def regenerate(conn, node_id):
 # ---------------------------------------------------------------------------
 
 def _version_chain(conn, node_id):
-    """Every node id in *node_id*'s version lineage via derivation_recipe.supersedes.
+    """Every node id in *node_id*'s version lineage.
 
     Walks BOTH directions transitively: predecessors (what this node superseded)
     and successors (what superseded this node). Superseded copies are SIBLINGS of
     their replacement (both derive from the same parents), not descendants — so
     redact_node's edge cascade can't reach them. This is the gap erase() closes.
+
+    MS-04: derivation_recipe.supersedes covers only DERIVED nodes (per its own
+    docstring). A re-ingested SOURCE has no recipe at all, so its prior version
+    was invisible to this walk — after redact + tombstone --hard, the stale
+    version was the only live node left for that source_ref, and ask
+    preferentially answered from it. source_supersedes (integrity/stale.py) is
+    the source-node twin of derivation_recipe.supersedes; walk it too.
     """
     seen = set()
     stack = [node_id]
+    has_source_supersedes = memsom_schema.table_exists(conn, "source_supersedes")
     while stack:
         n = stack.pop()
         if n in seen:
@@ -242,6 +250,14 @@ def _version_chain(conn, node_id):
         for r in conn.execute(
                 "SELECT node_id FROM derivation_recipe WHERE supersedes = ?", (n,)):
             stack.append(r[0])                   # successor that replaced it
+        if has_source_supersedes:
+            row2 = conn.execute(
+                "SELECT new_id FROM source_supersedes WHERE old_id = ?", (n,)).fetchone()
+            if row2 and row2[0] is not None:
+                stack.append(row2[0])             # source successor
+            for r in conn.execute(
+                    "SELECT old_id FROM source_supersedes WHERE new_id = ?", (n,)):
+                stack.append(r[0])                # source predecessor(s)
     return seen
 
 

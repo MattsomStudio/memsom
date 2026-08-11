@@ -24,6 +24,7 @@ RANK, NAME  (from memsom)
 
 import re
 import sqlite3
+import os
 
 import memsom
 
@@ -454,7 +455,41 @@ def taint_filter_clauses(conn: sqlite3.Connection, clearance=None,
         clauses.append("redacted = 0")
     if column_exists(conn, "nodes", "archived"):
         clauses.append("archived = 0")
-    if clearance is not None and column_exists(conn, "nodes", "conf_label"):
+    if column_exists(conn, "nodes", "conf_label"):
+        effective = 0 if clearance is None else clearance
+        ceiling = clearance_ceiling()
+        if ceiling is not None:
+            effective = min(effective, ceiling)
         clauses.append("conf_label <= ?")
-        params.append(clearance)
+        params.append(effective)
     return clauses, params
+
+
+CLEARANCE_CEILING_ENV = "MEMDAG_CLEARANCE_CEILING"
+_CONF_RANK = {"public": 0, "internal": 1, "secret": 2, "topsecret": 3}
+
+
+def clearance_ceiling():
+    """Return the configured max clearance (int 0-3) or None if unset/permissive.
+
+    MS-02: the confidentiality twin of memsom_ingest.CHANNEL_CEILING_ENV. Caps
+    the effective clearance taint_filter_clauses uses; unset (the default) is
+    permissive, matching channel_ceiling's directionality (it can only
+    tighten, never loosen).
+    """
+    raw = os.environ.get(CLEARANCE_CEILING_ENV)
+    if raw is None or not raw.strip():
+        return None
+    key = raw.strip().lower()
+    if key in _CONF_RANK:
+        return _CONF_RANK[key]
+    try:
+        v = int(key)
+    except ValueError:
+        raise ValueError(
+            f"invalid {CLEARANCE_CEILING_ENV}={raw!r}: expected a confidentiality "
+            f"name or 0-3"
+        ) from None
+    if v not in (0, 1, 2, 3):
+        raise ValueError(f"{CLEARANCE_CEILING_ENV} out of range 0-3: {v}")
+    return v

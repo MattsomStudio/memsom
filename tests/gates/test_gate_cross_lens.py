@@ -35,9 +35,6 @@ MARKER = "PASSPHRASE-9f3a2b"
 # FEDERATION
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="MS-14 (FED-2): `owned` at federation.py:585 "
-                                       "is a bare origin string compare and never "
-                                       "consults `trusted`")
 def test_delisted_origin_cannot_destroy_local_nodes(conn, monkeypatch):
     """Removing an origin from trusted_origins must be a REVOCATION. Today the
     de-listed origin keeps tombstone/redact/quarantine power over every node
@@ -46,7 +43,10 @@ def test_delisted_origin_cannot_destroy_local_nodes(conn, monkeypatch):
     memsom_fed.migrate(conn)
     nid = memsom.insert_node(conn, "a memory the stolen laptop owns", "user")
     conn.commit()
-    memsom_fed.migrate(conn)          # stamps uuid/origin
+    # migrate() does NOT backfill uuid/origin on existing rows -- only
+    # backfill_uuids() does (export_changeset calls it internally; a
+    # hand-built changeset like this one below has to call it explicitly).
+    memsom_fed.backfill_uuids(conn, "STOLEN-LAPTOP")
     conn.commit()
     uuid = conn.execute("SELECT uuid FROM nodes WHERE id=?", (nid,)).fetchone()[0]
     assert uuid, "precondition: node carries a uuid"
@@ -150,8 +150,6 @@ def test_redact_reaps_extracted_claims(conn):
         "claims.value and is printed by `memsom claims-list`")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-18 (RED-04): get_connection sets no "
-                                       "secure_delete and nothing VACUUMs")
 def test_connection_enables_secure_delete(conn):
     """Without `PRAGMA secure_delete`, `UPDATE nodes SET content=''` leaves the
     original overflow pages on the freelist with their bytes intact. The store

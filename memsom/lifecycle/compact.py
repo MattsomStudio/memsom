@@ -152,7 +152,11 @@ def _group_by_claim(conn: sqlite3.Connection) -> list:
     # Taint gate from the ONE shared primitive: the hand-rolled clause here
     # omitted redacted=0, so a redacted node's surviving claim_assertions rows
     # could drag it back in as a provenance parent of a fresh summary.
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # clearance=3 (topsecret) explicit: compaction restructures the operator's
+    # OWN store (not a reader-facing exposure) and must see every confidentiality
+    # tier to compact it -- conf_label propagates to the summary via the
+    # high-water stamp below regardless of what it was compacted from.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
     where = " AND ".join("n." + c for c in clauses)
     rows = conn.execute(
         "SELECT ca.claim_id, ca.node_id"
@@ -321,7 +325,10 @@ def compact(
     # of on-disk files owned by their importers — compact archiving one would
     # silently drop a pointer-stub memory from the digest while its source file
     # lives on. Column-guarded: either importer may never have run on this store.
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # clearance=3 (topsecret) explicit: same reasoning as _group_by_claim above
+    # -- compaction must see every confidentiality tier of the operator's own
+    # store to compact it.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
     clauses.append("channel != 'agent-derived'")
     if memsom_schema.column_exists(conn, "nodes", "bridge_path"):
         clauses.append("bridge_path IS NULL")

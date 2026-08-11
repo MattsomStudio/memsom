@@ -270,7 +270,10 @@ def _find_live_by_hash(conn: sqlite3.Connection, h: str, channel: str):
     defeating the channel->label invariant. A cross-channel match mints a fresh
     node with the caller's declared channel.
     """
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # clearance=3 (topsecret) explicit: this is an existence/dedup check, not a
+    # reader-facing exposure -- a topsecret-classified node's hash must still be
+    # found so re-ingesting identical content doesn't mint a duplicate.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
     row = conn.execute(
         "SELECT id FROM nodes WHERE content_hash = ? AND channel = ? AND "
         + " AND ".join(clauses) + " LIMIT 1",
@@ -309,7 +312,10 @@ def _find_live_predecessor(conn: sqlite3.Connection, source_ref: str, channel: s
     """
     if not source_ref:
         return None
-    clauses, params = memsom_schema.taint_filter_clauses(conn)
+    # clearance=3 (topsecret) explicit: same reasoning as _find_live_by_hash --
+    # a topsecret-classified predecessor must still be found so the supersede
+    # link and staleness cascade fire regardless of its confidentiality tier.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
     row = conn.execute(
         "SELECT id FROM nodes WHERE source_ref = ? AND channel = ?"
         " AND content_hash IS NOT NULL AND content_hash != ? AND "
