@@ -35,7 +35,7 @@ import sys
 
 import memsom
 from memsom.storage import schema as memsom_schema
-from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import recompute as memsom_recompute
 
 # ---------------------------------------------------------------------------
 # Migration

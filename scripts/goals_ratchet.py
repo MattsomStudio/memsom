@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""goals_ratchet — the goals file's violations may never grow while the
+r"""goals_ratchet -- the goals file's violations may never grow while the
 refactor is in flight.
 
 Brought home from `memsom-agentic-os/scripts/goals_ratchet.py` (Phase 0, A9).
@@ -10,7 +10,7 @@ another repo. This is the same ratchet, scoped to memsom alone: no
 
 THE ARGUMENT
 ------------
-`.importlinter-goals` is deliberately unwired from `.importlinter` — it is RED
+`.importlinter-goals` is deliberately unwired from `.importlinter` -- it is RED
 by design (see its own header) and blocking CI on it would make CI permanently
 red. But nothing then stops the violation count growing while the refactor is
 in flight; the goals file's own instruction ("watch the violation count
@@ -20,12 +20,12 @@ THE TWO WAYS THIS RATCHET GOES VACUOUS, both defended against here:
 
 1. Invoking `python -m importlinter.cli lint-imports` instead of the console
    script. MEASURED on this machine: the module form prints NOTHING and exits
-   0 — a permanently, silently green gate. This script calls the console
+   0 -- a permanently, silently green gate. This script calls the console
    script by name and hard-fails if it is not on PATH.
 2. Defaulting to "no increase" when the output is unparseable or the config is
    missing. A ratchet that cannot find its number must not pass.
 
-SCOPE is the set of violating EDGES, per contract — not a whole-file count.
+SCOPE is the set of violating EDGES, per contract -- not a whole-file count.
 An aggregate moves when you add a new aspiration to the goals file, which
 teaches you to re-baseline on sight; a per-contract edge set does not move
 just because a sibling contract gained one, and a new violation names the
@@ -33,8 +33,18 @@ edge in the failure message instead of just moving a number.
 
 BASELINE taken fresh from the tool at Phase 0, 2026-08-10, at this repo's
 `7862fa8` (before this phase's own commit): `lint-imports --config
-.importlinter-goals` — 26 edges under the layering contract, 4 under
+.importlinter-goals` -- 26 edges under the layering contract, 4 under
 acyclic-siblings. Re-derive with `python scripts/goals_ratchet.py --json`.
+
+RE-BASELINED at Phase 2, 2026-08-10: `retrieval/recompute.py` moved to
+`integrity/recompute.py` (its own docstring already called it "multi-hop
+INTEGRITY recompute" -- it was retrieval-layer only by location, not by
+domain). Removes corroborate/trust -> retrieval.recompute (2 edges, both
+already in the Phase-0 baseline, now intra-integrity) and absorbs the one
+edge Phase 1's MS-03 fix added (stale -> retrieval.recompute) without
+reopening that CRITICAL -- it never reaches this BASELINE at all, because
+by the time this commit lands stale.py imports integrity.recompute, a
+same-layer call. 26 -> 24.
 """
 
 from __future__ import annotations
@@ -63,7 +73,6 @@ BASELINE = {
         "memsom.integrity.contradict -> memsom.bridge.bridge_import",
         "memsom.integrity.contradict -> memsom.retrieval.embed",
         "memsom.integrity.contradict -> memsom.retrieval.retrieve",
-        "memsom.integrity.corroborate -> memsom.retrieval.recompute",
         "memsom.integrity.corroborate -> memsom.retrieval.rederive",
         "memsom.integrity.gate -> memsom.interface.blame",
         "memsom.integrity.redact -> memsom.bridge.bridge_import",
@@ -71,7 +80,6 @@ BASELINE = {
         "memsom.integrity.stale -> memsom.retrieval.rederive",
         "memsom.integrity.tombstone -> memsom.bridge.bridge_import",
         "memsom.integrity.tombstone -> memsom.retrieval.rederive",
-        "memsom.integrity.trust -> memsom.retrieval.recompute",
         "memsom.integrity.verify_stale -> memsom.bridge.bridge_import",
         "memsom.lifecycle.compact -> memsom.distill.llm",
         "memsom.lifecycle.reflex -> memsom.distill.distill",
@@ -88,7 +96,7 @@ BASELINE = {
 }
 
 _SUMMARY_RE = re.compile(r"Contracts: (\d+) kept, (\d+) broken\.")
-#: `\s+` rather than a single space — import-linter indents `forbidden`
+#: `\s+` rather than a single space -- import-linter indents `forbidden`
 #: contracts with three spaces and `layers`/`independence` ones with one.
 _CHAIN_RE = re.compile(r"^-\s+(\S+) -> (\S+)", re.M)
 _PAIR_RE = re.compile(r"^(\S+) is not allowed to import", re.M)
@@ -135,7 +143,7 @@ def measure() -> dict:
     if shutil.which("lint-imports") is None:
         raise SystemExit(
             "::error::`lint-imports` console script not found. Do NOT fall "
-            "back to `python -m importlinter.cli lint-imports` — MEASURED: it "
+            "back to `python -m importlinter.cli lint-imports` -- MEASURED: it "
             "prints nothing and exits 0, a permanently, silently green gate."
         )
     cfg = ROOT / CONFIG
@@ -209,7 +217,7 @@ def _compare(got: dict) -> bool:
         if added:
             _annotate("error",
                       f"{contract!r} grew {len(added)} edge(s): "
-                      f"{', '.join(added)}. Remove the import — do NOT add it "
+                      f"{', '.join(added)}. Remove the import -- do NOT add it "
                       "to BASELINE.")
             failed = True
         if removed:

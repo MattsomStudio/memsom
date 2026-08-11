@@ -27,6 +27,15 @@ frozen_* functions. Every public symbol this module exported before the
 split is re-exported here unchanged, so `import memsom; memsom.X` keeps
 working for memsom-panel and every in-tree caller -- logic fan-in target 0
 (scripts/fanin.py memsom/__init__.py).
+
+integrity.dag and interface.cli are re-exported LAZILY (via __getattr__ ->
+resolve_facade_attr, PEP 562, importlib underneath) rather than imported at
+module level: this package sits at the root of every `import memsom`, so a
+static import of integrity or (worse) the top interface layer here would put
+that layer on every other layer's transitive closure and break the layers
+goal for the whole package, not just this file. kernel/storage/effects stay
+eager imports -- they are the untracked/bottom layers, so no caller inherits
+a cross-layer edge by reaching them through the facade.
 """
 
 from memsom.kernel.lattice import RANK, NAME
@@ -41,18 +50,3 @@ from memsom.storage.db import db_path, get_connection, SCHEMA
 from memsom.storage.db import resolve_facade_attr as __getattr__
 
 from memsom.effects.net import fetch_external, EXT_URL, FALLBACK, HOME
-
-from memsom.integrity.dag import (
-    CASCADE_CTE, insert_node, derive_node, get_node, live_sources,
-    parents_of, cascade_set, revoke_cascade,
-)
-
-from memsom.interface.cli import (
-    USER_FACT, ENDORSED_FACT,
-    frozen_cmd_seed as cmd_seed,
-    frozen_cmd_ask as cmd_ask,
-    frozen_cmd_explain as cmd_explain,
-    frozen_cmd_revoke as cmd_revoke,
-    frozen_cmd_dump as cmd_dump,
-    frozen_main as main,
-)

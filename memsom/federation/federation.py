@@ -33,7 +33,7 @@ from memsom.storage import schema as memsom_schema
 from memsom.integrity import redact as memsom_redact
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import confid as memsom_confid
-from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import recompute as memsom_recompute
 
 
 # ---------------------------------------------------------------------------

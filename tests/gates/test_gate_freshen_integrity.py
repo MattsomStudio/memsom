@@ -116,7 +116,7 @@ def test_recompute_all_repairs_it(conn):
     rather than a permanent state. If this ever goes red the repair itself broke.
     """
     from memsom.integrity import gate as memsom_gate
-    from memsom.retrieval import recompute as memsom_recompute
+    from memsom.integrity import recompute as memsom_recompute
     _trusted, _untrusted, derived = _setup(conn)
 
     memsom_recompute.recompute_all(conn)

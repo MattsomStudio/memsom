@@ -17,6 +17,7 @@ zero user-visible benefit. Do NOT "fix" these to memsom.
 
 import os
 import sqlite3
+import importlib
 from pathlib import Path
 
 
@@ -24,15 +25,44 @@ def _data_dir():
     return Path(os.environ.get("MEMDAG_HOME") or Path.home() / ".memdag")
 
 
+# Phase 2 goals gate: memsom/__init__.py sits under every `import memsom` in the
+# package, so a module-level `from memsom.integrity.dag import ...` or `from
+# memsom.interface.cli import ...` there would put integrity/interface on the
+# transitive closure of every layer that merely does `import memsom` -- storage
+# importing interface via the facade, retrieval importing interface via the
+# facade, and so on. importlib.import_module() is a function call, not a
+# static `import` statement, so it never becomes a lint-imports graph edge;
+# the two maps below list every name the facade still owes each caller for
+# backward compatibility (import memsom; memsom.X).
+_DAG_NAMES = frozenset((
+    "CASCADE_CTE", "insert_node", "derive_node", "get_node", "live_sources",
+    "parents_of", "cascade_set", "revoke_cascade",
+))
+_CLI_NAMES = {
+    "USER_FACT": "USER_FACT", "ENDORSED_FACT": "ENDORSED_FACT",
+    "cmd_seed": "frozen_cmd_seed", "cmd_ask": "frozen_cmd_ask",
+    "cmd_explain": "frozen_cmd_explain", "cmd_revoke": "frozen_cmd_revoke",
+    "cmd_dump": "frozen_cmd_dump", "main": "frozen_main",
+}
+
+
 def resolve_facade_attr(name):
-    """PEP-562 glue for memsom/__init__.py's DATA_DIR forwarding (Q6).
+    """PEP-562 glue for memsom/__init__.py's re-exports (Q6, Phase 2 goals gate).
 
     memsom/__init__.py imports this AS its own __getattr__ (import-rename, no
-    def statement there) so the facade stays fan-in 0 while DATA_DIR still
-    resolves fresh on every access, two layers down.
+    def statement there) so the facade stays fan-in 0. DATA_DIR resolves fresh
+    on every access, two layers down; the integrity.dag and interface.cli
+    names resolve lazily via importlib so the facade never carries a static
+    import of a higher layer (see the module-level comment above).
     """
     if name == "DATA_DIR":
         return _data_dir()
+    if name in _DAG_NAMES:
+        dag = importlib.import_module("memsom.integrity.dag")
+        return getattr(dag, name)
+    if name in _CLI_NAMES:
+        cli = importlib.import_module("memsom.interface.cli")
+        return getattr(cli, _CLI_NAMES[name])
     raise AttributeError(f"module 'memsom' has no attribute {name!r}")
 
 

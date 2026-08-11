@@ -44,7 +44,7 @@ import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.retrieval import rederive as memsom_rederive
 from memsom.integrity import trust as memsom_trust
-from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import recompute as memsom_recompute
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -268,7 +268,7 @@ class TestParserSubcommands(Base):
 
         sub.add_parser("migrate").set_defaults(func=lambda a: None)
 
-        from memsom.retrieval import recompute as memsom_recompute
+        from memsom.integrity import recompute as memsom_recompute
         from memsom.integrity import redact as memsom_redact
         from memsom.integrity import quarantine as memsom_quarantine
         from memsom.integrity import confid as memsom_confid

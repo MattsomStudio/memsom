@@ -19,7 +19,7 @@ warnings.simplefilter("error", DeprecationWarning)
 import memsom
 from memsom.integrity import confid as memsom_confid
 from memsom.lifecycle import heal as memsom_heal
-from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import recompute as memsom_recompute
 from memsom.storage import schema as memsom_schema
 
 

@@ -9,7 +9,7 @@ adds 80+ tests across 13 modules + CLI + MCP.
 | Module                | File                     | Capability                                                     | Test file                     | Tests |
 |-----------------------|--------------------------|----------------------------------------------------------------|-------------------------------|-------|
 | schema helpers        | memsom/storage/schema.py         | Idempotent ADD COLUMN / CREATE TABLE IF NOT EXISTS helpers     | test_memsom_schema.py         | 8     |
-| recompute             | memsom/retrieval/recompute.py      | Multi-hop integrity label recompute; elevation fixed-points    | test_memsom_recompute.py      | 10    |
+| recompute             | memsom/integrity/recompute.py      | Multi-hop integrity label recompute; elevation fixed-points    | test_memsom_recompute.py      | 10    |
 | redact                | memsom/integrity/redact.py         | Payload destruction (content=''); rows/edges/dates survive     | test_memsom_redact.py         | 10    |
 | quarantine            | memsom/integrity/quarantine.py     | Consolidation gate; manual quarantine; promote with gate check | test_memsom_quarantine.py     | 10    |
 | confid                | memsom/integrity/confid.py         | Bell-LaPadula conf axis (MAX high-water-mark); classify        | test_memsom_confid.py         | 10    |

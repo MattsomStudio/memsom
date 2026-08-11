@@ -21,7 +21,7 @@ import memsom
 from memsom.federation import federation as memsom_federation
 from memsom.integrity import confid as memsom_confid
 from memsom.integrity import gate as memsom_gate
-from memsom.retrieval import recompute as memsom_recompute
+from memsom.integrity import recompute as memsom_recompute
 
 
 class SecurityBase(unittest.TestCase):
