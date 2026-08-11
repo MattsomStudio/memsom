@@ -85,11 +85,22 @@ CREATE TABLE IF NOT EXISTS embeddings (
   dim     INTEGER NOT NULL,
   vec     BLOB NOT NULL
 );
+-- MS-32: a re-index queue. index_node writes a row here whenever the BM25
+-- half succeeded but the vector half did not (bge AND Ollama both
+-- unavailable/failed) -- previously that state was reported as a plain
+-- `True` "indexed" with no trace, and nothing ever revisited the node once
+-- the embedder recovered. A successful embed clears the row.
+CREATE TABLE IF NOT EXISTS retrieval_degraded (
+  node_id     INTEGER PRIMARY KEY,
+  reason      TEXT NOT NULL,
+  recorded_at TEXT NOT NULL
+);
 """
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Idempotent: create postings, docstats, embeddings tables if absent."""
+    """Idempotent: create postings, docstats, embeddings, retrieval_degraded
+    tables if absent."""
     memsom_schema.ensure_table(conn, _SCHEMA_SQL)
 
 
@@ -168,6 +179,49 @@ def _cosine(a: list, b: list) -> float:
 # Index a single node
 # ---------------------------------------------------------------------------
 
+_WARNED_EMBED_FALLBACK = False
+
+
+def _warn_embed_fallback(exc: Exception) -> None:
+    """MS-32: ONE stderr warning per process when the default (Ollama) embed
+    path fails, mirroring embed.py's _warn_fallback for the bge path. Without
+    it a degrading Ollama backend -- the DEFAULT install -- never surfaces
+    anywhere a human would see it."""
+    global _WARNED_EMBED_FALLBACK
+    if _WARNED_EMBED_FALLBACK:
+        return
+    _WARNED_EMBED_FALLBACK = True
+    import sys
+    print(f"[memsom] Ollama embedding unavailable ({exc}); indexing BM25-only. "
+          f"Vectors will be added automatically once Ollama recovers and this "
+          f"node is re-indexed. This warning shows once.", file=sys.stderr)
+
+
+def _record_degraded(conn: sqlite3.Connection, nid: int, reason: str) -> None:
+    migrate(conn)
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO retrieval_degraded(node_id, reason, recorded_at)"
+            " VALUES (?, ?, ?)",
+            (nid, reason, memsom.now_iso()),
+        )
+
+
+def _clear_degraded(conn: sqlite3.Connection, nid: int) -> None:
+    migrate(conn)
+    with conn:
+        conn.execute("DELETE FROM retrieval_degraded WHERE node_id = ?", (nid,))
+
+
+def degraded_nodes(conn: sqlite3.Connection) -> list:
+    """Node ids indexed BM25-only because their vector embed failed -- the
+    MS-32 re-index queue. `index_all`/`reindex` can pass this to a follow-up
+    pass once the embedder is back."""
+    migrate(conn)
+    return [r[0] for r in
+            conn.execute("SELECT node_id FROM retrieval_degraded ORDER BY node_id")]
+
+
 def index_node(conn: sqlite3.Connection, nid: int) -> bool:
     """Rebuild postings + docstats for *nid*.  If Ollama is reachable, also
     store an embedding.  Ollama unreachable -> BM25 index is still built.
@@ -231,21 +285,29 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
             (nid, length),
         )
 
-    # Optional vector — backend-dispatched; degrade silently on any failure.
+    # Optional vector — backend-dispatched; degrade CLEARLY (MS-32), not
+    # silently, on any failure: a stderr warning (once per process, same
+    # shape as embed.py's bge fallback warning) and a row in
+    # retrieval_degraded so a later reindex can find it again once the
+    # embedder recovers. index_node still returns True -- BM25 IS indexed,
+    # which is the contract index_all counts on -- the degradation is
+    # tracked separately, not folded into the boolean.
     from memsom.retrieval import embed as memsom_embed
     b = memsom_embed.backend()
     if b == "bm25":
+        _clear_degraded(conn, nid)
         return True  # BM25-only by request; no vectors stored
     if b == "bge-m3" and memsom_embed.bge_available():
         try:
             enc = memsom_embed.encode_doc(content)
             if enc is not None:
                 memsom_embed.store_bge(conn, nid, enc)
+                _clear_degraded(conn, nid)
                 return True
         except Exception:
             pass  # bge failed -> fall through to Ollama, then BM25-only
 
-    # Ollama dense path (default, or bge fall-through). Unchanged behavior.
+    # Ollama dense path (default, or bge fall-through).
     try:
         vec = _call_ollama_embed(content)
         blob = _vec_to_blob(vec)
@@ -257,9 +319,14 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
                 " VALUES (?, ?, ?, ?)",
                 (nid, model, dim, blob),
             )
-    except Exception:
-        # Ollama down, model not pulled, network error — skip vector silently
-        pass
+        _clear_degraded(conn, nid)
+    except Exception as exc:
+        # Ollama down, model not pulled, network error. MS-32: this is the
+        # DEFAULT backend, so this used to be the silent path -- the bge
+        # branch above already warned once per process; this one now does
+        # too, plus records the node so a recovery can find it.
+        _warn_embed_fallback(exc)
+        _record_degraded(conn, nid, f"ollama embed failed: {exc}")
     return True
 
 
@@ -286,6 +353,9 @@ def deindex_node(conn: sqlite3.Connection, nid: int) -> None:
         # table-guarded). Keeps the invariant: anything that drops `embeddings`
         # drops sparse_vecs + colbert_vecs too — no orphaned vectors can resurface.
         memsom_embed.deindex_bge(conn, nid)
+        # MS-32: a deindexed node is no longer a re-index candidate either.
+        if memsom_schema.table_exists(conn, "retrieval_degraded"):
+            conn.execute("DELETE FROM retrieval_degraded WHERE node_id = ?", (nid,))
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +893,16 @@ def _cmd_reindex(args):
     try:
         migrate(conn)
         n = index_all(conn)
-        print(f"indexed {n} source node(s)")
+        degraded = degraded_nodes(conn)
+        # MS-32: index_all's old line printed identically whether every
+        # node got a vector or none did. Report the degraded count
+        # separately -- 0 is silent, non-zero says exactly what to expect.
+        if degraded:
+            print(f"indexed {n} source node(s), {len(degraded)} BM25-only "
+                  f"(vector embed degraded -- see stderr; will retry on next "
+                  f"reindex)")
+        else:
+            print(f"indexed {n} source node(s)")
     finally:
         conn.close()
     # VRAM hygiene: a batch reindex is the canonical place a 2.2GB bge model gets

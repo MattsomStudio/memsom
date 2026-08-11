@@ -27,6 +27,7 @@ import memsom
 from memsom.bridge import obsidian as memsom_obsidian
 from memsom.integrity import confid as memsom_confid
 from memsom.integrity import quarantine as memsom_quarantine
+from memsom.integrity import redact as memsom_redact
 from memsom.lifecycle import heal as memsom_heal
 
 MARKER = "PASSPHRASE-9f3a2b"
@@ -100,6 +101,24 @@ def test_heal_flags_a_parentless_agent_derived_node(conn):
         "agent-derived node with no parents -- a state derive_node itself "
         "forbids (memsom/__init__.py:115), and the exact signature the vault "
         "round-trip produces")
+
+
+# FIXED (Phase 6): export_note stamps obsidian_path on a fresh single-node
+# export, so _purge_backing_files has something to unlink.
+def test_redact_purges_a_node_id_export(conn, vault):
+    s = memsom.insert_node(conn, f"passphrase {MARKER} export target", "user")
+    conn.commit()
+    out = memsom_obsidian.export_note(conn, vault, node_id=s, title="export-target")
+    conn.commit()
+    assert out.exists(), "precondition: the export actually wrote a file"
+
+    stats = {}
+    memsom_redact.redact_node(conn, s, "gate", cascade=False, vault=vault,
+                              purge_stats=stats)
+    assert stats != {"purged": 0, "failed": 0}, (
+        "redact reported a clean purge with the exported plaintext still on "
+        f"disk: {out}, exists={out.exists()}")
+    assert not out.exists(), f"exported plaintext survived redaction: {out}"
 
 
 def test_control_effective_channel_still_holds(conn):

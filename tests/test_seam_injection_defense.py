@@ -263,11 +263,34 @@ class TestTransportVaultFence(unittest.TestCase):
             memsom_mcp._tool_argv("obsidian_sync", {"vault": "../elsewhere"})
 
     def test_a_unc_path_is_refused_before_any_syscall(self):
-        """The form that makes `resolve()` open an outbound SMB session and
-        offer this process's NTLM credentials to whoever answers."""
-        with self.assertRaises(ValueError):
-            memsom_mcp._tool_argv("obsidian_sync",
-                                  {"vault": r"\\attacker\share"})
+        """MS-38: `assertRaises(ValueError)` alone does not distinguish a
+        lexical-first rejection from a resolve-THEN-check shape that dials
+        the attacker host and only raises afterward -- both shapes raise.
+        Assert the PROPERTY instead: `Path.resolve` is never even called
+        with the hostile UNC string. Patches the unbound method so it
+        catches `Path.resolve()` however `_checked_vault`/`safe_join`
+        reach it, not just one import alias of it."""
+        calls = []
+        real_resolve = Path.resolve
+
+        def tracking_resolve(self_path, *a, **kw):
+            calls.append(str(self_path))
+            return real_resolve(self_path, *a, **kw)
+
+        Path.resolve = tracking_resolve
+        try:
+            with self.assertRaises(ValueError):
+                memsom_mcp._tool_argv("obsidian_sync",
+                                      {"vault": r"\\attacker\share"})
+        finally:
+            Path.resolve = real_resolve
+
+        hostile = [c for c in calls if "attacker" in c]
+        assert not hostile, (
+            f"Path.resolve() was called on the hostile UNC string before "
+            f"rejection -- this is the resolve-then-check shape that opens "
+            f"an outbound SMB session and offers this process's NTLM "
+            f"credentials before ever raising: {hostile!r}")
 
     def test_obsidian_export_is_fenced_by_the_same_rule(self):
         with self.assertRaises(ValueError):

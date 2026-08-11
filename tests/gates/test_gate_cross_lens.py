@@ -71,9 +71,8 @@ def test_delisted_origin_cannot_destroy_local_nodes(conn, monkeypatch):
         f"a de-listed origin tombstoned/redacted/quarantined a local node: {row}")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-15 (FED-7): the existing-node merge "
-                                       "branch (federation.py:574-655) never "
-                                       "merges conf_label")
+# FIXED (Phase 6): the existing-node merge branch now merges conf_label by
+# max() -- see federation.py step (d), just after the quarantine rule.
 def test_conf_label_raise_propagates(conn, monkeypatch):
     """Bell-LaPadula max-ceiling must be monotonic across an instance boundary.
     Today a later `classify <id> secret` never reaches the peer."""
@@ -83,7 +82,14 @@ def test_conf_label_raise_propagates(conn, monkeypatch):
     conn.commit()
     memsom_fed.migrate(conn)
     conn.commit()
+    # migrate() does NOT backfill uuid/origin on existing rows -- only
+    # backfill_uuids() does (export_changeset calls it internally; this
+    # hand-built changeset has to call it explicitly, matching
+    # test_delisted_origin_cannot_destroy_local_nodes above).
+    memsom_fed.backfill_uuids(conn, "PEER-A")
+    conn.commit()
     uuid = conn.execute("SELECT uuid FROM nodes WHERE id=?", (nid,)).fetchone()[0]
+    assert uuid, "precondition: node carries a uuid"
     memsom_fed.add_trusted_origin(conn, "PEER-B", by="gate") \
         if hasattr(memsom_fed, "add_trusted_origin") else \
         conn.execute("INSERT OR IGNORE INTO trusted_origins(origin) VALUES ('PEER-B')")
@@ -101,8 +107,9 @@ def test_conf_label_raise_propagates(conn, monkeypatch):
         f"serving the secret at conf_label={conf} to a PUBLIC reader")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-16 (FED-1): `archived` is in neither "
-                                       "_SELECT_COLS nor the import INSERT")
+# FIXED (Phase 6): archived/archived_at now flow through _SELECT_COLS,
+# _row_to_node_dict, the new-node INSERT and a one-way owner-gated merge
+# rule on the existing-node branch.
 def test_archived_survives_a_federation_roundtrip(conn, monkeypatch):
     monkeypatch.setenv("MEMDAG_ORIGIN", "PEER-A")
     memsom_fed.migrate(conn)
@@ -125,6 +132,59 @@ def test_archived_survives_a_federation_roundtrip(conn, monkeypatch):
 # ---------------------------------------------------------------------------
 # REDACTION COMPLETENESS
 # ---------------------------------------------------------------------------
+
+# FIXED (Phase 6): a set flag with a NULL timestamp is now defaulted to
+# now() on import, both for new nodes and the existing-node merge branch.
+def test_null_taint_timestamp_still_relays_on_a_second_hop(conn, monkeypatch):
+    """MS-24: NULL >= since is FALSE in SQLite. A changeset that (legally,
+    per the honor-system transport) omits tombstoned_at while tombstoned=1
+    must not vanish from B's own future incremental export to C."""
+    monkeypatch.setenv("MEMDAG_ORIGIN", "B")
+    memsom_fed.migrate(conn)
+    cutoff = memsom.now_iso()
+    cs = {"format": "memsom-changeset-v1", "origin": "A",
+          "nodes": [{"uuid": "A:1", "content": "", "channel": "user", "label": 2,
+                     "conf_label": 0, "status": "live",
+                     "tombstoned": 1, "tombstoned_at": None,
+                     "revoke_reason": "gone", "created_at": memsom.now_iso(),
+                     "origin": "A"}],
+          "edges": []}
+    memsom_fed.import_changeset(conn, cs)
+    conn.commit()
+    relayed = memsom_fed.export_changeset(conn, since=cutoff, origin="B")
+    uuids = [n["uuid"] for n in relayed["nodes"]]
+    assert "A:1" in uuids, (
+        "a tombstoned row with a NULL tombstoned_at was silently excluded "
+        "from B's own incremental export -- the tombstone would never "
+        "reach a third peer C on a since-filtered relay")
+
+
+# FIXED (Phase 6): a uuid collision between two DIFFERENT origins is now
+# detected (declared uuid-origin prefix vs the local row's stored origin)
+# and counted in stats["uuid_conflicts"] instead of silently dropped.
+def test_uuid_collision_is_reported_not_silently_dropped(conn, monkeypatch):
+    """MS-25: uuid is hostname:rowid, not content-addressed. After a store
+    rebuild, a NEW local node can mint the exact uuid an unrelated incoming
+    node from a different origin also carries."""
+    monkeypatch.setenv("MEMDAG_ORIGIN", "B")
+    memsom_fed.migrate(conn)
+    local_id = memsom.insert_node(conn, "a local note, unrelated to the peer", "user")
+    conn.commit()
+    conn.execute("UPDATE nodes SET uuid=?, origin=? WHERE id=?",
+                ("A:1", "B", local_id))
+    conn.commit()
+
+    cs = {"format": "memsom-changeset-v1", "origin": "A",
+          "nodes": [{"uuid": "A:1", "content": "a DIFFERENT note from peer A",
+                     "channel": "user", "label": 2, "conf_label": 0,
+                     "status": "live", "tombstoned": 0,
+                     "created_at": memsom.now_iso(), "origin": "A"}],
+          "edges": []}
+    stats = memsom_fed.import_changeset(conn, cs)
+    assert stats.get("uuid_conflicts", 0) == 1, (
+        f"a uuid collision across two different origins produced no "
+        f"signal: {stats}")
+
 
 # MS-16 FIXED (Phase 4): redact_node now calls
 # corroborate.reap_claims_for_nodes for every newly-redacted id, deleting its

@@ -431,7 +431,7 @@ def sync_vault(conn, vault, default_channel="user", prune=True, log=None):
     files = list(_walk_markdown(vault))
     present = {rel for rel, *_ in files}
     summary = {"notes": len(files), "ingested": 0, "unchanged": 0,
-               "deleted": 0, "edges": 0, "unresolved": 0}
+               "deleted": 0, "edges": 0, "unresolved": 0, "refused": 0}
 
     # --- Pass 1: ingest changed/new notes (skip unchanged via mtime signature) ---
     note_links = {}  # rel -> list[str] targets (for pass 2)
@@ -463,7 +463,20 @@ def sync_vault(conn, vault, default_channel="user", prune=True, log=None):
             memsom.revoke_cascade(conn, nid, f"obsidian: note changed ({rel})")
 
         channel = effective_channel(default_channel, fm.get(CHANNEL_KEY))
-        ids = memsom_ingest.ingest_text(conn, body, channel, source_ref=rel)
+        # MS-33: ingest_text raises ValueError for a source_ref claiming the
+        # bridge's reserved `memory:` namespace (enforce_source_ref_namespace).
+        # Unlike the two guards above (oversized / unreadable), this one had
+        # no except -- one poisoned note aborted the WHOLE sync_vault call,
+        # so every note sorting after it in `files` never got a look, and
+        # (worse) the prune pass below never ran at all, leaving deleted
+        # notes' nodes live. Refused loudly, same shape as MS-19's guard
+        # just below.
+        try:
+            ids = memsom_ingest.ingest_text(conn, body, channel, source_ref=rel)
+        except ValueError as exc:
+            say(f"  ! refused {rel}: {exc}")
+            summary["refused"] += 1
+            continue
         # MS-06/MS-08: a memsom-authored note (this operator's own export,
         # never a hand-written or foreign-synced one -- _note_is_memsom_authored's
         # own two-key check) carries the source's confidentiality high-water
@@ -696,6 +709,24 @@ def export_note(conn, vault, *, node_id=None, query=None, folder="memsom",
     if links:
         body += ["", "## Sources", "", *(f"- {l}" for l in links), ""]
     out_path.write_text("\n".join(fm_lines + body), encoding="utf-8")
+
+    # MS-15: a verbatim single-node export (node_id branch) writes the SAME
+    # plaintext memsom already holds into an untracked vault file. Without
+    # recording where, `integrity.redact._purge_backing_files` has no
+    # obsidian_path to unlink and later reports a clean {'purged': 0,
+    # 'failed': 0} while the copy survives on disk (and, if the vault is
+    # Syncthing-replicated, on every peer). Only stamped when the node has
+    # no obsidian_path yet -- a node that already came FROM the vault keeps
+    # its original identity; sync_vault owns that column's import meaning.
+    if node_id is not None and memsom_schema.column_exists(conn, "nodes", "obsidian_path"):
+        existing = conn.execute(
+            "SELECT obsidian_path FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if existing and not existing[0]:
+            rel = out_path.resolve().relative_to(vault).as_posix()
+            with conn:
+                conn.execute(
+                    "UPDATE nodes SET obsidian_path = ?, obsidian_mtime = ? WHERE id = ?",
+                    (rel, out_path.stat().st_mtime_ns, node_id))
     return out_path
 
 

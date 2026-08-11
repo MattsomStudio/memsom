@@ -180,7 +180,11 @@ class Upstream:
 
     def __init__(self, name: str, spec: dict):
         self.name = name
-        self.command = spec["command"]
+        # MS-29-class: resolved eagerly, not just at spawn time, so
+        # `self.command` itself is never a bare name a hostile CWD could
+        # shadow -- introspection/tests that read `.command` see the same
+        # safe value the process actually spawns.
+        self.command = memsom_proc.resolve(spec["command"])
         self.args = list(spec.get("args", []))
         # MS-37: was {**os.environ, **spec.env} -- the full parent environment,
         # credentials included, handed to the least-trusted, longest-lived

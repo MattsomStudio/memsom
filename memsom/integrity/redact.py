@@ -89,6 +89,13 @@ def _unlink_within(root, relpath):
 def _resolve_memory_dir(memory_dir):
     if memory_dir is not None:
         return memory_dir
+    # FAILOPEN: allowed to not raise here -- default_memory_dir() is
+    # deliberately loud for its OTHER callers (a wrong answer there once
+    # caused a mass wipe), but a purge is best-effort DISK cleanup after a
+    # DB redaction that has ALREADY committed; an unresolvable root must
+    # not crash that. MS-30's fix is downstream in _purge_backing_files,
+    # which now counts a None here as 'failed' instead of an invisible
+    # skip -- the caller still sees the gap, just not as a crash.
     try:
         from memsom.kernel.paths import default_memory_dir
         return default_memory_dir()
@@ -145,6 +152,13 @@ def _purge_backing_files(conn, ids, memory_dir=None, vault=None):
                     out["purged"] += 1
                 elif res == "failed":
                     out["failed"] += 1
+            else:
+                # MS-30: the node carries a bridge_path but the memory
+                # root could not be resolved at all (e.g. no HOME) --
+                # previously this fell through both buckets and
+                # redact_node reported a clean {'purged': 0, 'failed': 0}
+                # while the plaintext stayed on disk, unattempted.
+                out["failed"] += 1
         if op:
             if vault_root is None:
                 vault_root = _resolve_vault(vault) or False
@@ -154,6 +168,9 @@ def _purge_backing_files(conn, ids, memory_dir=None, vault=None):
                     out["purged"] += 1
                 elif res == "failed":
                     out["failed"] += 1
+            else:
+                # MS-30, vault leg: same accounting gap, same fix.
+                out["failed"] += 1
     return out
 
 

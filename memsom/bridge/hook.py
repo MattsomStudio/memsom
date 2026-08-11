@@ -102,12 +102,29 @@ def decide_pre(conn, policy, session_id, tool) -> dict:
 
 def apply_post(conn, policy, session_id, tool):
     """If *tool* taints (per policy), ensure the session and lower its floor.
-    Returns the new floor on a taint, or None if the tool does not taint."""
+    Returns the new floor on a taint, or None if the tool does not taint.
+
+    MS-18: the lower_floor write is the one that can hit a transient lock (the
+    finding names a routine write elsewhere in the store held past 5s as the
+    realistic trigger). If it fails, record_pending_taint makes one more
+    attempt at a SEPARATE, less-contended row before re-raising to the caller,
+    which still logs to stderr -- so the taint is either applied now, recorded
+    for the next ensure_session to reconcile, or (only if BOTH writes fail)
+    lost with a loud message rather than a silent one.
+    """
     taint = memsom_policy.taints(policy, tool)
     if taint is None:
         return None
     memsom_session.ensure_session(conn, session_id, "user")
-    return memsom_session.lower_floor(conn, session_id, taint, tool, reason=f"hook:{tool}")
+    reason = f"hook:{tool}"
+    try:
+        return memsom_session.lower_floor(conn, session_id, taint, tool, reason=reason)
+    # FAILOPEN: not actually open -- caught only to record a pending taint
+    # before propagating; the bare `raise` below re-throws unchanged so
+    # cmd_hook_post's own handler still logs it to stderr.
+    except Exception:
+        memsom_session.record_pending_taint(conn, session_id, taint, tool, reason)
+        raise
 
 
 def pre_output(verdict, tool):

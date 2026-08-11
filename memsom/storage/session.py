@@ -59,7 +59,14 @@ CREATE TABLE IF NOT EXISTS session_taint_event (
   ts         TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_taint_event_sid
-  ON session_taint_event(session_id);"""
+  ON session_taint_event(session_id);
+CREATE TABLE IF NOT EXISTS session_pending_taint (
+  session_id     TEXT PRIMARY KEY,
+  incoming_label INTEGER NOT NULL CHECK (incoming_label BETWEEN 0 AND 3),
+  tool           TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  recorded_at    TEXT NOT NULL
+);"""
 
 
 def migrate(conn):
@@ -114,6 +121,13 @@ def ensure_session(conn, session_id, start_floor=None) -> int:
     floor.  Never lowers or resets an existing session — first sight creates the
     row at *start_floor* (default `user`); later calls are no-ops.  This is the
     bridge that lets the hook layer key taint on the live Claude session.
+
+    Also reconciles any PENDING taint (MS-18): if a prior lower_floor call for
+    this session failed mid-write (e.g. hook-post hit a transient write lock),
+    apply_post records the intended drop in session_pending_taint instead of
+    losing it. The first ensure_session to see that row -- typically the NEXT
+    hook-pre -- applies it before returning the floor, so a lost write degrades
+    to 'applied late', never to 'a clean session'.
     """
     floor = _parse_floor(start_floor) if start_floor is not None else memsom.RANK["user"]
     now = memsom.now_iso()
@@ -125,6 +139,7 @@ def ensure_session(conn, session_id, start_floor=None) -> int:
             " VALUES (?,?,?,?,?)",
             (session_id, now, floor, floor, now),
         )
+    reconcile_pending_taint(conn, session_id)
     return current_floor(conn, session_id)
 
 
@@ -140,6 +155,48 @@ def current_floor(conn, session_id) -> int:
     if row is None:
         raise ValueError(f"unknown session id: {session_id!r}")
     return row[0]
+
+
+def record_pending_taint(conn, session_id, incoming_label, tool, reason) -> None:
+    """Best-effort durable record of an intended lower_floor that could not be
+    applied (MS-18). A SEPARATE small write from the session_taint UPDATE that
+    failed -- a fresh INSERT OR REPLACE on its own row is far less likely to
+    collide with whatever lock caused the original failure. If this ALSO
+    raises, the caller still logs to stderr (existing behaviour); this is a
+    second chance, not a guarantee.
+    """
+    incoming = _parse_floor(incoming_label)
+    now = memsom.now_iso()
+    migrate(conn)
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO session_pending_taint"
+            "(session_id, incoming_label, tool, reason, recorded_at)"
+            " VALUES (?,?,?,?,?)",
+            (session_id, incoming, tool, reason, now),
+        )
+
+
+def reconcile_pending_taint(conn, session_id):
+    """Apply and clear a pending taint for *session_id*, if one is recorded.
+    Returns the new floor, or None if there was nothing pending. Idempotent:
+    the pending row is deleted in the SAME transaction lower_floor commits in,
+    so a crash between them just means reconciliation runs again next time,
+    landing on the same watermark (min() is idempotent).
+    """
+    migrate(conn)
+    row = conn.execute(
+        "SELECT incoming_label, tool, reason FROM session_pending_taint"
+        " WHERE session_id=?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    incoming_label, tool, reason = row
+    new_floor = lower_floor(conn, session_id, incoming_label, tool, reason)
+    with conn:
+        conn.execute(
+            "DELETE FROM session_pending_taint WHERE session_id=?", (session_id,))
+    return new_floor
 
 
 def lower_floor(conn, session_id, incoming_label, tool, reason) -> int:

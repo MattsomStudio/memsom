@@ -116,16 +116,9 @@ def test_neighborhood_floor_is_never_higher_than_the_path_minimum(conn):
 # directory"), scheduled for Phase 5's effects-layer absorption alongside it.
 # xfail, not a green control: this refutation currently FAILS.
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "MS-29-class: federation/broker.py's Upstream.start() passes "
-        "self.command ('uvx' by default) straight to subprocess.Popen with no "
-        "shutil.which pin and no cwd= override, so a bare 'uvx.exe' placed in "
-        "memsom's current working directory would run instead of the real "
-        "one on Windows. Phase 5 absorbs every spawn site behind "
-        "effects/proc.py with a pinned absolute path; this is one of them."),
-)
+# FIXED (Phase 6): Upstream.__init__ resolves `command` eagerly via
+# effects.proc.resolve(), which (also Phase 6) no longer lets shutil.which's
+# internal win32 curdir-insertion re-admit the CWD.
 def test_broker_uvx_default_does_not_resolve_from_cwd(tmp_path, monkeypatch):
     from memsom.federation import broker as memsom_broker
 

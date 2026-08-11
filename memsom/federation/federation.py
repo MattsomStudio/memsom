@@ -82,6 +82,11 @@ def migrate(conn):
     memsom_schema.add_column(conn, "nodes", "redact_reason", "TEXT")
     memsom_schema.add_column(conn, "nodes", "quarantined_at", "TEXT")
     memsom_schema.add_column(conn, "nodes", "quarantine_reason", "TEXT")
+    # MS-23: archived is added by lifecycle.compact.migrate(), which a
+    # standalone federation import/export may never have run. Guard here
+    # too, same as the redact/quarantine columns just above.
+    memsom_schema.add_column(conn, "nodes", "archived", "INTEGER NOT NULL DEFAULT 0")
+    memsom_schema.add_column(conn, "nodes", "archived_at", "TEXT")
 
     # Unique index: multiple NULLs are fine under SQLite UNIQUE (pre-federation rows)
     conn.execute(
@@ -180,7 +185,7 @@ def _row_to_node_dict(row):
      tombstoned, tombstoned_at, revoke_reason,
      redacted, redacted_at, redact_reason,
      quarantined_at, quarantine_reason,
-     uuid, origin) = row
+     uuid, origin, archived, archived_at) = row
 
     return {
         "uuid": uuid,
@@ -200,6 +205,12 @@ def _row_to_node_dict(row):
         "quarantined_at": quarantined_at,
         "source_ref": source_ref,
         "created_at": created_at,
+        # MS-23: archived is a consolidation-outcome flag, same durability
+        # class as tombstoned -- without it, an archived (compacted-away)
+        # episode lands LIVE and content-intact on a peer, undoing the
+        # consolidation and reversing the de-index.
+        "archived": archived if archived is not None else 0,
+        "archived_at": archived_at,
     }
 
 
@@ -211,7 +222,8 @@ _SELECT_COLS = (
     "tombstoned, tombstoned_at, revoke_reason, "
     "COALESCE(redacted, 0) as redacted, redacted_at, redact_reason, "
     "quarantined_at, quarantine_reason, "
-    "uuid, origin"
+    "uuid, origin, "
+    "COALESCE(archived, 0) as archived, archived_at"
 )
 
 
@@ -242,8 +254,8 @@ def export_changeset(conn, since=None, origin=None):
         rows = conn.execute(
             f"SELECT {_SELECT_COLS} FROM nodes WHERE "
             "created_at >= ? OR tombstoned_at >= ? OR redacted_at >= ? "
-            "OR quarantined_at >= ? ORDER BY id",
-            (since, since, since, since)
+            "OR quarantined_at >= ? OR archived_at >= ? ORDER BY id",
+            (since, since, since, since, since)
         ).fetchall()
 
     node_dicts = [_row_to_node_dict(r) for r in rows]
@@ -454,6 +466,12 @@ def import_changeset(conn, changeset):
         "edges_new": 0,
         "edges_skipped": 0,
         "resurrections_blocked": 0,
+        # MS-25: uuid is hostname:rowid, not content-addressed. A rebuilt
+        # store (AUTOINCREMENT restarts at 1) can mint the same uuid string
+        # as an unrelated node on another origin; a naive merge would
+        # silently drop the incoming node onto the wrong local row with no
+        # signal in nodes_new/nodes_updated at all.
+        "uuid_conflicts": 0,
     }
 
     with conn:
@@ -485,7 +503,8 @@ def import_changeset(conn, changeset):
                 "SELECT id, tombstoned, tombstoned_at, revoke_reason, "
                 "redacted, redacted_at, redact_reason, "
                 "COALESCE(status, 'live') as status, quarantined_at, quarantine_reason, "
-                "origin "
+                "origin, COALESCE(conf_label, 0) as conf_label, "
+                "COALESCE(archived, 0) as archived "
                 "FROM nodes WHERE uuid=?",
                 (uuid,)
             ).fetchone()
@@ -542,14 +561,36 @@ def import_changeset(conn, changeset):
                 if status not in ("live", "quarantined"):
                     status = "live"
 
+                # MS-24: `NULL >= since` is FALSE in SQLite, so a row whose
+                # flag is set but timestamp column is NULL is silently
+                # excluded from every FUTURE incremental (since=) export --
+                # the flag itself relays fine on THIS hop, but an A->B->C
+                # chain loses it at B forever. Default any set-flag /
+                # null-timestamp pair to now() so the row always carries a
+                # timestamp an incremental export can match on.
+                tombstoned_at = node.get("tombstoned_at")
+                if node.get("tombstoned", 0) and not tombstoned_at:
+                    tombstoned_at = memsom.now_iso()
+                redacted_at = node.get("redacted_at") or (
+                    redacted_at_by_uuid.get(uuid) if record_redacted else None)
+                if forced_redacted and not redacted_at:
+                    redacted_at = memsom.now_iso()
+                quarantined_at = node.get("quarantined_at")
+                if status == "quarantined" and not quarantined_at:
+                    quarantined_at = memsom.now_iso()
+                archived_flag = 1 if node.get("archived", 0) else 0
+                archived_at = node.get("archived_at")
+                if archived_flag and not archived_at:
+                    archived_at = memsom.now_iso()
+
                 cur = conn.execute(
                     "INSERT INTO nodes("
                     "  content, channel, label, conf_label, status, source_ref, created_at,"
                     "  tombstoned, tombstoned_at, revoke_reason,"
                     "  redacted, redacted_at, redact_reason,"
                     "  quarantined_at, quarantine_reason,"
-                    "  uuid, origin"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "  uuid, origin, archived, archived_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         content,
                         channel,
@@ -559,15 +600,19 @@ def import_changeset(conn, changeset):
                         node.get("source_ref"),
                         node.get("created_at", memsom.now_iso()),
                         node.get("tombstoned", 0),
-                        node.get("tombstoned_at"),
+                        tombstoned_at,
                         node.get("revoke_reason"),
                         forced_redacted,
-                        node.get("redacted_at") or (redacted_at_by_uuid.get(uuid) if record_redacted else None),
+                        redacted_at,
                         node.get("redact_reason") or ("redacted (federated record)" if record_redacted else None),
-                        node.get("quarantined_at"),
+                        quarantined_at,
                         node.get("quarantine_reason"),
                         uuid,
                         node.get("origin"),   # provenance stored; NOT used for authz
+                        # MS-23: archived is one-way like tombstoned -- a peer
+                        # cannot un-archive by omitting the field.
+                        archived_flag,
+                        archived_at,
                     )
                 )
                 stats["nodes_new"] += 1
@@ -584,7 +629,19 @@ def import_changeset(conn, changeset):
                 (local_id, local_tomb, local_tomb_at, local_tomb_reason,
                  local_redacted, local_redacted_at, local_redact_reason,
                  local_status, local_q_at, local_q_reason,
-                 local_origin) = local
+                 local_origin, local_conf_label, local_archived) = local
+
+                # MS-25: the uuid names its minting origin (the part before
+                # ':'). A genuine same-node update always has local_origin
+                # equal to that. A mismatch means two DIFFERENT nodes,
+                # minted on different machines, collided on the same uuid
+                # string -- report it and refuse to guess which one wins,
+                # rather than silently merging unrelated content onto the
+                # wrong existing row.
+                declared_origin = uuid.split(":", 1)[0] if ":" in uuid else None
+                if declared_origin and local_origin and declared_origin != local_origin:
+                    stats["uuid_conflicts"] += 1
+                    continue
 
                 # Authorization rule for state changes: only the same origin may
                 # tombstone/redact/quarantine what it owns.
@@ -610,7 +667,11 @@ def import_changeset(conn, changeset):
                         conn.execute(
                             "UPDATE nodes SET tombstoned=1, tombstoned_at=?, revoke_reason=?"
                             " WHERE id=?",
-                            (node.get("tombstoned_at"), node.get("revoke_reason"), local_id)
+                            # MS-24: default a NULL timestamp so a later
+                            # incremental (since=) export on THIS machine
+                            # can still find the row.
+                            (node.get("tombstoned_at") or memsom.now_iso(),
+                             node.get("revoke_reason"), local_id)
                         )
                         updated = True
                         # Queue cascade: revoke_cascade runs AFTER txn closes (F-11).
@@ -632,7 +693,9 @@ def import_changeset(conn, changeset):
                             "UPDATE nodes SET content='', redacted=1, redacted_at=?, redact_reason=?"
                             " WHERE id=?",
                             (
-                                node.get("redacted_at") or redacted_at_by_uuid.get(uuid),
+                                # MS-24: same NULL-timestamp default as tombstone.
+                                node.get("redacted_at") or redacted_at_by_uuid.get(uuid)
+                                or memsom.now_iso(),
                                 node.get("redact_reason") or "redacted (federated record)",
                                 local_id,
                             )
@@ -656,12 +719,50 @@ def import_changeset(conn, changeset):
                         conn.execute(
                             "UPDATE nodes SET status='quarantined', quarantine_reason=?,"
                             " quarantined_at=? WHERE id=?",
-                            (node.get("quarantine_reason"), node.get("quarantined_at"), local_id)
+                            # MS-24: same NULL-timestamp default.
+                            (node.get("quarantine_reason"),
+                             node.get("quarantined_at") or memsom.now_iso(), local_id)
                         )
                         updated = True
                     # else: not owned -> ignore (F-12 blocked)
                 elif inc_status == "live" and local_status == "quarantined":
                     # Incoming live over local quarantined -> BLOCK.
+                    stats["resurrections_blocked"] += 1
+
+                # (d) Confidentiality monotonic RAISE -- MS-12. Unlike
+                # tombstone/redact/quarantine (destructive powers that need
+                # `owned`), a conf_label increase can never be used to leak
+                # more than the receiver already had -- it only narrows who
+                # may read. So it merges by max() from ANY origin, trusted or
+                # not, matching the Bell-LaPadula high-water-mark rule used
+                # everywhere else conf_label is computed. Without this, a
+                # manually classified SOURCE node (a parentless root) can
+                # never have its RAISE reach a peer, since recompute_conf_all
+                # only re-floors DERIVED nodes from their parents.
+                inc_conf_label = _coerce_conf(node.get("conf_label", 0), floor=0)
+                if inc_conf_label > local_conf_label:
+                    conn.execute(
+                        "UPDATE nodes SET conf_label=? WHERE id=?",
+                        (inc_conf_label, local_id)
+                    )
+                    updated = True
+
+                # (e) Archived monotonic rule -- MS-23. Same shape as (a):
+                # a consolidation outcome, one-way, owner-gated. Without
+                # this a compacted-away episode lands LIVE on the peer,
+                # undoing the consolidation and reversing the de-index.
+                inc_archived = 1 if node.get("archived", 0) else 0
+                if inc_archived and not local_archived:
+                    if owned:
+                        conn.execute(
+                            "UPDATE nodes SET archived=1, archived_at=? WHERE id=?",
+                            (node.get("archived_at") or memsom.now_iso(), local_id)
+                        )
+                        updated = True
+                    # else: not owned -> ignore
+                elif not inc_archived and local_archived:
+                    # Incoming un-archived over local archived -> BLOCK (mirrors
+                    # resurrection-block for tombstone/redact/quarantine).
                     stats["resurrections_blocked"] += 1
 
                 if updated:

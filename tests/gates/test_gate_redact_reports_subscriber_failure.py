@@ -63,3 +63,28 @@ def test_redact_does_not_report_when_nothing_fails(conn):
     memsom_redact.redact_node(conn, nid, "gate-test", purge_stats=purge_stats)
     assert purge_stats.get("index_purge_failed", 0) == 0, (
         "a clean redaction must not report a phantom index-purge failure")
+
+
+# FIXED (Phase 6): an unresolvable memory_dir/vault root now counts as
+# 'failed' in _purge_backing_files instead of an invisible skip.
+def test_ms30_unresolvable_memory_root_reports_failed(conn, monkeypatch, tmp_path):
+    """MS-30: default_memory_dir() raising (no HOME) must not make redact_node
+    report a clean {'purged': 0, 'failed': 0} while a bridge_path-backed
+    node's on-disk file is never even attempted."""
+    from memsom.storage import schema as memsom_schema
+    memsom_schema.add_column(conn, "nodes", "bridge_path", "TEXT")
+    nid = memsom.insert_node(conn, "flat-file-backed content", "user")
+    conn.execute("UPDATE nodes SET bridge_path=? WHERE id=?", ("note.md", nid))
+    conn.commit()
+
+    def _boom():
+        raise RuntimeError("HOME is not set")
+
+    monkeypatch.setattr("memsom.kernel.paths.default_memory_dir", _boom)
+
+    purge_stats = {}
+    memsom_redact.redact_node(conn, nid, "gate-test", purge_stats=purge_stats)
+    assert purge_stats != {"purged": 0, "failed": 0}, (
+        f"an unresolvable memory root produced a clean purge report: "
+        f"{purge_stats!r}, while the backing file was never attempted")
+    assert purge_stats.get("failed", 0) == 1

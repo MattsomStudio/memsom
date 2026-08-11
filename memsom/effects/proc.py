@@ -18,6 +18,7 @@ process tracking, not by blocking on spawn.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 
@@ -35,10 +36,31 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
 
 def resolve(exe: str) -> str:
-    """Absolute path for *exe* via shutil.which. Falls back to the bare name
-    when it isn't found on PATH -- the spawn then fails with the OS's own
-    FileNotFoundError, which is the same failure mode as today."""
-    return shutil.which(exe) or exe
+    """Absolute path for *exe* via PATH, deliberately never the CWD.
+
+    `shutil.which(exe)` alone is NOT safe for this on win32: cpython's
+    implementation inserts `os.curdir` at the front of the search path
+    whenever *cmd* has no directory part, and that insertion is
+    unconditional -- it happens even when a `path=` argument is supplied,
+    it is not gated on `path is None`. So a bare `shutil.which("git")` still
+    matches a `git.exe` planted in a hostile CWD.
+
+    Passing each PATH entry as an explicit directory-qualified candidate
+    (`shutil.which(os.path.join(d, exe))`) takes cpython's OTHER branch --
+    "given a path with a directory part, look it up directly" -- which never
+    consults the CWD. Falls back to the bare name when it isn't found on
+    PATH -- the spawn then fails with the OS's own FileNotFoundError, which
+    is the same failure mode as today.
+    """
+    if os.path.dirname(exe):
+        return exe
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        found = shutil.which(os.path.join(d, exe))
+        if found:
+            return found
+    return exe
 
 
 def _build_env(env, keep):
