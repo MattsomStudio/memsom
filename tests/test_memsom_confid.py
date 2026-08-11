@@ -66,10 +66,13 @@ class TestDerivedConfIsMaxNotMin(Base):
 
         d, _ = memsom.derive_node(self.conn, "derived answer", [p, s])
 
+        # MS-10: derive_node itself now stamps conf_label = MAX(parent confs)
+        # at birth (SECURITY-REMEDIATION.md Sec3.3), so there is no gap left for
+        # recompute_conf to close -- it is a no-op confirming the invariant.
+        self.assertEqual(self.get_conf(d), 2)  # born at MAX(0, 2), not 0
         old, new = memsom_confid.recompute_conf(self.conn, d)
-        self.assertEqual(old, 0)  # born public (default)
-        self.assertEqual(new, 2)  # rose to MAX(0, 2)
-        self.assertEqual(self.get_conf(d), 2)
+        self.assertEqual(old, 2)
+        self.assertEqual(new, 2)
 
         # Contrast: integrity (Biba) label must still be MIN of parents
         # parent labels: endorsed=3, user=2 => min=2
@@ -156,23 +159,18 @@ class TestMultihopHighWater(Base):
         d1, _ = memsom.derive_node(self.conn, "first derived node answer", [s])
         d2, _ = memsom.derive_node(self.conn, "second derived node answer", [d1])
 
-        # Both born at conf 0 (default)
-        self.assertEqual(self.get_conf(d1), 0)
-        self.assertEqual(self.get_conf(d2), 0)
-
-        changed = memsom_confid.recompute_conf_all(self.conn)
-
-        # Both must appear in changed list
-        changed_ids = {r[0]: (r[1], r[2]) for r in changed}
-        self.assertIn(d1, changed_ids)
-        self.assertIn(d2, changed_ids)
-        self.assertEqual(changed_ids[d1], (0, 2))
-        self.assertEqual(changed_ids[d2], (0, 2))
-
+        # MS-10: derive_node stamps conf_label = MAX(parent confs) at birth, so
+        # the multi-hop high-water mark is already correct with no recompute --
+        # d1's parent (s) is conf 2 at the time d1 is derived, and d2's parent
+        # (d1) is already conf 2 at the time d2 is derived.
         self.assertEqual(self.get_conf(d1), 2)
         self.assertEqual(self.get_conf(d2), 2)
 
-        # Second call: everything already correct — no changes
+        # recompute_conf_all is therefore a no-op on an already-correct tree.
+        changed = memsom_confid.recompute_conf_all(self.conn)
+        self.assertEqual(changed, [])
+
+        # Second call: still nothing to do.
         second = memsom_confid.recompute_conf_all(self.conn)
         self.assertEqual(second, [])
 
@@ -279,9 +277,11 @@ class TestCli(Base):
         n = self.add("internal source node", "user")
         memsom_confid.classify(self.conn, n, "internal")
         d, _ = memsom.derive_node(self.conn, "derived node answer", [n])
+        # MS-10: derive_node already stamped conf_label=INTERNAL at birth, so
+        # there is nothing left for --all to raise -- it is a confirming no-op.
+        self.assertEqual(self.get_conf(d), memsom_confid.CONF_RANK["internal"])
         out = self.run_main("conf-recompute", "--all")
-        self.assertIn(f"[{d}]", out)
-        self.assertIn("INTERNAL", out)
+        self.assertIn("nothing changed", out)
 
     def test_cli_recompute_unchanged(self):
         n = self.add("public source node text", "user")

@@ -137,9 +137,13 @@ class TestRedactIsNotRevoke(Base):
         # Redact x: tombstoned must stay 0; x must still appear in live_sources
         memsom_redact.redact_node(self.conn, x, "redact-test")
         node_x = memsom.get_node(self.conn, x)
-        self.assertEqual(node_x["tombstoned"], 0)       # NOT tombstoned
+        self.assertEqual(node_x["tombstoned"], 0)       # NOT tombstoned -- still live
+        # MS-13: memsom.live_sources is now routed through the taint primitive,
+        # which excludes redacted=1 like every other pool -- so a redacted node
+        # is structurally live (tombstoned=0, checked above) but no longer a
+        # live SOURCE for compose/ask. That is the fix, not a regression here.
         live_ids = [r[0] for r in memsom.live_sources(self.conn)]
-        self.assertIn(x, live_ids)                       # still live
+        self.assertNotIn(x, live_ids)
 
         # Revoke y: content must survive (revoke != redact)
         memsom.revoke_cascade(self.conn, y, "revoke-test")

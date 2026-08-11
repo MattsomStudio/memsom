@@ -53,6 +53,9 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Node id"},
+                "clearance": {"type": "string",
+                              "description": "confidentiality ceiling (public|internal|secret|topsecret); "
+                                             "suppresses content of nodes above it"},
             },
             "required": ["id"],
         },
@@ -450,7 +453,10 @@ def _tool_argv(name, arguments):
         return argv
 
     if name == "explain":
-        return ["explain", str(arguments["id"])]
+        argv = ["explain", str(arguments["id"])]
+        if arguments.get("clearance"):
+            argv += ["--clearance", str(arguments["clearance"])]
+        return argv
 
     if name == "blame":
         argv = ["blame", str(arguments["id"])]

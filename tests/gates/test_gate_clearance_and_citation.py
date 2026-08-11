@@ -60,8 +60,6 @@ def _capture(argv):
 # MS-08 -- read surfaces with no clearance concept
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="MS-08: live_sources filters tombstoned "
-                                       "only (memsom/__init__.py:145)")
 def test_core_live_sources_applies_a_confidentiality_ceiling(conn):
     s, _p, _d = _secret_store(conn)
     ids = [r[0] for r in memsom.live_sources(conn)]
@@ -70,8 +68,6 @@ def test_core_live_sources_applies_a_confidentiality_ceiling(conn):
         "compose -> derive_node -- has no clearance concept at all")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-08: cmd_dump has zero taint predicates "
-                                       "(memsom/__init__.py:419)")
 def test_dump_does_not_print_above_clearance_content(conn):
     _secret_store(conn)
     assert MARKER not in _capture(["dump"]), (
@@ -80,8 +76,6 @@ def test_dump_does_not_print_above_clearance_content(conn):
         "conf_label")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-08: the MCP explain tool has no "
-                                       "clearance property (mcp.py:50)")
 def test_mcp_explain_tool_exposes_a_clearance_parameter():
     tools = {t["name"]: t for t in memsom_mcp.TOOLS}
     assert "clearance" in tools["blame"]["inputSchema"]["properties"], "precondition"

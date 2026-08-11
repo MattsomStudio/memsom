@@ -61,7 +61,6 @@ def _primitive_pool(conn, clearance):
         + " AND ".join(clauses), params).fetchall()}
 
 
-@pytest.mark.xfail(strict=True, reason="CORE-04: memsom/__init__.py:145 live_sources filters only tombstoned + channel")
 def test_live_sources_matches_the_taint_primitive(conn):
     """memsom.live_sources (memsom/__init__.py:145) is a read pool.
 
@@ -82,17 +81,26 @@ def test_live_sources_matches_the_taint_primitive(conn):
         f"excludes (secret node {sec} is above a public clearance)")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-10: derive_node never writes conf_label; the frozen-core ask path never calls recompute_conf")
 def test_derive_node_propagates_conf_ceiling(conn):
     """Bell-LaPadula high-water: a child must be at least as secret as its
     most-secret parent. The frozen derive_node sets `label=min(parents)` but
     nothing for conf_label, so the child defaults to 0 = PUBLIC.
+
+    Builds its own pool (not memsom.live_sources) so this stays a test of
+    derive_node's OWN behaviour, independent of MS-13's clearance filter on
+    live_sources landing in the same phase -- a correctly-filtered
+    live_sources would otherwise never hand derive_node the secret at all.
     """
     import memsom
-    _pub, _sec = _public_and_secret(conn)
+    pub, sec = _public_and_secret(conn)
 
-    text, used = memsom.compose("What is the CA passphrase?",
-                                memsom.live_sources(conn))
+    pub_row = memsom.get_node(conn, pub)
+    sec_row = memsom.get_node(conn, sec)
+    pool = [
+        (pub_row["id"], pub_row["content"], pub_row["channel"], pub_row["label"], pub_row["source_ref"]),
+        (sec_row["id"], sec_row["content"], sec_row["channel"], sec_row["label"], sec_row["source_ref"]),
+    ]
+    text, used = memsom.compose("What is the CA passphrase?", pool)
     nid, _label = memsom.derive_node(conn, text, used)
 
     child = conn.execute(
