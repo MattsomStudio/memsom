@@ -160,13 +160,12 @@ def _contradict_nli():
 
 def _gate3_hook():
     from memsom.bridge import hook as memsom_hook
+    mode = memsom_hook.hook_mode()
     path = memsom_hook.hook_policy_path()
-    if path is None:
-        return _status("gate3.hook", "active",
-                       "no override policy file; built-in default policy in effect",
-                       knobs=["bridge.hook_policy_path"])
-    return _status("gate3.hook", "active", f"override policy: {path}",
-                   knobs=["bridge.hook_policy_path"])
+    policy_detail = "built-in default policy" if path is None else f"override policy: {path}"
+    return _status("gate3.hook", "active", f"{policy_detail}; mode={mode}",
+                   knobs=["bridge.hook_policy_path", "bridge.hook_mode",
+                          "bridge.hook_shadow_log"])
 
 
 def _gate3_broker():

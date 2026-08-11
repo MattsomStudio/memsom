@@ -115,6 +115,13 @@ _register("bridge.claude_md_path", default="", source="env:CLAUDE_MD_PATH",
            doc="Override path to the bundled CLAUDE.md template.")
 _register("bridge.hook_policy_path", default="", source="env:MEMDAG_HOOK_POLICY",
            doc="Override path to the Stop-hook policy file.")
+_register("bridge.hook_mode", default="shadow", source="env:MEMDAG_HOOK_MODE",
+           doc="Gate #3 hook arm: 'shadow' (log would-be decisions, deny nothing) "
+               "or 'enforcing' (emit real PreToolUse denials). PLAN.md Phase 9 "
+               "mandates shadow first.", feature="gate3.hook")
+_register("bridge.hook_shadow_log", default="", source="env:MEMDAG_HOOK_SHADOW_LOG",
+           doc="Override path to Gate #3's shadow decision log "
+               "(default ~/.claude/gate3_shadow.jsonl).", feature="gate3.hook")
 _register("bridge.memory_dir", default="", source="env:MEMDAG_BRIDGE_MEMORY_DIR",
            doc="Override the discovered Claude memory dir (also read directly "
                "by kernel.paths.default_memory_dir -- see module docstring).")

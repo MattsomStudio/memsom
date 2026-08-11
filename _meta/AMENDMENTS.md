@@ -215,3 +215,49 @@ makes and requires no claim about its contents, and gates must not measure it.
 the unfenced `shell` tool (the `write_work` / `patch_work` tools are fenced to the copy; `shell`
 is not). Root-cause hardening -- fencing shell, or keeping live-store-targeting deliverables out of
 copy-confined runs -- is tracked as follow-up, not this phase.
+
+---
+
+## A-18 -- Phase 9 (Gate #3 shadow): hook arm only, broker stays dark, real-traffic soak deferred
+
+**Date:** 2026-08-11
+**Affects:** phase-9, `memsom/bridge/hook.py`, `memsom/tuning.py`, `memsom/interface/features.py`,
+`ARCHITECTURE.md`
+
+**Scope decision 1 -- shadow mode ships for the hook arm, not the broker arm.** Matt's Q2 groups
+"broker, hook-pre/hook-post, capgate, policy, session floors" as one ~1,400 LOC Gate #3, "built,
+tested, and dark." The two arms go dark for different reasons and carry different risk once wired:
+the hook arm intercepts every native tool call (Bash/Edit/WebFetch/...) automatically the moment
+its two lines are added to the operator's Claude Code hooks config -- the highest-frequency, most
+brickable surface, and exactly the one Q2's own rationale ("a gate that wrongly blocks a Bash call
+mid-build gets ripped out the same day") is about. The broker arm requires a second, separate,
+manual step (standing up `memsom-broker` as an MCP server and repointing an MCP client's upstream
+config at it) that has not happened and is not part of this phase; its `decide_and_forward`/
+`_handle` deny logic was already built, tested and CORRECT before this phase (its `--selfcheck`
+proving `allow -> taint -> deny (not forwarded)` is in the standing §6.0.1 gate and is
+intentionally left unchanged). This phase adds real shadow-mode behaviour only to
+`memsom/bridge/hook.py`: a new `bridge.hook_mode` knob (default `"shadow"`) makes `hook-pre` always
+compute and log the verdict to a JSONL shadow log, but only emit a real `permissionDecision: deny`
+when explicitly flipped to `"enforcing"` (verified in `tests/test_memsom_hook.py`). `gate3.hook`'s
+feature detail now reports the active mode; `gate3.broker` is untouched.
+
+**Scope decision 2 -- the exit gate's ">= 7 days of real traffic, 0 denials" and "every would-have-
+denied decision adjudicated" are an operational soak the operator runs after promoting this refactor,
+not something a copy-confined single-session agent can produce.** Doing so would require either (a)
+writing to the operator's real Claude Code hooks config and shadow log to fabricate traffic --
+forbidden, same founding invariant as A-17 -- or (b) inventing synthetic "real traffic" numbers and
+presenting them as measured, which is exactly the failure this run's own diagnostic discipline
+exists to prevent. What ships instead, in the copy: `scripts/shadow_summary.py` and
+`scripts/shadow_falsepos.py` (both pre-existing and already correct -- confirmed via `ast.parse` and
+direct execution against a scratch fixture, not by trusting a garbled tool-result display) plus
+`tests/test_memsom_hook.py::TestShadowMode` and `TestCli`'s shadow-log assertions, proving the whole
+pipeline (decide -> log -> summarize -> false-positive-rate) is correct end to end against synthetic
+data. The real soak, and adding `hook-print-config`'s snippet to the operator's own hooks config, is
+the operator's own action at promote-time.
+
+**MS-40 resolved via the doc-correction path (PLAN.md's second option), not interposition.**
+`ARCHITECTURE.md` no longer claims `check_action` is "the only enforcement point" or that
+"enforcement is action-time only (`check_action`)" -- both corrected to name `check_capability`
+(Gate #3, via the broker and the hooks) as the actual runtime enforcement, with `check_action` now
+described accurately as an advisory, CLI/MCP-invoked-only node-integrity oracle. Pinned by
+`tests/gates/test_gate_ms40_doc_accuracy.py`.

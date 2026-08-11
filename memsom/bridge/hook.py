@@ -11,6 +11,12 @@ and bypass the broker entirely.  Hooks are the supported interception point:
                                          `permissionDecision: deny` and Claude
                                          Code blocks the tool.
 
+SHADOW FIRST (PLAN.md Phase 9, Matt's Q2).  `bridge.hook_mode` defaults to
+"shadow": every PreToolUse decision is computed and logged to
+`~/.claude/gate3_shadow.jsonl` (or $MEMDAG_HOOK_SHADOW_LOG) exactly as it would
+be, but a would-have-denied verdict never reaches stdout -- nothing is ever
+blocked.  Flipping a rule to "enforcing" (per action) is a separate change.
+
 Both key on the Claude `session_id` delivered in the hook payload (bridged into
 memsom via memsom_session.ensure_session), so taint follows the live
 conversation.  The shared brain is memsom_session + memsom_policy +
@@ -86,6 +92,31 @@ def load_hook_policy():
             print(f"[memsom-hook] policy {path} unusable, using built-in default: {exc}",
                   file=sys.stderr)
     return memsom_policy._normalize(DEFAULT_HOOK_POLICY)
+
+
+def hook_mode() -> str:
+    """'shadow' (default, PLAN.md Phase 9) or 'enforcing'."""
+    return str(memsom_tuning.resolve("bridge.hook_mode") or "shadow").strip().lower()
+
+
+def shadow_log_path() -> Path:
+    override = memsom_tuning.resolve("bridge.hook_shadow_log")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".claude" / "gate3_shadow.jsonl"
+
+
+def log_shadow_decision(verdict: dict, tool: str) -> None:
+    """Append one would-be PreToolUse decision to the shadow log (scripts/
+    shadow_summary.py + shadow_falsepos.py's input). Never raises -- a shadow
+    log write failure must not turn into a hook failure."""
+    row = {"ts": memsom.now_iso(), "event": "pre", "action": tool, "rule": tool,
+           "decision": verdict["decision"], "required": verdict["required_name"],
+           "floor": verdict["floor_name"]}
+    path = shadow_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +202,12 @@ def cmd_hook_pre(args):
     except Exception as exc:  # noqa: BLE001 — fail OPEN (availability), logged
         print(f"[memsom-hook] pre error (failing open): {exc}", file=sys.stderr)
         return
+    try:
+        log_shadow_decision(verdict, tool)
+    except Exception as exc:  # noqa: BLE001 -- logging must never break the gate
+        print(f"[memsom-hook] shadow log write failed: {exc}", file=sys.stderr)
+    if hook_mode() != "enforcing":
+        return  # shadow mode: decision logged, nothing ever blocked
     out = pre_output(verdict, tool)
     if out is not None:
         print(json.dumps(out))

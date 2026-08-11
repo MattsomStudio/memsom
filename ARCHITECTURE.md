@@ -64,7 +64,12 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 **Integrity enforcement:**
 - `memsom_ingest` — the real write path: chunking, content-hash dedup (channel-aware), caller-layer guards **F-13** (`MEMDAG_CHANNEL_CEILING` caps ingest rank) and **F-14** (label dictated solely by channel, never a caller-supplied value).
 - `memsom_recompute` — order-independent multi-hop re-flooring (`effective_labels`, memoized DFS, O(V+E)).
-- `memsom_gate` — `check_action(node, required_floor)`: **the only enforcement point** (read paths never gate; the Windows-MIC / CaMeL action-boundary pattern). Names the weakest-leaf culprit on deny; logs every call.
+- `memsom_gate` — `check_action(node, required_floor)`: an **advisory node-integrity
+  oracle** (CLI `check-action` / MCP tool only — zero internal callers, MS-40); read
+  paths never gate. Names the weakest-leaf culprit on deny; logs every call. Runtime
+  enforcement of Gate #3 (what a session may *do*) is `memsom_capgate.check_capability`,
+  interposed by the broker and the native-tool hooks before a consequential call is
+  forwarded — the Windows-MIC / CaMeL action-boundary pattern lives there, not here.
 - `memsom_trust` — lattice `meet`/`join` + **audited `elevate`** (manual only; force-gated on the provenance floor, not the channel string).
 - `memsom_corroborate` — content-free trust *lift*: k independent **registered** roots asserting the same structured claim mint a lift node, **capped at agent-derived(1)**, fail-closed, auto-dropped if any asserting source is revoked.
 
@@ -107,7 +112,10 @@ Channel is stamped by the transport/adapter, **never inferred from content**. `i
 
 - Frozen core is byte-identical across all builds; features are additive-only.
 - One taint primitive (`taint_filter_clauses`) feeds every read pool.
-- Enforcement is **action-time only** (`check_action`); reads are transparent.
+- Enforcement is **action-time only**: Gate #3 (`check_capability`, via the broker
+  and the native-tool hooks) gates what a session may *do*; `check_action` is an
+  advisory node-integrity oracle, invoked manually, never auto-interposed; reads
+  are transparent.
 - History is immutable: tombstone (revoke) / redact (wipe payload, keep shape) / archive (compact) / quarantine (gate) — never an in-place mutation or hard delete by disuse.
 - Integrity min-floor + confidentiality max-ceiling, both content-independent.
 - Deterministic by default; the LLM is opt-in and firewalled.
