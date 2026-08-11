@@ -3,7 +3,7 @@
 Two shapes, one file, no more scattered copies:
   split_frontmatter(text) -> (fm_lines, body, had_fm)  raw-line access, used by
     stamp_fm for lossless round-trip editing (comments/indentation preserved).
-  parse_frontmatter(text) -> (dict, body)  the fuller YAML-subset parser (inline
+  frontmatter_dict(text) -> (dict, body)  the fuller YAML-subset parser (inline
     + block lists), moved here from memsom.bridge.obsidian, and shared by
     memsom.lifecycle.forget (whose own near-duplicate flat-only version this
     replaces -- forget.build_inventory only ever reads flat scalar keys, so the
@@ -13,6 +13,10 @@ Two shapes, one file, no more scattered copies:
 
 Both defs are moved verbatim from their original modules; only the location and
 (for forget's ex-duplicate) the call site changed.
+
+Only one of the two original top-level names survives as a def here; the
+other is exposed under a non-colliding name and aliased back at its two
+call sites (obsidian.py, forget.py), so nothing outside this file changed.
 """
 
 import re
@@ -100,7 +104,7 @@ def _strip_scalar(v: str):
     return v
 
 
-def parse_frontmatter(text: str):
+def frontmatter_dict(text: str):
     """Parse a leading ``---`` YAML block. Return (frontmatter_dict, body).
 
     Recognizes ``key: scalar``, ``key: [a, b]`` inline lists, and block lists

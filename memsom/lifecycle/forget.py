@@ -35,7 +35,7 @@ from pathlib import Path
 
 import memsom
 from memsom.storage import schema as memsom_schema
-from memsom.kernel.frontmatter import parse_frontmatter as _parse_frontmatter
+from memsom.kernel.frontmatter import frontmatter_dict as _parse_frontmatter
 
 
 # ====================================================================== #

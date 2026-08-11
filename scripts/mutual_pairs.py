@@ -1,6 +1,5 @@
-"""Ported from $vaultarea/security/Engagements/memsom-core-baseline-2026-07-31/evidence/edges.py
-(PLAN.md Phase 0, Section 9.5) -- repointed at the local checkout instead of a
-hardcoded ~/memsom, everything else unchanged."""
+"""Ported per PLAN.md Phase 0 Section 9.5 -- repointed at the local checkout
+instead of a hardcoded ~/memsom, everything else unchanged."""
 import ast, collections
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent / "memsom"

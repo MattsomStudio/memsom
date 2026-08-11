@@ -29,6 +29,7 @@ migrate(conn)
 
 parse_frontmatter(text) -> (dict, body)
     Stdlib YAML-subset parser for the leading ``---`` block.  body excludes it.
+    (alias of memsom.kernel.frontmatter.frontmatter_dict)
 
 extract_links(body, frontmatter=None) -> list[str]
     Wikilink + embed + markdown-link targets, code/comments masked out.
@@ -158,7 +159,7 @@ def effective_channel(default_channel: str, declared) -> str:
 # Frontmatter -- moved to memsom.kernel.frontmatter (Phase 3 dedupe)
 # ---------------------------------------------------------------------------
 
-from memsom.kernel.frontmatter import parse_frontmatter
+from memsom.kernel.frontmatter import frontmatter_dict as parse_frontmatter
 
 
 
