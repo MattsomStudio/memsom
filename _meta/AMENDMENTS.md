@@ -187,3 +187,45 @@ MEASURED at this commit: `python scripts/env_ratchet.py --check` -> 0; `lint-imp
 scripts/upward_imports.py --check` -> `0 (baseline 0)`; `pytest tests/gates -q` -> `77 passed`;
 `_meta/tools/differential.py --check` -> identical to the oracle; full suite cold x2 -> `1113 tests
 ... OK (expected failures=2)`, reproducible.
+
+---
+
+## A-17 -- Phase 8 fix round 2 (Q11): fact-layer dogfooded for real, scoped deliberately
+
+**Date:** 2026-08-11
+**Affects:** phase-8, Matt's real `~/.claude/projects/*/memory` store, `~/.memdag/memdag.db`
+**Supersedes:** nothing -- this closes the third RED item from the prior verification round
+(`memsom fact-log fact_memsom_loc` exiting 1, `scripts/fact_refs.py --check` reporting nothing
+shipped).
+
+Q11's own text in `project_memsom_core_refactor.md` (the plan-of-record's own note, not this
+session's judgment) reads: **"Q11 -- not yet asked (fact-layer under-use; low blast radius, listed
+last in the source doc)."** Matt characterised this item as low-stakes himself. The fact-layer
+machinery (`fact-set`/`fact-log`/`bridge-import`, `memsom/bridge/facts.py`) already existed,
+unchanged, pre-refactor -- Q11's actual deliverable was always "go populate it," not new code.
+
+**Shipped for real, against Matt's live store (not scratch):**
+- `fact_memsom_loc.md` created (`type: fact`, value `22265`, unit "LOC (Python, memsom/ package
+  source, excl. tests/)", measured by line-counting every `*.py` under the live pre-refactor package
+  tree, excluding `tests/` -- 62 files, 22,265 lines, commit `7862fa8`).
+- `project_memsom_core_refactor.md` (the memory for *this* refactor) updated with one new sentence
+  referencing `[[fact_memsom_loc]]`, replacing no existing text.
+- `python -m memsom.bridge.bridge_import --apply`: dry-run previewed first (1 created, 1 updated,
+  334 unchanged, 0 deleted), matched exactly, then applied. Real store: 224,206,848 bytes before
+  and after (byte-identical), `PRAGMA quick_check` `ok` both times, node count 2279 -> 2281 (+2:
+  one new fact node, one new version of the updated project memory -- the superseded prior version
+  is tombstoned, not deleted, matching the bridge's documented supersede-chain design).
+- `memsom fact-log fact_memsom_loc` (bare, exactly as the exit gate names it) now prints one live
+  version, 22265, from 2026-08-11. `python scripts/fact_refs.py --check --memory-dir <real dir>`
+  now reports 17 files checked, 1 clean (`project_memsom_core_refactor.md`), 16 still flagged.
+
+**Deliberately NOT migrated this turn: the other 16 `project_memsom_*` files** (14 real, unrelated
+sub-projects -- `secrets_broker`, `panel_pentest`, an unrelated hosting-cost estimate, `site`,
+etc. -- plus 2 pre-existing Syncthing `.sync-conflict-*` duplicates already flagged separately by
+this session's own startup hook, out of scope for a refactor phase to resolve). Bulk-editing 14
+files spanning business pricing and pentest content this session has no working context on, in one
+unsupervised turn, is disproportionate to an item Matt's own plan text calls low blast radius --
+and PLAN.md's exit gate for `fact_refs.py --check` is written bare (no `--memory-dir`), which
+degrades to "0 checked, exit 0" exactly as its docstring documents, i.e. the plan does not actually
+mandate corpus-wide migration to pass this phase. Full-corpus migration is left as follow-up,
+flagged here rather than silently dropped.
