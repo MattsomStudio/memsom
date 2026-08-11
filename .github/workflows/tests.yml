@@ -42,6 +42,12 @@ jobs:
       # memsom is stdlib-only: no pip install of any dependency.
       # TestEndToEndDemo (frozen core) skips itself when the seeded vault
       # note isn't present — expected on CI runners.
+      #
+      # Timed (PLAN.md Sec6 Phase 11: "Windows full-suite wall time <= 3x
+      # Linux, or a written residual with a number in it") -- elapsed wall
+      # time is written to suite_seconds.txt and uploaded as an artifact;
+      # the perf-ratio job below is where the two OSes' numbers actually
+      # get compared, since a single job only ever sees its own OS.
       - name: Run test suite
         # -s tests, not -s . (Phase 0, MEASURED 2026-08-10): with the isolation
         # pin (tests/_isolation.py) wired into tests/__init__.py, "-s ." walks
@@ -50,7 +56,24 @@ jobs:
         # REAL store first. The guard correctly refuses rather than silently
         # writing to it. No test_*.py exists outside tests/, so scoping the
         # start dir there is exactly equivalent coverage, not a narrower run.
-        run: python -W error::DeprecationWarning -m unittest discover -s tests -t . -p "test_*.py" -v
+        id: timed_suite
+        shell: bash
+        run: |
+          start=$(date +%s)
+          set +e
+          python -W error::DeprecationWarning -m unittest discover -s tests -t . -p "test_*.py" -v
+          rc=$?
+          set -e
+          end=$(date +%s)
+          echo "$((end-start))" > suite_seconds.txt
+          exit $rc
+
+      - name: Upload suite timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-timing-${{ matrix.os }}
+          path: suite_seconds.txt
 
       # The frozen core regression gate must pass on its own as well.
       - name: Frozen core regression gate
@@ -59,6 +82,60 @@ jobs:
       # Gate #3 broker entry point boots and enforces allow -> taint -> deny.
       - name: Gate 3 broker selfcheck
         run: python -m memsom.federation.broker --selfcheck
+
+  # ---------------------------------------------------------------------
+  # PLAN.md Sec6 Phase 11 ("bootstrap and three-OS CI"): the bootstrap
+  # contract -- a friend-beta tester's actual first five minutes -- proven
+  # on every OS in the matrix, not just read as code. `memsom` is installed
+  # via `pip install -e .` (not through bootstrap.py's own pipx/venv path)
+  # so the smoke commands below have a reliable console script on PATH
+  # regardless of which installer bootstrap.py chose; bootstrap.py's own
+  # install/wire path is still exercised and its own exit code checked,
+  # independently, in the first step.
+  # ---------------------------------------------------------------------
+  bootstrap-contract:
+    needs: config
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.config.outputs.os) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install memsom (console script on PATH for the smoke steps)
+        run: python -m pip install -e .
+
+      - name: Pin an isolated data dir (never ~/.memdag)
+        shell: bash
+        run: |
+          echo "MEMDAG_HOME=${{ runner.temp }}/memsom_bootstrap_contract" >> "$GITHUB_ENV"
+          echo "MEMDAG_DB=${{ runner.temp }}/memsom_bootstrap_contract/memdag.db" >> "$GITHUB_ENV"
+
+      # --dry-run does NOT exist (the flag is --print-only); --no-ingest is
+      # required or bootstrap.py:237's input() blocks on stdin and hangs CI.
+      - name: bootstrap.py --print-only --no-ingest (MEASURED EXIT=0 required)
+        shell: bash
+        run: python bootstrap.py --print-only --no-ingest --data-dir "$MEMDAG_HOME/bootstrap" < /dev/null
+
+      - name: memsom setup --non-interactive
+        shell: bash
+        run: memsom setup --non-interactive --answers ci/setup_local.json
+
+      - name: init, add, ask, bridge-render, doctor smoke (PLAN.md Sec6 Phase 11 exit gate)
+        shell: bash
+        run: |
+          mkdir -p "$MEMDAG_HOME/render"
+          memsom init && \
+          memsom add "bootstrap-contract smoke fact" --channel user && \
+          memsom ask "smoke fact" && \
+          memsom bridge-render "$MEMDAG_HOME/render" && \
+          memsom doctor --json
 
   # ---------------------------------------------------------------------
   # Architectural contracts. `.importlinter` documents itself as ENFORCED
@@ -124,6 +201,42 @@ jobs:
 
       - name: One write owner for nodes/edges outside the write path
         run: python scripts/gate_writeowner.py --check
+
+  # ---------------------------------------------------------------------
+  # PLAN.md Sec6 Phase 11's perf requirement: "Windows full-suite wall time
+  # <= 3x Linux, or a written residual with a number in it." A single-OS
+  # session cannot itself produce this comparison (see A-20,
+  # scripts/perf_ratio_gate.py's own docstring) -- this job is the actual
+  # enforcement point, comparing the two real numbers the `unittest` job's
+  # matrix legs each recorded. Only meaningful when windows-latest is in
+  # the matrix (PR / schedule / manual, not a plain push).
+  # ---------------------------------------------------------------------
+  perf-ratio:
+    needs: [config, unittest]
+    if: contains(needs.config.outputs.os, 'windows-latest')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: suite-timing-ubuntu-latest
+          path: timing/linux
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: suite-timing-windows-latest
+          path: timing/windows
+
+      - name: Enforce Windows <= 3x Linux full-suite wall time
+        run: >
+          python scripts/perf_ratio_gate.py --check
+          --linux timing/linux/suite_seconds.txt
+          --windows timing/windows/suite_seconds.txt
 
   # Server-side enforcement of the author-identifying-token gate across ALL git
   # history. The pre-push hook (.githooks/pre-push) is opt-in per clone and never

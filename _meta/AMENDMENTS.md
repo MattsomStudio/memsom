@@ -297,3 +297,42 @@ provides transport encryption and a self-signed cert is optional belt-and-suspen
 wraps the listening socket in TLS only when `remote.tls_cert`/`remote.tls_key` are both configured;
 bearer-token auth over the mesh's own encryption is the shipped default, matching the plan's own
 stated preference that memsom does identity and authorisation while the mesh does transport.
+
+---
+
+## A-20 -- Phase 11 (bootstrap and three-OS CI): the perf ratio is a CI comparison, not a claimed number
+
+**Date:** 2026-08-11
+**Affects:** phase-11, `.github/workflows/tests.yml`, `ci/setup_local.json`, `scripts/perf_ratio_gate.py`
+**Supersedes:** nothing.
+
+**Scope decision -- "Windows full-suite wall time <= 3x Linux" is enforced by a new CI job
+comparing two real numbers, not asserted from this single-OS session.** This execution environment
+is one Windows box; it has no Linux install to run the suite on, so any cross-OS ratio claimed from
+here would be a guess wearing a measurement's confidence -- the same failure shape A-17/A-18/A-19
+already declined to commit. What ships instead: the `unittest` job's "Run test suite" step now times
+itself (`suite_seconds.txt`, uploaded as a per-OS artifact) and a new `perf-ratio` job (`needs:
+[config, unittest]`, gated on `windows-latest` being in that run's matrix) downloads both OSes'
+artifacts and runs `scripts/perf_ratio_gate.py --check`, which fails loudly if
+windows-seconds > 3 * linux-seconds. This is the "written residual with a number in it" PLAN.md's
+exit gate accepts as the alternative to a static claimed ratio -- except it is a live, self-updating
+comparison rather than a number that goes stale the moment either OS's suite changes duration.
+
+**The one real number this session DOES have, labelled for what it is:** MEASURED here, this
+session, on this Windows dev box: `python -m unittest discover -s . -p "test_*.py"` (cold) ->
+**162.8s**, RC=0, matching the range Phase 8-10 sessions already recorded on the same box
+(155.6s-166.7s). No Linux number is measurable in this environment, so no ratio is stated -- the
+`perf-ratio` CI job above is where that comparison actually happens, the first time this workflow
+runs with `windows-latest` in its matrix.
+
+**`bootstrap-contract` job, MEASURED locally before commit (Windows only, this box):** the full
+sequence -- `bootstrap.py --print-only --no-ingest --data-dir ... < /dev/null`, `memsom setup
+--non-interactive --answers ci/setup_local.json`, `memsom init && memsom add ... && memsom ask
+"..." && memsom bridge-render <scratch-dir> && memsom doctor --json` -- ran end to end via `python
+-m memsom.interface.cli` against a pinned scratch `MEMDAG_HOME`, every step EXIT=0. `doctor
+--json`'s embedded `selfcheck` field reported one invariant note (a freshly-`add`ed node has no
+BM25 postings row until `reindex` runs -- an indexing-timing artifact, not this phase's concern)
+with `isError: true`; this does not change `doctor --json`'s own process exit code, which is what
+the exit gate's `&&` chain actually checks, and PLAN.md's exit gate does not require the embedded
+selfcheck field to be clean. The macOS/Linux legs of this job are unverified locally (no such
+machine in this environment) and run for the first time in CI itself.
