@@ -33,11 +33,11 @@ import math
 import os
 import struct
 import sys
-import urllib.request
 import json
 import sqlite3
 
 import memsom
+from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
 from memsom.kernel import events as memsom_events
 from memsom.integrity import confid as memsom_confid
@@ -135,11 +135,9 @@ def _call_ollama_embed(text: str, timeout: int = 10):
     payload = json.dumps(memsom_llm._with_keep_alive(
         {"model": model, "prompt": text}
     )).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read())
+    raw = memsom_net.fetch(url, data=payload,
+                         headers={"Content-Type": "application/json"}, timeout=timeout)
+    data = json.loads(raw)
     return data["embedding"]  # list of floats
 
 

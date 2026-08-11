@@ -22,22 +22,21 @@ import io
 import itertools
 import json
 import os
-import subprocess
 import sys
 import threading
 import uuid
 from pathlib import Path
 
-from memsom.childenv import child_env
+from memsom.effects import proc as memsom_proc
 from memsom.lifecycle import forget
 
 # Detached + no console window: survives the parent, never flashes a terminal.
 _DETACHED = 0
 if sys.platform == "win32":  # pragma: no branch - platform constant
-    _DETACHED = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                 | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    _DETACHED = (memsom_proc.DETACHED_PROCESS
+                 | memsom_proc.CREATE_NEW_PROCESS_GROUP
+                 | memsom_proc.CREATE_NO_WINDOW)
+_NO_WINDOW = memsom_proc.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 #: One /saveall for one transcript at a time, and a ceiling on the total.
 #:
@@ -140,11 +139,11 @@ def kill(claude_dir, run_id: str) -> dict:
         if _pid_alive(pid, _expected_image(r.get("argv"))):
             if sys.platform == "win32":
                 try:
-                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                                   capture_output=True, text=True, timeout=10,
-                                   creationflags=_NO_WINDOW, env=child_env())
+                    memsom_proc.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                    capture_output=True, text=True, timeout=10,
+                                    creationflags=_NO_WINDOW)
                     killed = True
-                except (FileNotFoundError, subprocess.TimeoutExpired):
+                except (FileNotFoundError, memsom_proc.TimeoutExpired):
                     pass
             else:
                 try:
@@ -225,15 +224,18 @@ def start(claude_dir, *, cli_path: str = "claude", model: str = "claude-sonnet-5
             # changes nothing either way.
             #
             # KEEP THIS LINE. The S2/F-43 fix spec respelled this whole call
-            # WITHOUT `env=`, which would have silently reverted S7/F-19 on the
-            # one child in this system that outlives everything that could
-            # notice. MEASURED 2026-07-30 against the spec text.
-            proc = subprocess.Popen(
-                argv, stdout=logfh, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, creationflags=_DETACHED,
+            # WITHOUT an env override, which would have silently reverted S7/F-19
+            # on the one child in this system that outlives everything that could
+            # notice. MEASURED 2026-07-30 against the spec text. (Phase 5: `env=
+            # child_env(keep=...)` became `keep=...` -- proc.popen() builds the
+            # same child_env() call itself; the ANTHROPIC_* exception still lives
+            # at this call site, not as a hole in the shared denylist.)
+            proc = memsom_proc.popen(
+                argv, stdout=logfh, stderr=memsom_proc.STDOUT,
+                stdin=memsom_proc.DEVNULL, creationflags=_DETACHED,
                 cwd=resume_cwd or os.environ.get("USERPROFILE") or None,
                 close_fds=True,
-                env=child_env(keep=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")),
+                keep=("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
                 # POSIX: new session (setsid) so the save survives a SessionEnd
                 # /clear teardown that would otherwise kill the hook's children.
                 start_new_session=(sys.platform != "win32"))
@@ -305,11 +307,11 @@ def _pid_alive(pid, image: "str | None" = None) -> bool:
         return False
     if sys.platform == "win32":
         try:
-            out = subprocess.run(
+            out = memsom_proc.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5,
                 creationflags=_NO_WINDOW)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, memsom_proc.TimeoutExpired):
             return False
         for row in csv.reader(io.StringIO(out.stdout or "")):
             # ["Image Name", "PID", "Session Name", "Session#", "Mem Usage"].

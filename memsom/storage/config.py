@@ -19,10 +19,11 @@ Clients:
 import json
 import platform
 import shutil
-import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+from memsom.effects import proc as memsom_proc
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,7 @@ def wire_claude_code(abs_exe, db_path, print_only=False, home=None):
                     {"mcpServers": {"memsom": _json_entry(abs_exe, db_path)}}, indent=2)}
     if cli:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = memsom_proc.run(cmd, capture_output=True, text=True, timeout=30)
             if r.returncode == 0:
                 return {"action": "claude-cli", "path": "(claude mcp add --scope user)"}
             # CLI failed -> fall back to hand-editing the JSON config

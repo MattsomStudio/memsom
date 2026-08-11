@@ -182,8 +182,6 @@ def test_mcp_obsidian_export_node_arg_cannot_inject_an_option():
         f"the node argument became an option: {argv}")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-20 (EFF-02): broker.py:176 rebuilds "
-                                       "the full os.environ")
 def test_broker_upstream_env_excludes_credentials(monkeypatch):
     """The broker's upstream MCP servers are the least-trusted, longest-lived
     children in the tree -- exactly what childenv was written for -- and are the

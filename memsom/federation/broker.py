@@ -35,11 +35,15 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
+import queue
 import sys
+import threading
+import time
 from pathlib import Path
 
 import memsom
+from memsom.childenv import child_env
+from memsom.effects import proc as memsom_proc
 from memsom.integrity import capgate as memsom_capgate
 from memsom.kernel import policy as memsom_policy
 from memsom.storage import schema as memsom_schema
@@ -169,21 +173,40 @@ def pin_check(conn, upstream: str, tools: list) -> set:
 class Upstream:
     """A spawned upstream MCP server reached over stdio JSON-RPC."""
 
+    #: MS-26 -- a hang here has no operator signal otherwise: the RPC read
+    #: loop used to block on stdout.readline() forever if an upstream never
+    #: replies. Matches the timeout memsom uses for other subprocess calls.
+    RPC_TIMEOUT = 30
+
     def __init__(self, name: str, spec: dict):
         self.name = name
         self.command = spec["command"]
         self.args = list(spec.get("args", []))
-        self.env = {**os.environ, **(spec.get("env") or {})}
+        # MS-37: was {**os.environ, **spec.env} -- the full parent environment,
+        # credentials included, handed to the least-trusted, longest-lived
+        # children memsom spawns.
+        self.env = child_env()
+        self.env.update(spec.get("env") or {})
         self.proc = None
         self._id = 0
         self.tools = []
+        self._out_q = queue.Queue()
 
     def start(self):
-        self.proc = subprocess.Popen(
+        self.proc = memsom_proc.popen(
             [self.command, *self.args],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=self.env, text=True, encoding="utf-8", bufsize=1,
+            env=self.env,
+            stdin=memsom_proc.PIPE, stdout=memsom_proc.PIPE, stderr=memsom_proc.PIPE,
+            text=True, encoding="utf-8", bufsize=1,
         )
+        # MS-26: stdout AND stderr must both be drained by a reader that never
+        # blocks the RPC path. A dedicated stdout-pump thread feeds _rpc()
+        # through a queue (with a timeout, so a wedged upstream cannot hang
+        # this process forever); a second thread drains stderr -- past the OS
+        # pipe buffer an undrained stderr=PIPE blocks the CHILD's write(2), and
+        # MCP servers log to stderr by design.
+        threading.Thread(target=self._pump_stdout, daemon=True).start()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
         # initialize handshake
         self._rpc("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
@@ -194,6 +217,21 @@ class Upstream:
         res = self._rpc("tools/list", {})
         self.tools = (res or {}).get("tools", [])
         return self
+
+    def _pump_stdout(self):
+        try:
+            for line in iter(self.proc.stdout.readline, ""):
+                self._out_q.put(line)
+        except (ValueError, OSError):
+            pass  # stop() closed the pipe out from under this thread -- fine
+        self._out_q.put(None)  # sentinel: stream closed
+
+    def _drain_stderr(self):
+        try:
+            for line in iter(self.proc.stderr.readline, ""):
+                print(f"[memsom-broker:{self.name}] {line.rstrip()}", file=sys.stderr)
+        except (ValueError, OSError):
+            pass  # stop() closed the pipe out from under this thread -- fine
 
     def _send(self, msg):
         self.proc.stdin.write(json.dumps(msg) + "\n")
@@ -206,9 +244,16 @@ class Upstream:
         self._id += 1
         my_id = self._id
         self._send({"jsonrpc": "2.0", "id": my_id, "method": method, "params": params})
+        deadline = time.monotonic() + self.RPC_TIMEOUT
         while True:
-            line = self.proc.stdout.readline()
-            if not line:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"upstream {self.name!r} timed out waiting for {method}")
+            try:
+                line = self._out_q.get(timeout=remaining)
+            except queue.Empty:
+                raise RuntimeError(f"upstream {self.name!r} timed out waiting for {method}")
+            if line is None:
                 raise RuntimeError(f"upstream {self.name!r} closed during {method}")
             line = line.strip()
             if not line:
@@ -236,6 +281,10 @@ class Upstream:
                 # terminate/wait failed for any reason (timeout, already dead,
                 # OS error) — force kill as the last-resort cleanup.
                 self.proc.kill()
+        if self.proc:
+            for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                if pipe:
+                    pipe.close()
 
 
 # ---------------------------------------------------------------------------

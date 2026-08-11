@@ -32,3 +32,33 @@ fix commit. Every later phase's `--check` now diffs against the corrected (MS-22
 A-7's own mechanism ("Move phases stay behaviour-preserving and are proven so by the compose
 differential oracle" — the oracle, not a frozen Phase-0 snapshot, is what "behaviour-preserving" means
 after a security phase has deliberately moved the baseline).
+
+---
+
+## A-14 -- `interface/dashboard.py` deletion (Phase 5): the RISKS.md §1.7 grep found a real consumer
+
+**Date:** 2026-08-11
+**Affects:** phase-5, `RISKS.md` §1.7, `DECISIONS-AND-DEVIATIONS.md` A-9/D-13
+**Supersedes:** nothing -- this records a measurement A-9 itself called for and did not have.
+
+`RISKS.md` §1.7 flagged that A-9's basis for deleting `interface/dashboard.py` ("Matt confirmed he
+has never run `memsom dashboard`") did not establish whether anything ELSE imports it, and named the
+exact check: `grep -rn "interface.dashboard|import dashboard" . --include=*.py` across memsom,
+memsom-panel and memsom-agentic-os, "in the same commit" as the delete.
+
+MEASURED, run against `memsom-panel-refactor` and `memsom-agentic-os` (the panel's current homes) at
+this commit: `memsom-agentic-os/backend/memsom_panel/__main__.py:73`,
+`.../transport/activity.py:37` and `.../transport/knobs.py:37` all do `from memsom.interface import
+dashboard`, and use `dashboard.build_telemetry`, `dashboard.default_memory_dir` and
+`dashboard.load_weights` as real, load-bearing calls (the panel's own memory-telemetry cache,
+activity feed and knobs surface) -- not a stray import. The INFERRED risk RISKS.md §1.7 named is
+CONFIRMED: the panel is a real consumer of the module this phase deletes.
+
+**Action taken: deleted anyway**, per Matt's own explicit decision (D-13: re-provision is a backlog
+item, not a refactor deliverable) and `PLAN.md` D-4's already-adopted position that this refactor
+carries no cross-repo exit gate -- memsom-panel's adoption of the eventual Features/Tuning-API-based
+dashboard Feature is that repo's own, separately scheduled fix, not this phase's. Recorded here,
+prominently, so the consequence is visible rather than discovered later: **memsom-panel's telemetry
+cache, activity feed and knobs surface will raise `ImportError` on `memsom.interface.dashboard` the
+moment this refactor's `memsom` package is installed there**, until memsom-panel is updated to consume
+the backlog Feature (`PLAN.md` §8) instead of reaching into memsom's internals directly.

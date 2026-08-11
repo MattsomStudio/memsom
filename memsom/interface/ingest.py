@@ -17,10 +17,9 @@ memsom/__init__.py's Phase 2 facade uses).
 
 import argparse
 import sys
-import urllib.error
-import urllib.request
 
 import memsom
+from memsom.effects import net as memsom_net
 from memsom.integrity.ingest import (  # noqa: F401 -- facade re-export
     CHANNEL_CEILING_ENV,
     BRIDGE_NAMESPACE,
@@ -58,11 +57,9 @@ def ingest_url(conn, url: str) -> list:
     source_ref is set to the URL.
 
     Returns list[int] of node ids.
-    Raises urllib.error.URLError / OSError on network/HTTP failure.
+    Raises memsom.effects.net.NetworkError on network/HTTP failure.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "memsom-ingest/0.1"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        raw = resp.read()
+    raw = memsom_net.fetch(url, headers={"User-Agent": "memsom-ingest/0.1"}, timeout=15)
 
     # Decode: try UTF-8, fall back to latin-1 (always succeeds)
     try:
@@ -127,7 +124,7 @@ def _cmd_ingest_url(args) -> None:
         migrate(conn)
         ids = ingest_url(conn, args.url)
         print(f"ingested {len(ids)} node(s) from {args.url} [channel=external]")
-    except (urllib.error.URLError, OSError) as exc:
+    except memsom_net.NetworkError as exc:
         print(f"[memsom-ingest] fetch failed: {exc}", file=sys.stderr)
         sys.exit(1)
     finally:

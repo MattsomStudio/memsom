@@ -18,6 +18,7 @@ from unittest.mock import patch, MagicMock
 warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
+from memsom.effects import net as memsom_net
 from memsom.interface import ingest as memsom_ingest
 from memsom.storage import schema as memsom_schema
 
@@ -471,7 +472,7 @@ class TestIngestUrl(Base):
             "urllib.request.urlopen",
             side_effect=urllib.error.URLError("connection refused"),
         ):
-            with self.assertRaises(urllib.error.URLError):
+            with self.assertRaises(memsom_net.NetworkError):
                 memsom_ingest.ingest_url(self.conn, "https://unreachable.invalid/")
 
     def test_ingest_url_dedup_same_url_same_content(self):

@@ -35,12 +35,12 @@ import hashlib
 import json
 import math
 import os
-import subprocess
 import sys
 import time
 import sqlite3
 
 import memsom
+from memsom.effects import proc as memsom_proc
 from memsom.storage import schema as memsom_schema
 from memsom.retrieval import qwen_embed
 # Reuse retrieve.py's stdlib helpers — table-agnostic, so no duplication.
@@ -365,7 +365,7 @@ def _git_listed_files(root: str):
     purpose: a file you just created is searchable before you commit it.
     """
     try:
-        out = subprocess.run(
+        out = memsom_proc.run(
             ["git", "-C", root, "ls-files", "-z", "--cached", "--others",
              "--exclude-standard"],
             capture_output=True, timeout=120)
@@ -506,7 +506,7 @@ def _store_vectors(conn: sqlite3.Connection, rows: list) -> int:
 def _git_changed(root: str) -> list:
     """Absolute paths of files touched by HEAD (for the post-commit hook / --changed)."""
     try:
-        out = subprocess.run(
+        out = memsom_proc.run(
             ["git", "-C", root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
             capture_output=True, text=True, timeout=30)
     except Exception:

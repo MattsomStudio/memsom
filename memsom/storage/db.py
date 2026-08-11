@@ -92,8 +92,21 @@ def db_path():
     return Path(os.environ.get("MEMDAG_DB") or _data_dir() / "memdag.db")
 
 
-def get_connection(path=None):
+def get_connection(path=None, *, read_only=False):
+    """*read_only* (Phase 5, effects): the one other connection shape the
+    package needs -- `doctor.py`'s diagnostic read. Same URI/timeout/busy_timeout
+    shape `doctor.py` used to build for itself; centralised here so it is the
+    only caller of sqlite3.connect outside this module (effects_ratchet.py).
+    Raises FileNotFoundError rather than creating an empty store, since a
+    read-only opener has no business initializing one.
+    """
     path = Path(path or db_path())
+    if read_only:
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")  # per-connection, OFF by default

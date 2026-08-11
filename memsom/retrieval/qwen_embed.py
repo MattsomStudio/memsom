@@ -25,8 +25,8 @@ index falls back to BM25-only and never crashes.
 import json
 import os
 import time
-import urllib.request
-import urllib.error
+
+from memsom.effects import net as memsom_net
 
 # The model tag stored in code_embeddings.model — read back with WHERE model=? so a
 # future re-embed with a different model can coexist (the dim-collision discipline).
@@ -79,18 +79,17 @@ def qwen_available(force: bool = False) -> bool:
     if not force and _AVAILABLE is not None and (now - _AVAILABLE_AT) < _PROBE_TTL:
         return _AVAILABLE
     try:
-        with urllib.request.urlopen(_health_url(), timeout=3) as r:
-            ok = (r.status == 200)
-            # The supervisor reports "enabled": false when the panel has toggled the
-            # embedder OFF. Treat that as unavailable so the code index degrades to
-            # BM25-only cleanly, instead of firing embed requests that get refused.
-            if ok:
-                try:
-                    if json.loads(r.read()).get("enabled") is False:
-                        ok = False
-                except Exception:
-                    pass  # older supervisor with no `enabled` key -> 200 means available
-            _AVAILABLE = ok
+        body = memsom_net.fetch(_health_url(), timeout=3)
+        ok = True
+        # The supervisor reports "enabled": false when the panel has toggled the
+        # embedder OFF. Treat that as unavailable so the code index degrades to
+        # BM25-only cleanly, instead of firing embed requests that get refused.
+        try:
+            if json.loads(body).get("enabled") is False:
+                ok = False
+        except Exception:
+            pass  # older supervisor with no `enabled` key -> 200 means available
+        _AVAILABLE = ok
     except Exception:
         _AVAILABLE = False
     _AVAILABLE_AT = now
@@ -100,10 +99,9 @@ def qwen_available(force: bool = False) -> bool:
 def _post(batch, timeout=180):
     """POST a list of strings to /v1/embeddings, return list[list[float]] (raw, native dim)."""
     body = json.dumps({"input": batch, "model": "q"}).encode("utf-8")
-    req = urllib.request.Request(
-        _url(), data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read())["data"]
+    raw = memsom_net.fetch(_url(), data=body,
+                          headers={"Content-Type": "application/json"}, timeout=timeout)
+    data = json.loads(raw)["data"]
     return [row["embedding"] for row in data]
 
 
@@ -122,7 +120,7 @@ def _one(text, timeout=180):
     for cap in (CAP, 800, 400):
         try:
             return _post([base[:cap] + EOS], timeout=timeout)[0]
-        except urllib.error.HTTPError as e:
+        except memsom_net.NetworkError as e:
             if e.code != 400:
                 raise
     raise RuntimeError("qwen 400 even at 400 chars")
@@ -142,7 +140,7 @@ def _embed(texts):
         batch = prepared[i:i + BATCH]
         try:
             rows = _post(batch)
-        except urllib.error.HTTPError as e:
+        except memsom_net.NetworkError as e:
             if e.code != 400:
                 return None
             rows = []

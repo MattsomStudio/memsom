@@ -49,27 +49,29 @@
   },
   "effects.spawns_without_timeout": {
     "control": "control-tested: MS-29 (bare `git` resolve) is one of these at Phase 0",
+    "note": "Phase 5: down to 1 -- effects/proc.py:popen(), the package's one canonical Popen wrapper. subprocess.Popen.__init__ has no timeout= parameter (unlike run/call/check_call/check_output), so this line cannot satisfy the AST check and is the honest floor, not an oversight. The two real MS-26/MS-37 long-lived Popen call sites this replaced (broker's Upstream, saveall's detached /saveall child) collapsed into this one wrapper; broker's actual hang risk (MS-26) is fixed separately via a read timeout on the RPC queue, not a spawn timeout.",
     "source": "python scripts/effects_ratchet.py --timeouts",
     "target": 0,
-    "value": 4
+    "value": 1
   },
   "effects.sqlite3_connect_sites": {
     "control": "control-tested: dashboard.py's 3 + doctor.py's 1 (+1 elsewhere) at Phase 0",
+    "note": "Phase 5: down to 0, not the plan's documented '2' -- dashboard.py (3 sites) was deleted and doctor.py:38 (1 site) now calls memsom.get_connection(read_only=True) instead of sqlite3.connect() directly, so both PLAN.md-cited sources are fully gone rather than reduced. No third site was found by AST across the package outside storage/db.py.",
     "source": "python scripts/effects_ratchet.py --connect",
     "target": 2,
-    "value": 5
+    "value": 0
   },
   "effects.subprocess_importers": {
     "control": "baseline recorded fresh at Phase 0",
     "source": "python scripts/effects_ratchet.py",
     "target": 1,
-    "value": 6
+    "value": 1
   },
   "effects.urllib_importers": {
     "control": "baseline recorded fresh at Phase 0",
     "source": "python scripts/effects_ratchet.py",
     "target": 1,
-    "value": 7
+    "value": 1
   },
   "env_ratchet.reads_outside_tuning": {
     "control": "tuning.py does not exist before Phase 8; this baseline is the full-repo count today, not yet a real violation total",

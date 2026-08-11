@@ -13,10 +13,9 @@ No DB opened at import time.
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 
 import memsom
+from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
 
 # 127.0.0.1, not localhost — see memsom_retrieve.DEFAULT_EMBED_URL: avoids the
@@ -194,17 +193,14 @@ def llm_compose(question, sources, model=None, base_url=None, timeout=60):
     payload = json.dumps(_with_keep_alive(
         {"model": m, "prompt": prompt, "stream": False}
     )).encode("utf-8")
-    req = urllib.request.Request(base, data=payload,
-                                 headers={"Content-Type": "application/json"})
 
     # Step 3: call Ollama
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        raw = memsom_net.fetch(base, data=payload,
+                              headers={"Content-Type": "application/json"}, timeout=timeout)
         data = json.loads(raw)
         answer_raw = data["response"].strip()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError,
-            json.JSONDecodeError, KeyError) as err:
+    except (memsom_net.NetworkError, json.JSONDecodeError, KeyError) as err:
         raise LlmUnavailable(f"ollama unreachable or malformed reply: {err}") from err
 
     # Step 4: strip <think>...</think> residue
@@ -316,9 +312,9 @@ def ping(base_url=None, timeout=5):
     # Swap /api/generate for /api/tags
     tags_url = url.replace("/api/generate", "/api/tags")
     try:
-        with urllib.request.urlopen(tags_url, timeout=timeout) as resp:
-            return resp.status == 200
-    except Exception:
+        memsom_net.fetch(tags_url, timeout=timeout)
+        return True
+    except memsom_net.NetworkError:
         return False  # unreachable/timeout/HTTP error -> not reachable (see docstring)
 
 

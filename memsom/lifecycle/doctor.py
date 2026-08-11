@@ -10,14 +10,13 @@ reachability probe. Never raises on a dead Ollama or a fresh/locked DB.
 import json
 import os
 import platform
-import sqlite3
-import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import memsom
+from memsom.effects import net as memsom_net
+from memsom.effects import proc as memsom_proc
 
 
 def _version():
@@ -29,20 +28,21 @@ def _version():
 
 
 def _node_count():
-    # Read-only + busy_timeout: memsom runs in rollback-journal (not WAL) mode, so
-    # a concurrent client writer could otherwise raise 'database is locked'.
+    # Read-only: memsom.get_connection(read_only=True) is the one other
+    # connection shape the package needs (Phase 5, effects) -- it carries the
+    # same busy_timeout memsom's rollback-journal (not WAL) mode needs, so a
+    # concurrent client writer cannot make this raise 'database is locked'.
     db = Path(memsom.db_path())
     if not db.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        conn = memsom.get_connection(read_only=True)
         try:
-            conn.execute("PRAGMA busy_timeout=5000")
             return conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         finally:
             conn.close()
     except Exception:
-        return None  # DB missing/locked/corrupt — node count unknown, not fatal
+        return None  # DB missing/locked/corrupt -- node count unknown, not fatal
 
 
 def _ollama_status():
@@ -51,8 +51,8 @@ def _ollama_status():
     root = f"{parts.scheme}://{parts.netloc}"
     model = os.environ.get("MEMDAG_EMBED_MODEL") or "nomic-embed-text"
     try:
-        with urllib.request.urlopen(root + "/api/tags", timeout=3) as r:
-            data = json.loads(r.read())
+        body = memsom_net.fetch(root + "/api/tags", timeout=3)
+        data = json.loads(body)
         names = [m.get("name", "") for m in data.get("models", [])]
         return {"reachable": True, "model": model,
                 "model_present": any(model in n for n in names)}
@@ -64,9 +64,9 @@ def _selfcheck():
     try:
         # encoding pinned: text=True alone decodes with the locale codec (cp1252
         # on Windows), which crashes on the child's UTF-8 output (e.g. a ✓/⚠).
-        r = subprocess.run([sys.executable, "-m", "memsom.interface.mcp", "--selfcheck"],
-                           capture_output=True, text=True, timeout=30,
-                           encoding="utf-8", errors="replace")
+        r = memsom_proc.run([sys.executable, "-m", "memsom.interface.mcp", "--selfcheck"],
+                            capture_output=True, text=True, timeout=30,
+                            encoding="utf-8", errors="replace")
         return {"returncode": r.returncode, "output": (r.stdout + r.stderr).strip()}
     except Exception as exc:
         return {"returncode": None, "output": f"selfcheck failed to run: {exc}"}

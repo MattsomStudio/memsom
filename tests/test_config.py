@@ -53,7 +53,7 @@ class TestClaudeCodeRouting(unittest.TestCase):
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         with mock.patch.object(memsom_config.shutil, "which", return_value="/usr/bin/claude"), \
-             mock.patch.object(memsom_config.subprocess, "run", side_effect=fake_run):
+             mock.patch.object(memsom_config.memsom_proc, "run", side_effect=fake_run):
             res = memsom_config.wire_claude_code("/abs/memsom-mcp", "/abs/db", home=self.home)
         self.assertEqual(res["action"], "claude-cli")
         self.assertEqual(calls[0][:4], ["claude", "mcp", "add", "memsom"])

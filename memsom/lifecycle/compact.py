@@ -30,10 +30,9 @@ import argparse
 import json
 import sqlite3
 import sys
-import urllib.error
-import urllib.request
 
 import memsom
+from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
 from memsom.retrieval import rederive as memsom_rederive
 from memsom.integrity import quarantine as memsom_quarantine
@@ -259,15 +258,11 @@ def _llm_summarize(rows, model=None, base_url=None, timeout=60) -> str:
         "prompt": prompt,
         "stream": False,
     })).encode("utf-8")  # keep_alive stamped only when the env knob is set
-    req = urllib.request.Request(
-        base, data=payload, headers={"Content-Type": "application/json"}
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+        raw = memsom_net.fetch(base, data=payload,
+                              headers={"Content-Type": "application/json"}, timeout=timeout)
         answer = json.loads(raw)["response"].strip()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            TimeoutError, json.JSONDecodeError, KeyError) as err:
+    except (memsom_net.NetworkError, json.JSONDecodeError, KeyError) as err:
         raise memsom_llm.LlmUnavailable(
             f"ollama unreachable or malformed reply: {err}"
         ) from err
