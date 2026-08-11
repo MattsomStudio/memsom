@@ -199,6 +199,23 @@ _register("retrieval.bge_device", default="", source="env:MEMDAG_BGE_DEVICE",
 _register("retrieval.bge_unload", default="", source="env:MEMDAG_BGE_UNLOAD",
            doc="Unload the BGE-M3 model after a batch reindex.", feature="retrieval.bge")
 
+_register("storage.sync_extra_markers", default="", source="env:MEMSOM_EXTRA_SYNC_MARKERS",
+           doc="Comma-separated extra file-sync marker names, visibility only -- "
+               "kernel.syncguard (rank 0) reads MEMSOM_EXTRA_SYNC_MARKERS itself "
+               "(cannot import tuning upward). Same pattern as bridge.memory_dir.")
+_register("remote.action_gate_mode", default="shadow", source="env:MEMDAG_REMOTE_ACTION_GATE_MODE",
+           doc="Remote mutate calls' action-gate (capgate.check_capability) mode: "
+               "'shadow' (log the verdict, deny nothing beyond the capability "
+               "table) or 'enforcing'. PLAN.md Phase 10 mandates shadow first, "
+               "same schedule as bridge.hook_mode.", feature="remote.server")
+_register("remote.export_dir", default="", source="env:MEMSOM_REMOTE_EXPORT_DIR",
+           doc="Directory a remote export tool call may write into.")
+_register("remote.tls_cert", default="", source="env:MEMSOM_REMOTE_TLS_CERT",
+           doc="Optional self-signed cert for remote serve (mesh already encrypts).",
+           feature="remote.server")
+_register("remote.tls_key", default="", source="env:MEMSOM_REMOTE_TLS_KEY",
+           doc="Private key matching remote.tls_cert.", feature="remote.server")
+
 
 # ---------------------------------------------------------------------------
 # CLI -- `memsom tuning list|get|set`

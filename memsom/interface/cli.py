@@ -79,6 +79,9 @@ from memsom.lifecycle import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
 from memsom import tuning as memsom_tuning
 from memsom.interface import features as memsom_features
+from memsom.interface import remote as memsom_remote
+from memsom.interface import serve as memsom_serve
+from memsom.interface import setup as memsom_setup
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +147,7 @@ def migrate_all(conn):
     memsom_obsidian.migrate(conn)
     memsom_rederive.migrate(conn)
     memsom_stale.migrate(conn)
+    memsom_remote.migrate(conn)
     # Versioned, once-only steps run AFTER all additive per-module migrate()s.
     # Owns operations that must run exactly once in order (e.g. the destructive
     # status-CHECK table rebuild) and is gated by PRAGMA user_version.
@@ -957,6 +961,9 @@ def main(argv=None):
     memsom_tombstone.register(sub)
     memsom_contradict.register(sub)
     memsom_facts.register(sub)
+    memsom_setup.register(sub)
+    memsom_serve.register(sub)
+    memsom_remote.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

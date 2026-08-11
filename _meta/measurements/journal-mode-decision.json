@@ -1,0 +1,37 @@
+{
+  "decision": "wal",
+  "kind": "SYNTHETIC benchmark -- see module docstring; not a substitute for the real four-writer measurement PLAN.md Sec3 requires before serve.py is deployed",
+  "rationale": "rollback-journal: 761.3/s reads under 1 concurrent writer (0 lock errors); WAL: 129921.3/s reads (0 lock errors). WAL cleared the >10% throughput bar under this synthetic load, so it is the recommendation -- re-verify against the real store before flipping storage/db.py's journal_mode.",
+  "results": {
+    "delete": {
+      "duration_s": 1.5,
+      "journal_mode": "delete",
+      "read_errors_total": 0,
+      "reads_per_reader": [
+        890,
+        47,
+        59,
+        146
+      ],
+      "reads_per_second": 761.3,
+      "reads_total": 1142,
+      "write_errors": 0,
+      "writes": 801
+    },
+    "wal": {
+      "duration_s": 1.5,
+      "journal_mode": "wal",
+      "read_errors_total": 0,
+      "reads_per_reader": [
+        48730,
+        53257,
+        46066,
+        46829
+      ],
+      "reads_per_second": 129921.3,
+      "reads_total": 194882,
+      "write_errors": 0,
+      "writes": 4865
+    }
+  }
+}

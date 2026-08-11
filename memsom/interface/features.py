@@ -234,11 +234,28 @@ def _distill():
 # ---------------------------------------------------------------------------
 
 def _remote_server():
-    return _status("remote.server", "absent", "deployment modes ship in Phase 10")
+    import memsom
+    from memsom.storage import settings as memsom_settings
+    settings = memsom_settings.load_settings(memsom.DATA_DIR)
+    if settings.get("mode") != "server":
+        return _status("remote.server", "disabled", "mode != 'server' (see `memsom setup`)",
+                       knobs=["remote.action_gate_mode"])
+    bind = settings.get("bind") or "(auto-discovered)"
+    gate_mode = memsom_tuning.resolve("remote.action_gate_mode")
+    return _status("remote.server", "active",
+                   f"bind={bind} port={settings.get('port')} action_gate={gate_mode}",
+                   knobs=["remote.action_gate_mode"])
 
 
 def _remote_client():
-    return _status("remote.client", "absent", "deployment modes ship in Phase 10")
+    import memsom
+    from memsom.storage import settings as memsom_settings
+    settings = memsom_settings.load_settings(memsom.DATA_DIR)
+    if settings.get("mode") != "client":
+        return _status("remote.client", "disabled", "mode != 'client' (see `memsom setup`)",
+                       knobs=[])
+    url = settings.get("remote_server_url") or "(unset)"
+    return _status("remote.client", "active", f"server={url}", knobs=[])
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +358,35 @@ def _table_exists(conn) -> bool:
     ).fetchone() is not None
 
 
+def _remote_server_features_block(statuses: dict) -> dict | None:
+    """Client mode only (Sec3.6): fetch the SERVER's own `/features` block so
+    `memsom features --json` shows BOTH blocks -- what this machine can do,
+    and what the machine it talks to can do. Best-effort: an unreachable
+    server degrades to a small error dict, never an exception -- a features
+    probe must never crash the whole command."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    client = statuses.get("remote.client")
+    if client is None or client["state"] != "active":
+        return None
+    import memsom
+    from memsom.storage import settings as memsom_settings
+    settings = memsom_settings.load_settings(memsom.DATA_DIR)
+    url = (settings.get("remote_server_url") or "").rstrip("/")
+    if not url:
+        return {"error": "remote.client active but remote_server_url is unset"}
+    token = settings.get("remote_device_token", "")
+    req = urllib.request.Request(f"{url}/features",
+                                 headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:  # noqa: S310 -- operator-configured URL
+            return json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"error": f"unreachable: {exc}"}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -360,7 +406,11 @@ def _cmd_features(args):
             conn.close()
 
     if getattr(args, "json", False):
-        print(json.dumps(statuses, indent=2))
+        payload = dict(statuses)
+        remote_block = _remote_server_features_block(statuses)
+        if remote_block is not None:
+            payload["_remote_server_features"] = remote_block
+        print(json.dumps(payload, indent=2))
         return
 
     exit_bad = False

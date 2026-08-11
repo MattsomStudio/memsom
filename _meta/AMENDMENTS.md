@@ -261,3 +261,39 @@ the operator's own action at promote-time.
 (Gate #3, via the broker and the hooks) as the actual runtime enforcement, with `check_action` now
 described accurately as an advisory, CLI/MCP-invoked-only node-integrity oracle. Pinned by
 `tests/gates/test_gate_ms40_doc_accuracy.py`.
+
+---
+
+## A-19 -- Phase 10 (deployment modes): synthetic journal-mode evidence, action gate ships shadow
+
+**Date:** 2026-08-11
+**Affects:** phase-10, `_meta/tools/journal_mode_contention.py`, `memsom/interface/remote.py`,
+`memsom/interface/serve.py`, `memsom/tuning.py`
+
+**Scope decision 1 -- the journal-mode measurement PLAN.md Sec3 calls for is a SYNTHETIC benchmark,
+labelled as such, not the real four-writer load it names.** Sec3's own text is explicit that the
+deciding measurement is "contention under real four-writer load, not a synthetic benchmark," to be
+run against a copy of the live store before serve.py's first commit. A copy-confined session has no
+access to that live store -- the same founding invariant A-17 and A-18 already named. What ships
+instead: `_meta/tools/journal_mode_contention.py --write`, a reader/writer thread benchmark against
+a throwaway schema copy, its output and its module docstring both stating plainly that the result is
+synthetic and that the real measurement is still owed before `serve.py` is actually deployed. The
+recorded artifact (`_meta/measurements/journal-mode-decision.json`) is evidence that the required
+exit-gate step ran and produced a reasoned, honestly-labelled recommendation (WAL, on this
+synthetic load) -- not a substitute for re-verifying against production data.
+
+**Scope decision 2 -- the remote mutate action gate ships in shadow mode, matching the ordering
+PLAN.md Sec3.5 point 4 states and the precedent Phase 9 already set for the hook arm.** Two gates
+run in series on every remote mutate call: the capability table (device.capabilities, a static
+per-tool allowlist) is fully enforcing from this phase's first commit; `capgate.check_capability`
+(the session-floor action gate, keyed per device via `storage.session.begin_session`) is always
+computed and always logged to `capability_log`, but only blocks once the new
+`remote.action_gate_mode` knob is flipped from its shadow default to enforcing -- the same shape
+`bridge.hook_mode` already shipped and the same reason: a gate that can wrongly block a legitimate
+remote mutate call before its false-positive rate is known gets ripped out, not fixed.
+
+**Scope decision 3 -- TLS is optional and off by default.** Sec3.5 point 5 states the mesh already
+provides transport encryption and a self-signed cert is optional belt-and-suspenders. `serve.py`
+wraps the listening socket in TLS only when `remote.tls_cert`/`remote.tls_key` are both configured;
+bearer-token auth over the mesh's own encryption is the shipped default, matching the plan's own
+stated preference that memsom does identity and authorisation while the mesh does transport.

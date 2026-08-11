@@ -1,0 +1,4 @@
+{
+  "mode": "local",
+  "data_dir": "tests/fixtures/syncdir_probe/nested_store"
+}

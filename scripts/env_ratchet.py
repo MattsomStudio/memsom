@@ -19,6 +19,12 @@ length in memsom/tuning.py's module docstring:
 * kernel/paths.py (MEMDAG_BRIDGE_MEMORY_DIR) -- kernel is rank 0 and cannot
   import tuning upward. The knob is still registered in tuning.py (visible
   to `tuning list`); kernel/paths.py keeps its own independent read.
+* kernel/syncguard.py (MEMSOM_EXTRA_SYNC_MARKERS, plus the OneDrive/
+  OneDriveCommercial/OneDriveConsumer sync-root env vars, Phase 10) -- same
+  reason as kernel/paths.py above: rank 0, cannot import tuning. The custom-
+  marker knob is registered in tuning.py as `storage.sync_extra_markers` for
+  `tuning list` visibility; the OneDrive vars are OS/vendor state, not a
+  memsom knob, same category as $PATH below.
 * Any file's read of $PATH (effects/proc.py today) -- not a memsom knob, the
   OS executable search path, the same category `shutil.which` reads.
 * childenv.py copies the WHOLE `os.environ` mapping (`dict(os.environ)`) to
@@ -38,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _gatelib as g  # noqa: E402
 
 _OWNER = "tuning.py"
-_BOOTSTRAP_EXEMPT_FILES = {"kernel/paths.py", "childenv.py"}
+_BOOTSTRAP_EXEMPT_FILES = {"kernel/paths.py", "childenv.py", "kernel/syncguard.py"}
 _BOOTSTRAP_EXEMPT_VARS = {"PATH", "MEMDAG_HOME", "MEMDAG_DB"}
 
 

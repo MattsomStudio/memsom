@@ -20,6 +20,9 @@ import sqlite3
 import importlib
 from pathlib import Path
 
+from memsom.kernel import syncguard as memsom_syncguard
+from memsom.storage import settings as memsom_settings
+
 
 def _data_dir():
     return Path(os.environ.get("MEMDAG_HOME") or Path.home() / ".memdag")
@@ -92,6 +95,32 @@ def db_path():
     return Path(os.environ.get("MEMDAG_DB") or _data_dir() / "memdag.db")
 
 
+def _check_sync_safety(path: Path) -> None:
+    """PLAN.md Sec3.4, run-time enforcement twin of `memsom setup`'s check.
+
+    Refuses to open a WRITE connection whose data dir sits inside a detected
+    file-sync tree (corruption risk; MS-28: a synced store pushes redacted
+    plaintext's freed-but-recoverable pages to every peer and backup snapshot).
+    The only escape is `"sync_check": "acknowledged-unsafe"` in memsom.json,
+    written by hand -- there is no env var that silently disables it.
+    """
+    data_dir = path.parent
+    markers = memsom_syncguard.sync_markers(data_dir)
+    if not markers:
+        return
+    settings = memsom_settings.load_settings(data_dir)
+    if settings.get("sync_check") == "acknowledged-unsafe":
+        return
+    raise memsom_syncguard.SyncGuardError(
+        "refusing to open a store inside a synced folder: " + "; ".join(markers) +
+        ". Corruption risk (three independent research notes flagged "
+        "SQLite-over-sync) and MS-28 (redacted plaintext recoverable from freed "
+        "pages pushed to every peer/backup). Move the store, or acknowledge the "
+        "risk by hand with \"sync_check\": \"acknowledged-unsafe\" in " +
+        str(memsom_settings.settings_path(data_dir)) + "."
+    )
+
+
 def get_connection(path=None, *, read_only=False):
     """*read_only* (Phase 5, effects): the one other connection shape the
     package needs -- `doctor.py`'s diagnostic read. Same URI/timeout/busy_timeout
@@ -107,6 +136,7 @@ def get_connection(path=None, *, read_only=False):
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         conn.execute("PRAGMA busy_timeout = 5000")
         return conn
+    _check_sync_safety(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")  # per-connection, OFF by default
