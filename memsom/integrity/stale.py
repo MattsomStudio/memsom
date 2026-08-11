@@ -74,6 +74,15 @@ def migrate(conn):
     memsom_schema.add_column(conn, "nodes", "stale_at",     "TEXT")
     memsom_schema.add_column(conn, "nodes", "stale_reason", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_stale ON nodes(stale)")
+    # MS-09: freshen's edge rewire used to hard-DELETE the old provenance edge
+    # (the only hard delete on nodes/edges in the package). It is superseded
+    # in place instead: superseded_at is NULL for an active edge, set once
+    # freshen repoints the child at a fresher parent. parents_of / cascade
+    # walks stay UNFILTERED (history is immutable; revoke must still reach a
+    # descendant through a superseded edge) -- only rederive._live_parents
+    # excludes superseded edges, so regenerate() replays from the fresh
+    # parent only.
+    memsom_schema.add_column(conn, "edges", "superseded_at", "TEXT")
     # source_supersedes: old->new for SOURCE nodes. derivation_recipe.supersedes
     # only covers DERIVED nodes; a re-ingested source has no recipe, so it needs
     # its own home. old_id PK = each old version superseded at most once FORWARD,
@@ -383,12 +392,16 @@ def freshen(conn, node_id):
     """Repoint *node_id* at the fresh version of each stale source parent, then
     regenerate. The ONE provenance-rewriting operation — explicit, atomic, audited.
 
-    Steps: (1) drop edge node->old_parent, add edge node->fresh_parent (one txn +
-    audit row per rewire); (2) memsom_rederive.regenerate(node) replays the recipe
-    over the now-fresh live parents, mints a new node, archives the old, chains
-    supersedes, and re-floors integrity (min) + confidentiality (max). If
-    regenerate is a byte-identical no-op (the change didn't move the answer), the
-    node is simply un-staled in place.
+    Steps, ALL inside one transaction (MS-36 — the rewire and the regenerate
+    call used to be separate transactions, so a crash between them could reach
+    the MS-03 state by a second route): (1) mark edge node->old_parent
+    superseded (MS-09 — never hard-deleted; parents_of/cascade still walk it,
+    only rederive._live_parents excludes it) and add edge node->fresh_parent,
+    with an audit row per rewire; (2) memsom_rederive.regenerate(node) replays
+    the recipe over the now-fresh live parents, mints a new node, archives the
+    old, chains supersedes, and re-floors integrity (min) + confidentiality
+    (max). If regenerate is a byte-identical no-op (the change didn't move the
+    answer), the node is simply un-staled in place.
 
     MUST be called OUTSIDE an open transaction (regenerate manages its own).
     Returns {node_id, rewired, regenerated}.
@@ -399,33 +412,40 @@ def freshen(conn, node_id):
                 "note": "no stale parent with a fresh version"}
 
     ts = _now()
+    new_id = None
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         for old_p, new_p in rewires:
-            conn.execute("DELETE FROM edges WHERE child = ? AND parent = ?",
-                         (node_id, old_p))
+            conn.execute("UPDATE edges SET superseded_at = ?"
+                         " WHERE child = ? AND parent = ? AND superseded_at IS NULL",
+                         (ts, node_id, old_p))
             conn.execute("INSERT OR IGNORE INTO edges(child, parent) VALUES (?,?)",
                          (node_id, new_p))
             _log(conn, "freshen-rewire", node_id=node_id, related_id=new_p,
-                 reason=f"rewired parent {old_p}->{new_p}", at=ts)
+                 reason=f"superseded parent {old_p}->{new_p}", at=ts)
 
-    # regenerate reads node_id's now-fresh live parents, mints + archives + chains.
-    new_id = memsom_rederive.regenerate(conn, node_id)
-    if new_id is None:
-        # Rewired to fresh parents but content is byte-identical -> the node is
-        # current now; clear its stale flag in place.
-        # MS-03: re-floor BOTH axes before un-staling — mirrors what
-        # regenerate() itself does on its success path (rederive.py:
-        # memsom.derive_node's min(parents) + memsom_confid.recompute_conf).
-        # Without this, check_action — documented as THE only enforcement
-        # point — kept reading the STALE stored label after an un-stale that
-        # rewired onto a lower-integrity parent, and allowed. `regenerate`
-        # returns None on five paths; the DOMINANT one is no recipe, which is
-        # what the frozen-core `ask` and every federation import produce.
-        memsom_confid.migrate(conn)  # conf_label may not exist yet on this DB
-        memsom_recompute.recompute_node(conn, node_id)
-        memsom_confid.recompute_conf(conn, node_id)
-        unstale(conn, node_id)
-    with conn:
+        # regenerate reads node_id's now-fresh live parents, mints + archives +
+        # chains. MS-36: still inside the same transaction as the rewire above
+        # -- if regenerate raises (schema missing, whatever the cause), the
+        # `with conn:` exit rolls back the supersede + new edge together with
+        # it, so a partial rewire can never be observed.
+        new_id = memsom_rederive.regenerate(conn, node_id)
+        if new_id is None:
+            # Rewired to fresh parents but content is byte-identical -> the node is
+            # current now; clear its stale flag in place.
+            # MS-03: re-floor BOTH axes before un-staling — mirrors what
+            # regenerate() itself does on its success path (rederive.py:
+            # memsom.derive_node's min(parents) + memsom_confid.recompute_conf).
+            # Without this, check_action — documented as THE only enforcement
+            # point — kept reading the STALE stored label after an un-stale that
+            # rewired onto a lower-integrity parent, and allowed. `regenerate`
+            # returns None on five paths; the DOMINANT one is no recipe, which is
+            # what the frozen-core `ask` and every federation import produce.
+            memsom_confid.migrate(conn)  # conf_label may not exist yet on this DB
+            memsom_recompute.recompute_node(conn, node_id)
+            memsom_confid.recompute_conf(conn, node_id)
+            unstale(conn, node_id)
         _log(conn, "freshen-regen", node_id=node_id, related_id=new_id,
              reason="regenerated" if new_id else "regenerate noop (unstaled in place)")
     return {"node_id": node_id, "rewired": rewires, "regenerated": new_id}

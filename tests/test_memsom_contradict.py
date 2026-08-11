@@ -23,7 +23,7 @@ warnings.simplefilter("error", DeprecationWarning)
 import memsom
 from memsom.interface import ingest as memsom_ingest
 from memsom.integrity import stale as memsom_stale
-from memsom.integrity import contradict as memsom_contradict
+from memsom.lifecycle import contradict as memsom_contradict
 
 
 def flag_when(pred, score=0.99):

@@ -41,10 +41,11 @@ from pathlib import Path
 
 import memsom
 from memsom.kernel.paths import default_memory_dir
+from memsom.kernel import chunking as memsom_chunking
 from memsom.kernel.frontmatter import (
     split_frontmatter, fm_top_level, memory_type, stamp_fm, stamp_section,
 )
-from memsom.interface import ingest as memsom_ingest
+from memsom.integrity import ingest as memsom_ingest
 from memsom.storage import schema as memsom_schema
 
 
@@ -262,9 +263,15 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 stats["created"] += 1
                 if dry_run:
                     continue
-            nid = memsom.insert_node(conn, content, "endorsed", source_ref=sref)
+            # MS-20: route the channel through the F-13 ceiling guard even
+            # though it is hardcoded here -- consistent with import_memory_dir
+            # below, and defends this mint point if that ever changes.
+            memsom_ingest.enforce_channel_ceiling("endorsed")
+            nid = memsom.insert_node(conn, content, "endorsed",
+                                     label=memsom_ingest.authoritative_label("endorsed"),
+                                     source_ref=sref)
             conn.execute("UPDATE nodes SET content_hash = ? WHERE id = ?",
-                         (memsom_ingest._content_hash(content), nid))
+                         (memsom_chunking.content_hash(content), nid))
         for sref, nid in existing.items():
             if sref not in desired:
                 stats["tombstoned"] += 1
@@ -449,6 +456,16 @@ def relate_fact_deps(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 conn.execute(
                     "INSERT OR IGNORE INTO edges(child, parent) VALUES (?, ?)",
                     (child, parent))
+            # MS-21: a depends_on edge is a Biba derivation edge in the SAME
+            # `edges` table CASCADE_CTE and derive_node's own min(parents)
+            # clamp both treat as provenance -- it must not sit un-reflected
+            # in the child's stored label. Re-derive (not re-mint: this is
+            # an edit of an EXISTING fact, not a fresh compose) via the same
+            # multi-hop walk heal.check()/recompute_all use, so revoking the
+            # depended-on fact later floors this child exactly as any other
+            # derived node would.
+            from memsom.integrity import recompute as memsom_recompute
+            memsom_recompute.recompute_node(conn, child)
             stats["edges"] += 1
 
     return stats
@@ -580,7 +597,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 title = title or fm.get("index_title") or prev.get("index_title")
                 hook = hook or fm.get("index_hook") or prev.get("index_hook")
             stamped = stamp_fm(raw, section=section, index_title=title, index_hook=hook)
-            new_hash = memsom_ingest._content_hash(stamped)
+            new_hash = memsom_chunking.content_hash(stamped)
 
             existing = _live_node_for_path(conn, rel)
 
@@ -622,7 +639,16 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             else:
                 stats["created"] += 1
 
-            nid = memsom.insert_node(conn, stamped, channel, source_ref=f"memory:{stem}")
+            # MS-20: `channel` above is read from the file's OWN frontmatter
+            # `type:` (via CHANNEL_BY_TYPE) -- the file body dictating its own
+            # trust channel is the inverse of invariant 1. Route it through
+            # the F-13/F-14 guards the way every other stamping entry point
+            # does, so MEMDAG_CHANNEL_CEILING actually bounds what a memory
+            # file can claim, and the label always matches RANK[channel].
+            memsom_ingest.enforce_channel_ceiling(channel)
+            nid = memsom.insert_node(conn, stamped, channel,
+                                     label=memsom_ingest.authoritative_label(channel),
+                                     source_ref=f"memory:{stem}")
             conn.execute(
                 "UPDATE nodes SET bridge_path = ?, bridge_mtime = ?, content_hash = ? "
                 "WHERE id = ?",
@@ -694,6 +720,31 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
         # reason memsom_ingest.ingest_text fires on_reingest_supersede only
         # AFTER its own node-insert `with conn:` block has exited).
         if swept_ids:
+            # MS-35: the UPDATE above only tombstones the SWEPT node itself --
+            # any live DERIVED descendant (a compose()/derive_node() answer
+            # that quoted this memory) was left live, and a live derived node
+            # is exactly what distill/reflex export into training weights.
+            #
+            # Scoped to channel='agent-derived' rather than a bare
+            # revoke_cascade: the SAME edges table also carries depends_on
+            # fact-dependency edges (relate_fact_deps), and Behavior 4
+            # (docs/facts-design.md, test_deleted_fact_file_marks_dependent_
+            # stale_not_tombstoned) requires a dependent FACT to go stale,
+            # never tombstoned, when the fact it depends on is retired. A
+            # derive_node()/compose() descendant is unconditionally stamped
+            # channel='agent-derived' by construction, so filtering on it is
+            # exact -- it reaches training-export leakage without touching a
+            # depends_on dependent, which the stale cascade below (unchanged)
+            # already handles correctly.
+            for nid, opath in swept_ids:
+                ts = memsom.now_iso()
+                for did, dchannel, dtombstoned in memsom.cascade_set(conn, nid):
+                    if dchannel == "agent-derived" and not dtombstoned:
+                        conn.execute(
+                            "UPDATE nodes SET tombstoned = 1, tombstoned_at = ?,"
+                            " revoke_reason = ? WHERE id = ? AND tombstoned = 0",
+                            (ts, f"cascade from node {nid} (bridge reconcile,"
+                                 f" source file removed: {opath})", did))
             from memsom.integrity import stale as memsom_stale
             for nid, opath in swept_ids:
                 stats["stale_cascaded"] += memsom_stale.mark_stale_cascade(

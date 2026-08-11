@@ -17,7 +17,6 @@ Public API
 migrate(conn)                                          idempotent
 redact_node(conn, nid, reason, cascade=False) -> list[int]
 is_redacted(conn, nid)                        -> bool
-live_unredacted_sources(conn)                 -> list[tuple]  (same shape as live_sources)
 describe(conn, nid)                           -> list[str]    (fmt_node-style)
 
 CLI
@@ -34,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
 
@@ -204,16 +204,34 @@ def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
             if changed:
                 redacted_ids.append(tid)
 
-    # F-15: purge the retrieval index (postings/docstats/embeddings) for every
-    # node whose payload was just destroyed, so a stale BM25/vector posting can't
-    # surface the node id after redaction. Best-effort: retrieval is optional.
+    # F-15 / MS-27: purge the retrieval index (postings/docstats/embeddings) for
+    # every node whose payload was just destroyed, so a stale BM25/vector posting
+    # can't surface the node id after redaction. This used to be a try-wrapped
+    # upward import (`from memsom.retrieval import retrieve ...`) with a bare
+    # `except Exception: pass` -- the exact silence the finding is named for:
+    # content destroyed, postings survive, redact_node returns success, the CLI
+    # prints "done". Now an event (kernel.events never swallows): a subscriber
+    # failure is collected, not hidden, and reported in *purge_stats* so the
+    # caller can decide it matters -- retrieval indexing is still optional (an
+    # empty subscriber list is not an error), but a REGISTERED subscriber that
+    # raises is no longer invisible.
+    index_purge_failures = []
     if redacted_ids:
-        try:
-            from memsom.retrieval import retrieve as memsom_retrieve
-            for tid in redacted_ids:
-                memsom_retrieve.deindex_node(conn, tid)
-        except Exception:  # noqa: BLE001
-            pass
+        for tid in redacted_ids:
+            index_purge_failures += memsom_events.emit(
+                "node_redacted", conn=conn, node_id=tid)
+        if purge_stats is not None:
+            purge_stats["index_purge_failed"] = len(index_purge_failures)
+
+    # MS-16: claims.value is a structured substring LIFTED out of a node's
+    # content into a separate table (extract_claim); redact_node never touched
+    # it, so the highest-value fragment of a "destroyed" document survived
+    # verbatim in `claims` and was printed unfiltered by `claims-list`. Reap
+    # every claim_assertions row this redaction produced, and any claims row
+    # left with no assertion at all once that is done.
+    if redacted_ids:
+        from memsom.integrity import corroborate as memsom_corroborate
+        memsom_corroborate.reap_claims_for_nodes(conn, redacted_ids)
 
     # Reach disk: unlink the flat memory file + any vault note backing a redacted
     # node, so the plaintext is gone from disk and can't resurrect on the next
@@ -259,19 +277,10 @@ def is_redacted(conn, nid):
     return bool(row[0])
 
 
-def live_unredacted_sources(conn):
-    """Live, non-redacted sources — same row shape as memsom.live_sources.
-
-    This is the safe source-pool helper for compose/ask.  Even if a redacted row
-    somehow leaks past this filter its content is '' so nothing sensitive can be
-    quoted.
-    """
-    migrate(conn)
-    return conn.execute(
-        "SELECT id, content, channel, label, source_ref FROM nodes"
-        " WHERE tombstoned = 0 AND redacted = 0 AND channel != 'agent-derived'"
-        " ORDER BY label DESC, id ASC"
-    ).fetchall()
+# MS-39: live_unredacted_sources deleted (charter R2). It had zero production
+# callers and implemented a PARTIAL taint filter (tombstoned + redacted only --
+# no quarantine, no archived, no confidentiality ceiling). The one shared
+# primitive is memsom.storage.schema.taint_filter_clauses; route through it.
 
 
 def describe(conn, nid):
@@ -365,8 +374,14 @@ def cmd_redact(args):
                             memory_dir=mem_dir, purge_stats=ps)
         purged, failed = ps.get("purged", 0), ps.get("failed", 0)
         fail_note = f", {failed} unlink FAILED (see above)" if failed else ""
+        idx_failed = ps.get("index_purge_failed", 0)
         print(f"done - {len(newly)} redacted, {purged} file(s) purged from disk, "
               f"0 rows deleted, all edges intact{fail_note}.")
+        if idx_failed:
+            print(f"WARNING: {idx_failed} retrieval-index subscriber(s) failed "
+                  f"(MS-27) -- stale postings may still name a destroyed node; "
+                  f"see stderr and run `memsom reindex` to force a clean rebuild.",
+                  file=sys.stderr)
     finally:
         conn.close()
 

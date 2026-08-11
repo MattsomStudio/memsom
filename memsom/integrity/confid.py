@@ -45,6 +45,19 @@ def migrate(conn: sqlite3.Connection) -> None:
     )
 
 
+def _not_superseded_clause(conn: sqlite3.Connection) -> str:
+    """MS-09: an edge freshen() marked superseded must not feed a MAX
+    (confidentiality) or MIN (integrity, see integrity.recompute) recomputation
+    -- matches the pre-Phase-4 behaviour of a hard-deleted edge exactly, now
+    that the edge is kept (superseded_at set) instead of deleted for
+    provenance/revocation-reach. Empty string (no-op) on a DB where the
+    `stale` module has never run, so no edge is marked superseded yet.
+    """
+    if memsom_schema.column_exists(conn, "edges", "superseded_at"):
+        return " AND e.superseded_at IS NULL"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Library API (no print, no sys.exit)
 # ---------------------------------------------------------------------------
@@ -107,7 +120,7 @@ def recompute_conf(conn: sqlite3.Connection, nid: int):
     parent_rows = conn.execute(
         "SELECT n.conf_label FROM edges e "
         "JOIN nodes n ON n.id = e.parent "
-        "WHERE e.child = ? AND n.tombstoned = 0",
+        "WHERE e.child = ? AND n.tombstoned = 0" + _not_superseded_clause(conn),
         (nid,)
     ).fetchall()
 
@@ -167,7 +180,7 @@ def recompute_conf_all(conn: sqlite3.Connection):
                 parent_rows = conn.execute(
                     "SELECT n.conf_label FROM edges e "
                     "JOIN nodes n ON n.id = e.parent "
-                    "WHERE e.child = ? AND n.tombstoned = 0",
+                    "WHERE e.child = ? AND n.tombstoned = 0" + _not_superseded_clause(conn),
                     (nid,)
                 ).fetchall()
                 if not parent_rows:
@@ -208,7 +221,7 @@ def effective_confs(conn: sqlite3.Connection) -> dict:
     parents = {}
     for child, parent in conn.execute(
         "SELECT e.child, e.parent FROM edges e"
-        " JOIN nodes n ON n.id = e.parent WHERE n.tombstoned = 0"
+        " JOIN nodes n ON n.id = e.parent WHERE n.tombstoned = 0" + _not_superseded_clause(conn)
     ):
         parents.setdefault(child, []).append(parent)
     # Bounded Gauss-Seidel to a fixpoint (sources constant); +1 guards a cycle.

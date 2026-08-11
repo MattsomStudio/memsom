@@ -115,27 +115,22 @@ def test_derive_node_propagates_conf_ceiling(conn):
         f"content whose parent ceiling is {ceiling} — a declassification")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-08: alternate source pools re-implement a partial taint filter")
 def test_alternate_source_pools_apply_every_dimension(conn):
-    """redact.live_unredacted_sources and quarantine.live_unquarantined_sources
-    are both documented as source-pool helpers for compose/ask — redact.py:243
-    calls its one "the safe source-pool helper for compose/ask" — but each
-    hand-rolls a partial filter. Neither has a production caller today, which is
-    precisely why they are a trap: the next caller inherits a partial pool.
+    """MS-39 FIXED (Phase 4): redact.live_unredacted_sources and
+    quarantine.live_unquarantined_sources were both documented as source-pool
+    helpers for compose/ask, but each hand-rolled a PARTIAL taint filter with
+    zero production callers — precisely the shape of a trap for the next
+    caller. Charter R2: deleted rather than fixed. This is now an EXISTENCE
+    gate (charter R4) — it fails if either name reappears on its module.
     """
     from memsom.integrity import redact as memsom_redact
     from memsom.integrity import quarantine as memsom_quarantine
-    _pub, sec = _public_and_secret(conn)
 
-    allowed = _primitive_pool(conn, clearance=0)
-    offenders = {}
-    for name, fn in (("redact.live_unredacted_sources",
-                      memsom_redact.live_unredacted_sources),
-                     ("quarantine.live_unquarantined_sources",
-                      memsom_quarantine.live_unquarantined_sources)):
-        leaked = {r[0] for r in fn(conn)} - allowed
-        if leaked:
-            offenders[name] = sorted(leaked)
+    offenders = []
+    if hasattr(memsom_redact, "live_unredacted_sources"):
+        offenders.append("redact.live_unredacted_sources")
+    if hasattr(memsom_quarantine, "live_unquarantined_sources"):
+        offenders.append("quarantine.live_unquarantined_sources")
 
     assert not offenders, (
         f"alternate source pools return nodes the primitive excludes: {offenders}")

@@ -66,7 +66,7 @@ from pathlib import Path, PurePosixPath
 import memsom
 from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
-from memsom.interface import ingest as memsom_ingest
+from memsom.integrity import ingest as memsom_ingest
 from memsom.retrieval import relate as memsom_relate
 
 # ---------------------------------------------------------------------------
@@ -82,6 +82,12 @@ VAULT_ENV = "MEMDAG_OBSIDIAN_VAULT"
 CHANNEL_KEY = "memsom-channel"
 AUTHORED_KEY = "memsom-authored"
 SOURCES_KEY = "memsom-source-nodes"
+# MS-06/MS-08: the source node's confidentiality high-water mark at export
+# time. Restored on re-ingestion ONLY for a note that already passes
+# _note_is_memsom_authored (AUTHORED_KEY + SOURCES_KEY both present) -- a
+# hand-written or synced-in note cannot use this key to declassify anything,
+# since its declaration is simply never read.
+CONF_KEY = "memsom-conf"
 
 # Directories never walked, and transient editor files never read.
 _IGNORE_DIRS = {".obsidian", ".trash", ".git", ".sync", ".stfolder"}
@@ -458,8 +464,35 @@ def sync_vault(conn, vault, default_channel="user", prune=True, log=None):
 
         channel = effective_channel(default_channel, fm.get(CHANNEL_KEY))
         ids = memsom_ingest.ingest_text(conn, body, channel, source_ref=rel)
+        # MS-06/MS-08: a memsom-authored note (this operator's own export,
+        # never a hand-written or foreign-synced one -- _note_is_memsom_authored's
+        # own two-key check) carries the source's confidentiality high-water
+        # mark in frontmatter. Restore it on the freshly-minted copy so the
+        # round trip cannot land a topsecret payload at conf_label=0.
+        if (str(fm.get(AUTHORED_KEY, "")).strip().lower() in ("true", "yes", "1")
+                and SOURCES_KEY in fm and CONF_KEY in fm and ids):
+            from memsom.integrity import confid as memsom_confid
+            try:
+                lvl = memsom_confid.parse_conf(fm.get(CONF_KEY))
+                for nid in ids:
+                    memsom_confid.classify(conn, nid, lvl)
+            except ValueError:
+                pass  # unparseable declared level -> ignore, keep the ingest default
         if ids:
             qmarks = ",".join("?" * len(ids))
+            # MS-19: ingest_text's content-hash dedup can return an EXISTING
+            # node id that already carries a DIFFERENT obsidian_path -- a
+            # duplicate note whose body happens to match a trusted note's
+            # hash must not steal that note's path identity (supersession,
+            # the prune pass, and the reconcile sweep all key on this
+            # column). Refused loudly (not silently skipped) so a collision
+            # is visible in the sync summary rather than disappearing.
+            try:
+                for nid in ids:
+                    memsom_ingest.enforce_no_path_steal(conn, nid, "obsidian_path", rel)
+            except ValueError as exc:
+                say(f"  ! {rel}: {exc}")
+                continue
             with conn:
                 conn.execute(
                     f"UPDATE nodes SET obsidian_path = ?, obsidian_mtime = ? "
@@ -579,10 +612,21 @@ def export_note(conn, vault, *, node_id=None, query=None, folder="memsom",
 
     sources = []
     if node_id is not None:
-        node = memsom.get_node(conn, node_id)
-        if node is None or node["tombstoned"]:
-            raise ValueError(f"node {node_id} is unknown or tombstoned")
-        content = node["content"]
+        # MS-05: was tombstoned-only. Route through the shared taint primitive
+        # so a quarantined / redacted / archived / above-clearance node is
+        # refused exactly like every other read pool, not just a dead one.
+        from memsom.storage import schema as memsom_schema
+        from memsom.integrity import confid as memsom_confid
+        clearance_int = memsom_confid.parse_conf(clearance)
+        clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=clearance_int)
+        row = conn.execute(
+            "SELECT id FROM nodes WHERE id = ? AND " + " AND ".join(clauses),
+            [node_id] + params).fetchone()
+        if row is None:
+            raise ValueError(
+                f"node {node_id} is unknown, tombstoned, quarantined, redacted, "
+                f"archived, or above the {clearance!r} export clearance")
+        content = memsom.get_node(conn, node_id)["content"]
         sources = [node_id]
         title = title or f"memsom node {node_id}"
     else:
@@ -626,11 +670,24 @@ def export_note(conn, vault, *, node_id=None, query=None, folder="memsom",
             links.append(f"[[{stem}]]")
 
     src_list = ", ".join(str(s) for s in sources) if sources else ""
+    # MS-06/MS-08: stamp the exported confidentiality high-water mark so a
+    # later re-ingest (sync_vault) can restore it instead of defaulting the
+    # copy to conf_label=0 -- the DAG-severing declassification the round
+    # trip otherwise produces.
+    from memsom.storage import schema as memsom_schema
+    from memsom.integrity import confid as memsom_confid
+    conf_level = 0
+    if sources and memsom_schema.column_exists(conn, "nodes", "conf_label"):
+        qmarks = ",".join("?" * len(sources))
+        row = conn.execute(
+            f"SELECT MAX(conf_label) FROM nodes WHERE id IN ({qmarks})", sources).fetchone()
+        conf_level = row[0] if row and row[0] is not None else 0
     fm_lines = [
         "---",
         f"{CHANNEL_KEY}: agent-derived",
         f"{AUTHORED_KEY}: true",
         f"{SOURCES_KEY}: [{src_list}]",
+        f"{CONF_KEY}: {memsom_confid.CONF_NAME[conf_level].lower()}",
         f"created: {memsom.now_iso()}",
         "---",
         "",

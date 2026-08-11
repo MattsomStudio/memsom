@@ -126,8 +126,9 @@ def test_archived_survives_a_federation_roundtrip(conn, monkeypatch):
 # REDACTION COMPLETENESS
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="MS-17 (RED-01): redact never touches "
-                                       "claims/claim_assertions")
+# MS-16 FIXED (Phase 4): redact_node now calls
+# corroborate.reap_claims_for_nodes for every newly-redacted id, deleting its
+# claim_assertions rows and any claims row left with zero assertions.
 def test_redact_reaps_extracted_claims(conn):
     """`extract_claim` deliberately lifts the HIGHEST-value substrings out of a
     document (hashes, IPs, host:port, semver, key=value) into `claims.value`.
@@ -165,8 +166,7 @@ def test_connection_enables_secure_delete(conn):
 # EFFECTS
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="MS-19 (EFF-01): mcp.py:553 appends `node` "
-                                       "as a bare positional with str(), no int()")
+# MS-17 FIXED (Phase 4): _tool_argv now int()-coerces node at the MCP boundary.
 def test_mcp_obsidian_export_node_arg_cannot_inject_an_option():
     """`node` is declared `nargs="?"` in the CLI, so a value of `--vault=<dir>`
     is parsed as the --vault OPTION and never meets `_checked_vault`. The

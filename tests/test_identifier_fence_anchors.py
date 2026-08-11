@@ -50,7 +50,7 @@ _LINE_PARSERS = {
     ("memsom/bridge/bridge_import.py", "_PRIMARY_RE"),
     ("memsom/kernel/frontmatter.py", "_FM_LIST_ITEM"),
     ("memsom/kernel/frontmatter.py", "_FM_KV"),
-    ("memsom/integrity/contradict.py", "_META_TOK"),
+    ("memsom/lifecycle/contradict.py", "_META_TOK"),
 }
 
 

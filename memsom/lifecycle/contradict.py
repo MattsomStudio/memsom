@@ -1,4 +1,4 @@
-"""memsom_contradict — the THIRD staleness trigger: cross-source CONTRADICTION.
+"""memsom_contradict -- the THIRD staleness trigger: cross-source CONTRADICTION.
 
 Supersession (same source_ref re-ingest, memsom_stale.on_reingest_supersede) and
 the verification-age sweep (memsom_verify_stale) both need a LINK to fire; neither
@@ -8,14 +8,22 @@ live and both get cited. This detector fills that gap: on ingest it finds the li
 nodes closest to the new claim and, when one is judged to contradict it, marks the
 OLD node stale and records the link.
 
+MOVED from integrity/ to lifecycle/ in Phase 4 (PLAN.md Sec1.5): this module's own
+imports of retrieval.embed / retrieval.retrieve were the try-wrapped "soft degrade"
+kind upward_imports.py exists to catch -- integrity sits BELOW retrieval in the
+layer order, lifecycle sits ABOVE it, so the identical imports become ordinary
+downward ones at this rank with no code change. The one caller that used to reach
+it via a same-package import (integrity/ingest.py) now triggers it through
+kernel.events ("node_ingested") instead of a direct import, for the same reason.
+
 Two adjudicator tiers (pluggable):
-  - Phase 1 (this file): STRUCTURED — memsom_corroborate.extract_claim on both;
+  - Phase 1 (this file): STRUCTURED -- memsom_corroborate.extract_claim on both;
     contradiction iff same (subject, predicate) with a different value. extract_claim
     subjects are type-scoped (a port claim is ("port","is",N)), so this is only
-    precise BECAUSE candidates are already topically scoped by the retrieval gate —
+    precise BECAUSE candidates are already topically scoped by the retrieval gate --
     two "port" claims are compared only when their nodes are close, i.e. about the
     same thing. No model, deterministic.
-  - Phase 2 (this file): NLI — a small in-process cross-encoder scores
+  - Phase 2 (this file): NLI -- a small in-process cross-encoder scores
     P(contradiction) on candidates the structured tier didn't resolve. Opt-in via
     $MEMDAG_CONTRADICT_NLI (separate from the detector's own $MEMDAG_CONTRADICT so
     the cheap structured tier can run without the model); heavy-dependency-optional,
@@ -23,7 +31,7 @@ Two adjudicator tiers (pluggable):
     may still inject nli=fn (tests do) to override the default scorer.
 
 Design guardrails:
-  - NEVER reuses source_supersedes — freshen()/substitute_fresh() treat that as a
+  - NEVER reuses source_supersedes -- freshen()/substitute_fresh() treat that as a
     value-preserving replacement and would silently serve the contradicting node as
     the corrected value. The link lives in its own `contradictions` table.
   - The stale reason is namespaced "contradicted by node N" so other passes'
@@ -35,7 +43,7 @@ Design guardrails:
     pollute the brain by default; enforcement is a deliberate per-run choice made
     only after the eval gate is green. (Learned the hard way: an early enforce-by-
     default backfill flagged 110/155 real nodes.)
-  - Opt-in: the detector only runs at all when $MEMDAG_CONTRADICT is truthy — keeps
+  - Opt-in: the detector only runs at all when $MEMDAG_CONTRADICT is truthy -- keeps
     a cold bridge-import from checking every node before the detector is tuned.
 
 Public API
@@ -54,12 +62,13 @@ import sys
 from datetime import datetime, timezone
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
 
 REASON_PREFIX = "contradicted by"
 _TRUTHY = ("1", "true", "yes", "on")
 
-# NLI semantic tier (Phase 2) — heavy-dependency-optional, mirroring memsom_embed:
+# NLI semantic tier (Phase 2) -- heavy-dependency-optional, mirroring memsom_embed:
 # torch + transformers are imported LAZILY only inside the code path, so importing
 # this module stays free and memsom keeps its "no required model" property. When the
 # libs or weights are absent the tier returns None and the detector runs structured-
@@ -85,14 +94,14 @@ def _nli_threshold():
 
 def nli_available():
     """True iff torch + transformers import cleanly. Cached; never raises. Probes
-    imports ONLY — no model download / VRAM (that happens on first _load_nli())."""
+    imports ONLY -- no model download / VRAM (that happens on first _load_nli())."""
     global _NLI_AVAILABLE
     if _NLI_AVAILABLE is None:
         try:
             import torch  # noqa: F401,PLC0415
             import transformers  # noqa: F401,PLC0415
             _NLI_AVAILABLE = True
-        except Exception:  # noqa: BLE001 — any import/DLL failure -> tier unavailable
+        except Exception:  # noqa: BLE001 -- any import/DLL failure -> tier unavailable
             _NLI_AVAILABLE = False
     return _NLI_AVAILABLE
 
@@ -138,7 +147,7 @@ def nli_score(premise, hypothesis):
                       max_length=512, return_tensors="pt")
             probs = torch.softmax(model(**enc).logits[0], dim=-1)
             return float(probs[ci])
-    except Exception:  # noqa: BLE001 — a scorer failure must never break ingest
+    except Exception:  # noqa: BLE001 -- a scorer failure must never break ingest
         _warn_nli_fallback()
         return None
 
@@ -162,13 +171,13 @@ def _default_nli():
 # that pair clears an ANCHOR (they are demonstrably about the same thing) run NLI
 # on it. Different-IP / different-topic pairs never clear the anchor, and when they
 # do the entity is inside the sentence so NLI can disambiguate. The structured tier
-# (extract_claim) is deliberately gone from contradiction — its type-scoped subjects
+# (extract_claim) is deliberately gone from contradiction -- its type-scoped subjects
 # (every ipv4 -> subject "ipv4") were the other false-positive source; anchored NLI
 # recovers the config-drift case it was for ("listens on port 443" vs "...8080").
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
-# Boilerplate sentence lines that carry no contradictable claim — navigation, vault
+# Boilerplate sentence lines that carry no contradictable claim -- navigation, vault
 # pointers, provenance footers, and bare label/status headers. Dropped before
 # anchoring so their near-identical templates ("See [[X]]" vs "See [[Y]]") can't fire.
 _BOILERPLATE = re.compile(
@@ -216,13 +225,13 @@ def _sentences(text, *, max_sents=40, min_len=12):
     try:
         from memsom.kernel.frontmatter import split_frontmatter
         _fm, body, _ = split_frontmatter(body)
-    except Exception:  # noqa: BLE001 — frontmatter parsing is best-effort
+    except Exception:  # noqa: BLE001 -- frontmatter parsing is best-effort
         body = text or ""
     body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)   # drop code fences
     out = []
     for line in body.splitlines():
         line = line.strip().lstrip("#->*|").strip()
-        # strip leading emoji / bullets / symbols so "⭐ STATUS:" / "⚠️ Deploy:" are
+        # strip leading emoji / bullets / symbols so "STATUS:" / "Deploy:" are
         # seen as the label lines they are by _BOILERPLATE.
         line = re.sub(r"^[^\w`'\"\[(]+", "", line).strip()
         if not line or _BOILERPLATE.match(line):
@@ -237,11 +246,11 @@ def _sentences(text, *, max_sents=40, min_len=12):
 
 
 def _content_diff(sa, sb):
-    """The claim-bearing tokens that differ between two sentences — excluding
+    """The claim-bearing tokens that differ between two sentences -- excluding
     stopwords and metadata (dates/numbers/paths/urls/wikilinks). Empty => the two
     sentences differ only in metadata, so any NLI 'contradiction' is spurious."""
     def toks(s):
-        s = re.sub(r"`[^`]+`", " ", s)        # drop `code spans` — identifiers/paths/
+        s = re.sub(r"`[^`]+`", " ", s)        # drop `code spans` -- identifiers/paths/
         s = re.sub(r"[*_#>|()\[\],:;!?]", " ", s.lower())   # commands aren't claim values
         return [t.strip(".") for t in s.split() if t.strip(".")]
     from collections import Counter  # noqa: PLC0415
@@ -345,7 +354,7 @@ def enabled():
 
 def _enforce_default():
     """Default enforcement for the user-facing surfaces (sweep, ingest hook).
-    OBSERVE-ONLY unless $MEMDAG_CONTRADICT_ENFORCE opts in — so a precision
+    OBSERVE-ONLY unless $MEMDAG_CONTRADICT_ENFORCE opts in -- so a precision
     regression records to the table without ever staling the brain. Enforcement is
     a deliberate choice, not a default."""
     return str(os.environ.get("MEMDAG_CONTRADICT_ENFORCE", "")).strip().lower() in _TRUTHY
@@ -364,9 +373,9 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
     tests). When None, live topically-close candidates come from the hybrid
     retriever (its BM25 half works with no embedder, so this degrades gracefully).
     adjudicate: optional fn(new_text, cand_text) -> (kind, reason, score) | None.
-    When None, resolves to _default_adjudicator() — the anchored per-sentence NLI
+    When None, resolves to _default_adjudicator() -- the anchored per-sentence NLI
     adjudicator iff the semantic tier is opted in + loadable, else None (no-op).
-    enforce: True stales the older node; False is OBSERVE-ONLY — the contradiction
+    enforce: True stales the older node; False is OBSERVE-ONLY -- the contradiction
     is recorded (enforced=0) for review but nothing is staled. The user-facing
     surfaces (sweep, ingest hook) default to observe via _enforce_default(); this
     primitive defaults enforce=True so explicit callers get deterministic marking.
@@ -393,7 +402,7 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
             from memsom.retrieval import retrieve as memsom_retrieve
             hits = memsom_retrieve.retrieve(conn, new_text, k=k, clearance=clearance)
             candidates = [(h[0], h[1]) for h in hits]
-        except Exception:  # noqa: BLE001 — no retriever/embedder -> nothing to compare
+        except Exception:  # noqa: BLE001 -- no retriever/embedder -> nothing to compare
             return []
 
     marked = []
@@ -404,12 +413,12 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
             continue
         try:
             verdict = adjudicate(new_text, ctext)
-        except Exception:  # noqa: BLE001 — an adjudicator failure must not break ingest
+        except Exception:  # noqa: BLE001 -- an adjudicator failure must not break ingest
             verdict = None
         if verdict is None:
             continue
         # The OLDER node loses (newer fact wins), whichever way we're probing. At
-        # ingest the probe (new_id) is newest so the candidate loses — same result.
+        # ingest the probe (new_id) is newest so the candidate loses -- same result.
         # But a backfill sweep probes both nodes of a pair; keying on (older, newer)
         # makes both directions converge to ONE record + ONE stale mark instead of
         # cross-flagging both nodes. Node id is monotonic with insertion order.
@@ -516,11 +525,11 @@ def sweep(conn, *, limit=None, k=5, clearance="topsecret",
     """Probe memory nodes added since the last sweep for cross-source contradictions.
 
     Incremental by default (id > watermark); backfill=True re-scans from 0 (one-time
-    full pass — the first run on an existing store). Candidates come from an
+    full pass -- the first run on an existing store). Candidates come from an
     in-memory embedding index built once (so flat-file bridge memories are covered);
     when the embedder is absent it falls back to detect()'s own retrieve (indexed
     nodes only). Both the embed pass and the NLI model load once for the whole run,
-    so this is the right home for flat-file coverage — never per-Stop-hook. limit
+    so this is the right home for flat-file coverage -- never per-Stop-hook. limit
     chunks a large run; the deferred remainder is reported, never silently dropped,
     and the watermark only advances over what was probed so the next run resumes.
 
@@ -567,6 +576,21 @@ def sweep(conn, *, limit=None, k=5, clearance="topsecret",
     return stats
 
 
+# --- event subscription (replaces the old integrity/ingest.py direct import) --
+
+def _on_node_ingested(conn, node_id):
+    """Subscriber for kernel.events "node_ingested". Opt-in and self-gating: a
+    no-op unless $MEMDAG_CONTRADICT is set, exactly as when this lived as a
+    try-wrapped call inside ingest_text itself. kernel.events.emit isolates
+    this subscriber's failure from every other one, so no try/except is needed
+    here beyond what detect() already carries internally.
+    """
+    if not enabled():
+        return
+    detect(conn, node_id, enforce=_enforce_default())
+
+
+memsom_events.subscribe("node_ingested", _on_node_ingested)
 # --- CLI ---------------------------------------------------------------------
 
 def _cmd_list(args):
@@ -599,7 +623,7 @@ def _cmd_sweep(args):
     mode = "ENFORCE (staled)" if stats["enforced"] else "observe-only (recorded, not staled)"
     defer = (f", {stats['deferred']} deferred (raise/rerun --limit)"
              if stats["deferred"] else "")
-    cov = "" if stats["mode"] == "embed" else " [candidates: retrieve — bridge memories not covered (no embedder)]"
+    cov = "" if stats["mode"] == "embed" else " [candidates: retrieve -- bridge memories not covered (no embedder)]"
     print(f"[contradict-sweep] {avail}, {mode}: probed {stats['probed']} node(s) "
           f"(id {stats['from_id']}->{stats['to_id']}), "
           f"{stats['contradictions']} contradiction(s){defer}.{cov}")
@@ -622,7 +646,7 @@ def register(subparsers):
     s.add_argument("--backfill", action="store_true",
                    help="re-scan from the beginning (one-time full pass)")
     s.add_argument("--enforce", action="store_true",
-                   help="mark contradictions stale (default: observe-only — record, don't stale)")
+                   help="mark contradictions stale (default: observe-only -- record, don't stale)")
     s.set_defaults(func=_cmd_sweep)
 
 

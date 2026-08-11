@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import memsom
-from memsom.interface import ingest as memsom_ingest
+from memsom.integrity import ingest as memsom_ingest
 
 
 # ---------------------------------------------------------------------------

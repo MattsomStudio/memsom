@@ -39,6 +39,7 @@ import sqlite3
 
 import memsom
 from memsom.storage import schema as memsom_schema
+from memsom.kernel import events as memsom_events
 from memsom.integrity import confid as memsom_confid
 from memsom.distill import llm as memsom_llm
 
@@ -287,6 +288,25 @@ def deindex_node(conn: sqlite3.Connection, nid: int) -> None:
         # table-guarded). Keeps the invariant: anything that drops `embeddings`
         # drops sparse_vecs + colbert_vecs too — no orphaned vectors can resurface.
         memsom_embed.deindex_bge(conn, nid)
+
+
+# ---------------------------------------------------------------------------
+# Event subscriptions -- PLAN.md Sec1.5/Sec2.3: "the try-wrapped upward
+# imports become subscribers". integrity/ingest.py and integrity/redact.py no
+# longer import this module directly; they emit and this module listens,
+# which is what keeps integrity (rank 2) from importing retrieval (rank 3).
+# ---------------------------------------------------------------------------
+
+def _on_node_ingested(conn, node_id):
+    index_node(conn, node_id)
+
+
+def _on_node_redacted(conn, node_id):
+    deindex_node(conn, node_id)
+
+
+memsom_events.subscribe("node_ingested", _on_node_ingested)
+memsom_events.subscribe("node_redacted", _on_node_redacted)
 
 
 # ---------------------------------------------------------------------------
@@ -766,6 +786,10 @@ def retrieve_graph(
 # ---------------------------------------------------------------------------
 
 def _cmd_retrieve(args):
+    # Hoisted out of the try/finally below: this is an ordinary (non-optional)
+    # import, not a graceful-degrade fallback, so it does not belong inside a
+    # Try node at all.
+    from memsom.bridge import facts as memsom_facts
     conn = memsom.get_connection()
     try:
         migrate(conn)
@@ -778,7 +802,6 @@ def _cmd_retrieve(args):
         if not results:
             print("[memsom-retrieve] no results")
             return
-        from memsom.bridge import facts as memsom_facts
         for row in results:
             nid, content, channel, label, source_ref = row
             ref = source_ref or "(stated directly)"

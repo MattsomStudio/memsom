@@ -13,7 +13,6 @@ quarantine_node(conn, nid, reason)   -> bool        True=flipped, False=no-op
 promote(conn, nid, by)               -> None        raises ValueError on gate fail
 list_quarantined(conn)               -> list[dict]
 live_source_ids(conn)                -> list[int]
-live_unquarantined_sources(conn)     -> list[tuple]
 
 CLI sub-commands (via register(subparsers))
 -------------------------------------------
@@ -239,15 +238,10 @@ def live_source_ids(conn: sqlite3.Connection) -> list:
     return [r[0] for r in rows]
 
 
-def live_unquarantined_sources(conn: sqlite3.Connection) -> list:
-    """Same row shape as memsom.live_sources (id, content, channel, label, source_ref),
-    filtered to exclude quarantined rows."""
-    migrate(conn)
-    return conn.execute(
-        "SELECT id, content, channel, label, source_ref FROM nodes"
-        " WHERE tombstoned = 0 AND channel != 'agent-derived' AND status != 'quarantined'"
-        " ORDER BY label DESC, id ASC"
-    ).fetchall()
+# MS-39: live_unquarantined_sources deleted (charter R2). Zero production
+# callers; it hand-rolled a PARTIAL taint filter (tombstoned + quarantine only
+# -- no redacted, no archived, no confidentiality ceiling). Route through the
+# one shared primitive: memsom.storage.schema.taint_filter_clauses.
 
 
 # ---------------------------------------------------------------------------

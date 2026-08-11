@@ -79,12 +79,22 @@ def test_freshen_without_recipe_refloors_integrity(conn):
 
     ARCHITECTURE.md:51 — "the laundering-proof property: you cannot wash
     external content up to `user` by summarizing it."
+
+    MS-09 (Phase 4): freshen() now SUPERSEDES the old parent edge instead of
+    hard-deleting it, so memsom.parents_of (raw, unfiltered -- provenance is
+    immutable) legitimately returns BOTH the old and the fresh parent after
+    this call; see test_gate_provenance_immutability.py's
+    test_freshen_preserves_provenance_edge for that property. The ACTIVE
+    (non-superseded) parent set — what floor computation must use — is
+    checked directly here instead.
     """
     import memsom
     _trusted, untrusted, derived = _setup(conn)
 
-    parents = [(r[0], r[3]) for r in memsom.parents_of(conn, derived)]
-    assert parents == [(untrusted, 0)], f"unexpected parent set: {parents}"
+    active = conn.execute(
+        "SELECT parent FROM edges WHERE child = ? AND superseded_at IS NULL",
+        (derived,)).fetchall()
+    assert [r[0] for r in active] == [untrusted], f"unexpected active parent set: {active}"
 
     stored = conn.execute(
         "SELECT label FROM nodes WHERE id=?", (derived,)).fetchone()[0]

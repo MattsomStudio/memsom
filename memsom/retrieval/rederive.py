@@ -118,6 +118,11 @@ def _live_parents(conn, node_id):
     parent has content='' but tombstoned=0, so a tombstone-only filter would
     compose from an empty source. Taint columns are guarded by existence so this
     works regardless of which module migrations have run.
+
+    MS-09: also excludes a SUPERSEDED edge (edges.superseded_at IS NOT NULL) --
+    freshen() marks the old parent edge superseded rather than deleting it, so
+    parents_of()/cascade walks still see it (history, revocation-reach), but a
+    regenerate() replay must source ONLY the fresh parent, never both.
     """
     clauses = ["n.tombstoned = 0"]
     for col in ("redacted", "archived"):
@@ -125,6 +130,8 @@ def _live_parents(conn, node_id):
             clauses.append(f"COALESCE(n.{col}, 0) = 0")
     if memsom_schema.column_exists(conn, "nodes", "status"):
         clauses.append("(n.status IS NULL OR n.status != 'quarantined')")
+    if memsom_schema.column_exists(conn, "edges", "superseded_at"):
+        clauses.append("e.superseded_at IS NULL")
     where = " AND ".join(clauses)
     return conn.execute(
         "SELECT n.id, n.content, n.channel, n.label, n.source_ref"

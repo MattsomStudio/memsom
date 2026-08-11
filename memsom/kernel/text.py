@@ -17,6 +17,10 @@ STOP = {"how", "should", "i", "a", "an", "the", "do", "does", "what", "my",
 # and compose()-side stems stop matching each other.
 STEM_WIDTH = 6
 
+# MS-22: a citation tag compose() itself emits, shaped `[mem:<id>|<channel>]`.
+# Matched here so it can be neutralised wherever it appears in SOURCE content.
+_FAKE_CITATION = re.compile(r"\[mem:(\d+)\|([^\]]*)\]")
+
 
 def now_iso():
     # ISO-8601 TEXT, never datetime objects (3.12 sqlite3 adapter is deprecated)
@@ -58,6 +62,14 @@ def prose_lines(content):
 
 def strip_furniture(line):
     line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)  # [text](url) -> text
+    # MS-22: a source document can contain a literal `[mem:N|channel]` -- compose()
+    # appends its OWN citation tag to every bullet it emits, so a forged one baked
+    # into the source text survives verbatim and rides along as a second,
+    # indistinguishable tag on the same line. Defang the bracket shape (not the
+    # words) so the substring stays human-readable but can never match the
+    # citation regex again. DAG provenance is untouched either way -- only the
+    # human-readable attribution was ever at risk.
+    line = _FAKE_CITATION.sub(r"(mem:\1|\2)", line)
     return line.replace("**", "").replace("`", "")
 
 

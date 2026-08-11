@@ -52,7 +52,8 @@ from memsom.distill import llm as memsom_llm
 from memsom.interface import profile as memsom_profile
 from memsom.integrity import gate as memsom_gate
 from memsom.integrity import corroborate as memsom_corroborate
-from memsom.interface import ingest as memsom_ingest
+from memsom.integrity import ingest as memsom_ingest
+from memsom.interface import ingest as memsom_ingest_cli
 from memsom.retrieval import retrieve as memsom_retrieve
 from memsom.retrieval import embed as memsom_embed
 from memsom.retrieval import code_index as memsom_code_index
@@ -75,7 +76,7 @@ from memsom.bridge import wire_claude as memsom_wire_claude
 from memsom.interface import audit as memsom_audit
 from memsom.interface import dashboard as memsom_dashboard
 from memsom.integrity import tombstone as memsom_tombstone
-from memsom.integrity import contradict as memsom_contradict
+from memsom.lifecycle import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
 
 
@@ -923,7 +924,7 @@ def main(argv=None):
     memsom_profile.register(sub)
     memsom_gate.register(sub)
     memsom_corroborate.register(sub)
-    memsom_ingest.register(sub)
+    memsom_ingest_cli.register(sub)
     memsom_retrieve.register(sub)
     memsom_code_index.register(sub)
     memsom_compact.register(sub)

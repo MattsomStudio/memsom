@@ -93,7 +93,7 @@ class TestConsolidateCatchesElevatedButTainted(Base):
 
 
 class TestQuarantinedExcludedFromPool(Base):
-    """A quarantined SOURCE disappears from live_source_ids/live_unquarantined_sources
+    """A quarantined SOURCE disappears from live_source_ids
     and, since MS-13 routed it through the same taint primitive, from
     memsom.live_sources too -- ONE taint primitive feeds every read pool."""
 
@@ -108,12 +108,6 @@ class TestQuarantinedExcludedFromPool(Base):
         ids = memsom_quarantine.live_source_ids(self.conn)
         self.assertIn(endorsed, ids)
         self.assertNotIn(external, ids)
-
-        # live_unquarantined_sources also excludes it
-        unq = memsom_quarantine.live_unquarantined_sources(self.conn)
-        unq_ids = [r[0] for r in unq]
-        self.assertIn(endorsed, unq_ids)
-        self.assertNotIn(external, unq_ids)
 
         # MS-13: memsom.live_sources is now routed through the same taint
         # primitive, so it excludes the quarantined source too.

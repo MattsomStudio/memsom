@@ -453,6 +453,39 @@ def list_roots(conn):
 
 
 # ---------------------------------------------------------------------------
+# reap_claims_for_nodes -- MS-16: claims.value survives redaction
+# ---------------------------------------------------------------------------
+
+def reap_claims_for_nodes(conn, node_ids):
+    """Delete claim_assertions rows asserted by *node_ids*, and any claims row
+    left with zero assertions once that is done.
+
+    extract_claim lifts the highest-value substring out of a node's content
+    into the `claims` table; redacting the node (content='') never touched
+    that copy, so the value survived verbatim and `claims-list` printed it
+    unfiltered. Called from redact.redact_node for every newly-redacted id.
+    A claim still asserted by a DIFFERENT, live node is untouched -- this only
+    removes the credit *node_ids* contributed, not the claim itself if other
+    evidence for it still stands.
+
+    Returns the count of claim_assertions rows removed.
+    """
+    if not node_ids:
+        return 0
+    migrate(conn)
+    qmarks = ",".join("?" * len(node_ids))
+    with conn:
+        conn.execute(
+            f"DELETE FROM claim_assertions WHERE node_id IN ({qmarks})",
+            list(node_ids))
+        n = conn.execute("SELECT changes()").fetchone()[0]
+        conn.execute(
+            "DELETE FROM claims WHERE id NOT IN"
+            " (SELECT DISTINCT claim_id FROM claim_assertions)")
+    return n
+
+
+# ---------------------------------------------------------------------------
 # CLI helpers
 # ---------------------------------------------------------------------------
 

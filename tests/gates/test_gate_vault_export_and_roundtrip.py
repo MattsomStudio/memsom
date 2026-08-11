@@ -42,8 +42,7 @@ def vault(request):
     shutil.rmtree(p, ignore_errors=True)
 
 
-@pytest.mark.xfail(strict=True, reason="MS-05: export_note node_id branch checks "
-                                       "tombstoned only (obsidian.py:643)")
+# MS-05 FIXED (Phase 4): the node_id branch now routes through taint_filter_clauses.
 def test_export_note_refuses_a_quarantined_node(conn, vault):
     ext = memsom.insert_node(conn, "untrusted forum text about NAT traversal", "external")
     d, _ = memsom.derive_node(conn, "derived from the untrusted forum text", [ext])
@@ -55,8 +54,7 @@ def test_export_note_refuses_a_quarantined_node(conn, vault):
         memsom_obsidian.export_note(conn, vault, node_id=d, title="q")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-05: the clearance argument is never "
-                                       "read on the node_id branch")
+# MS-05 FIXED (Phase 4): clearance is now parsed into the taint_filter_clauses call.
 def test_export_note_honours_clearance_on_the_node_id_branch(conn, vault):
     s = memsom.insert_node(conn, f"passphrase {MARKER} topsecret", "user")
     memsom_confid.classify(conn, s, "topsecret")
@@ -70,8 +68,8 @@ def test_export_note_honours_clearance_on_the_node_id_branch(conn, vault):
         "clearance='public' wrote a topsecret payload to disk")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-06: sync_vault re-ingest mints an "
-                                       "orphan, discarding conf_label")
+# MS-06 FIXED (Phase 4): export_note stamps memsom-conf; sync_vault restores it
+# on re-ingest for a note that passes the memsom-authored check.
 def test_vault_roundtrip_does_not_declassify(conn, vault):
     s = memsom.insert_node(conn, f"passphrase {MARKER} topsecret compartment", "user")
     memsom_confid.classify(conn, s, "topsecret")
@@ -90,8 +88,7 @@ def test_vault_roundtrip_does_not_declassify(conn, vault):
             f"conf_label={conf} (0 = PUBLIC): declassification")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-07: heal has no parentless-derived "
-                                       "invariant (heal.py check set)")
+# MS-34 FIXED (Phase 4): heal.check() gains _check_parentless_agent_derived.
 def test_heal_flags_a_parentless_agent_derived_node(conn):
     conn.execute(
         "INSERT INTO nodes(content, channel, label, created_at) VALUES (?,?,?,?)",

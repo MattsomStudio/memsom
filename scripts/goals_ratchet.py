@@ -45,6 +45,32 @@ edge Phase 1's MS-03 fix added (stale -> retrieval.recompute) without
 reopening that CRITICAL -- it never reaches this BASELINE at all, because
 by the time this commit lands stale.py imports integrity.recompute, a
 same-layer call. 26 -> 24.
+
+RE-BASELINED at Phase 4, 2026-08-11: the ingest split (PLAN.md Sec1.4) moves
+the write path from `memsom.interface.ingest` to `memsom.integrity.ingest`.
+Every caller that used to reach up into `interface.ingest` (bridge_import,
+chats, obsidian, federation.broker) now imports the correct-layer module,
+removing 4 layering edges outright and turning the one acyclic-siblings edge
+`federation.broker -> interface.ingest` into `federation.broker ->
+integrity.ingest` (still one hop of the pre-existing, unresolved
+federation<->distill entanglement the file header describes -- moving ingest
+does not close that loop, it just changes which module is the entry hop).
+MS-27's event inversion (redact -> kernel.events, retrieval subscribes)
+removes `integrity.redact -> retrieval.retrieve` outright.
+Re-measured fresh rather than hand-adjusted, because the layering count also
+dropped by edges this phase never touched (`integrity.gate -> interface.blame`
+and three `integrity.* -> bridge.bridge_import` edges) -- residue from Phase 3's
+kernel/frontmatter dedup that nothing re-baselined at the time. Honest
+re-measurement, not a guess: `lint-imports --config .importlinter-goals` run
+fresh at this commit. 24 -> 14 (layering), 4 -> 4 (acyclic-siblings, one
+swapped, none net-added).
+
+RE-BASELINED again at Phase 4 (same day): integrity/contradict.py moved to
+lifecycle/contradict.py (PLAN.md Sec1.5 -- it was always scheduled to leave
+integrity/, and its two try-wrapped upward imports of retrieval.embed/
+retrieve are exactly what made upward_imports.py's Phase-4 exit gate
+non-zero). lifecycle sits above retrieval, so the same two imports are
+downward at the new rank with no code change. 14 -> 12.
 """
 
 from __future__ import annotations
@@ -62,25 +88,13 @@ CONFIG = ".importlinter-goals"
 
 BASELINE = {
     "memsom internal layering (REFACTOR TARGET)": [
-        "memsom.bridge.bridge_import -> memsom.interface.ingest",
-        "memsom.bridge.chats -> memsom.interface.ingest",
         "memsom.bridge.obsidian -> memsom.interface.cli",
-        "memsom.bridge.obsidian -> memsom.interface.ingest",
         "memsom.distill.digest -> memsom.bridge.bridge_import",
         "memsom.distill.digest -> memsom.bridge.facts",
-        "memsom.federation.broker -> memsom.interface.ingest",
         "memsom.federation.broker -> memsom.interface.mcp",
-        "memsom.integrity.contradict -> memsom.bridge.bridge_import",
-        "memsom.integrity.contradict -> memsom.retrieval.embed",
-        "memsom.integrity.contradict -> memsom.retrieval.retrieve",
         "memsom.integrity.corroborate -> memsom.retrieval.rederive",
-        "memsom.integrity.gate -> memsom.interface.blame",
-        "memsom.integrity.redact -> memsom.bridge.bridge_import",
-        "memsom.integrity.redact -> memsom.retrieval.retrieve",
         "memsom.integrity.stale -> memsom.retrieval.rederive",
-        "memsom.integrity.tombstone -> memsom.bridge.bridge_import",
         "memsom.integrity.tombstone -> memsom.retrieval.rederive",
-        "memsom.integrity.verify_stale -> memsom.bridge.bridge_import",
         "memsom.lifecycle.compact -> memsom.distill.llm",
         "memsom.lifecycle.reflex -> memsom.distill.distill",
         "memsom.retrieval.rederive -> memsom.lifecycle.compact",
@@ -89,7 +103,7 @@ BASELINE = {
     ],
     "acyclic_siblings - same-level packages never import each other": [
         "memsom.distill.digest -> memsom.bridge.bridge_import",
-        "memsom.federation.broker -> memsom.interface.ingest",
+        "memsom.federation.broker -> memsom.integrity.ingest",
         "memsom.federation.broker -> memsom.interface.mcp",
         "memsom.federation.federation -> memsom.integrity.redact",
     ],

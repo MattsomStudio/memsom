@@ -106,15 +106,16 @@ class TestComposeNeverLeaks(Base):
         secret = "SECRET-TOKEN-XYZ nebula configuration guidance."
         a = self.add(secret, "endorsed")
 
-        # (a) Before redaction: live_unredacted_sources includes a
-        sources_before = memsom_redact.live_unredacted_sources(self.conn)
+        # (a) Before redaction: memsom.live_sources includes a
+        sources_before = memsom.live_sources(self.conn)
         ids_before = [r[0] for r in sources_before]
         self.assertIn(a, ids_before)
 
         memsom_redact.redact_node(self.conn, a, "secret")
 
-        # (a) After redaction: live_unredacted_sources excludes a
-        sources_after = memsom_redact.live_unredacted_sources(self.conn)
+        # (a) After redaction: memsom.live_sources excludes a (MS-13: routed
+        # through the same taint primitive, which excludes redacted=1)
+        sources_after = memsom.live_sources(self.conn)
         ids_after = [r[0] for r in sources_after]
         self.assertNotIn(a, ids_after)
 

@@ -37,6 +37,11 @@ try:
 except ImportError:
     memsom_redact = None
 
+try:
+    from memsom.retrieval import retrieve as memsom_retrieve
+except ImportError:
+    memsom_retrieve = None
+
 
 # ---------------------------------------------------------------------------
 # Migration
@@ -170,6 +175,55 @@ def _check_redacted_with_content(conn):
     return violations
 
 
+def _check_parentless_agent_derived(conn):
+    """(f) A live channel='agent-derived' node with ZERO parent edges.
+
+    derive_node itself forbids this (raises ValueError on an empty parent_ids
+    list) -- it can only be reached by a path that bypasses derive_node
+    entirely, which is exactly the signature MS-08's vault round-trip
+    produces: a re-ingested memsom-authored note lands as a plain SOURCE row
+    (via ingest_text) but keeps the exported channel='agent-derived' stamp.
+    """
+    rows = conn.execute(
+        "SELECT n.id FROM nodes n"
+        " LEFT JOIN edges e ON e.child = n.id"
+        " WHERE n.tombstoned = 0 AND n.channel = 'agent-derived' AND e.child IS NULL"
+        " ORDER BY n.id"
+    ).fetchall()
+    return [{
+        "kind": "parentless-agent-derived",
+        "detail": f"node {nid}: channel=agent-derived with zero parents -- a "
+                  f"state derive_node itself forbids",
+        "node": nid,
+    } for (nid,) in rows]
+
+
+def _check_unindexed_sources(conn):
+    """(g) A live, non-derived, non-redacted, non-archived source with NO
+    postings row -- MS-31: index_node's failure used to be a try-wrapped
+    upward import caught by a bare `except`, so a node could be fully live
+    and answerable via the enhanced pool / compose() while retrieve()
+    silently never surfaced it -- "no results" for a question the store CAN
+    answer. Flagged here independent of whether the indexing call ever ran,
+    so a failure is visible even when nothing happened to be watching.
+    """
+    if memsom_retrieve is None or not memsom_schema.table_exists(conn, "docstats"):
+        return []
+    clauses = ["tombstoned = 0", "channel != 'agent-derived'"]
+    for col in ("redacted", "archived"):
+        if memsom_schema.column_exists(conn, "nodes", col):
+            clauses.append(f"COALESCE({col}, 0) = 0")
+    rows = conn.execute(
+        "SELECT id FROM nodes WHERE " + " AND ".join(clauses) +
+        " AND id NOT IN (SELECT node_id FROM docstats) ORDER BY id"
+    ).fetchall()
+    return [{
+        "kind": "unindexed-source",
+        "detail": f"node {nid}: live source has no postings row -- invisible to retrieve()",
+        "node": nid,
+    } for (nid,) in rows]
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -185,6 +239,8 @@ def check(conn):
     violations.extend(_check_conf_mismatch(conn))           # (c)
     violations.extend(_check_live_child_of_tombstoned(conn))# (d)
     violations.extend(_check_redacted_with_content(conn))   # (e)
+    violations.extend(_check_parentless_agent_derived(conn))# (f)
+    violations.extend(_check_unindexed_sources(conn))       # (g)
     return violations
 
 
@@ -204,6 +260,7 @@ def rebuild_derived(conn):
         "cascades_repaired": 0,
         "content_wiped": 0,
         "dangling_edges_reported": 0,
+        "reindexed": 0,
     }
 
     # (a) dangling edges — report only, NEVER delete (rows and edges always survive)
@@ -255,6 +312,13 @@ def rebuild_derived(conn):
         with conn:
             cur = conn.execute("UPDATE nodes SET content='' WHERE redacted=1 AND content != ''")
         summary["content_wiped"] = conn.execute("SELECT changes()").fetchone()[0]
+
+    # (g) MS-31: a live source with no postings row -- either indexed or
+    # reported; this is the "indexed" half. index_node itself decides skip
+    # vs index (redacted/archived/tombstoned all already excluded above).
+    for v in _check_unindexed_sources(conn):
+        if memsom_retrieve.index_node(conn, v["node"]):
+            summary["reindexed"] += 1
 
     return summary
 

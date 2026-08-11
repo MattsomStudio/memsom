@@ -97,14 +97,14 @@
     "note": "Phase 4 builds the `ingest` single write path (A1.4) and this should collapse to 1: the ingest module's own call.",
     "source": "python scripts/gate_writeowner.py",
     "target": 1,
-    "value": 4
+    "value": 3
   },
   "upward_imports.count": {
     "control": "control-tested by construction: a planted try:-import of a strictly higher-ranked package is counted (see test coverage added alongside).",
     "note": "Phase 4 converts these into event subscribers (A1.4).",
     "source": "python scripts/upward_imports.py",
     "target": 0,
-    "value": 7
+    "value": 0
   },
   "writer_census.unadjudicated": {
     "control": "control-tested: redact.py's cascade_set-then-write (MS-06, fixed Phase 1 via BEGIN IMMEDIATE) is the shape this detects; reverting that fix raises the count by 1",

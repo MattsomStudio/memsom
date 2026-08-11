@@ -49,6 +49,17 @@ def _elevated_ids(conn):
     return set()
 
 
+def _superseded_parent_ids(conn, nid):
+    """Parent ids whose edge TO *nid* is marked superseded (MS-09).
+
+    Empty set on a DB where the `stale` module has never run (no such column).
+    """
+    if not memsom_schema.column_exists(conn, "edges", "superseded_at"):
+        return set()
+    return {r[0] for r in conn.execute(
+        "SELECT parent FROM edges WHERE child = ? AND superseded_at IS NOT NULL", (nid,))}
+
+
 def _is_fixed_point(node, elevated):
     """A node is a fixed point when its stored label is authoritative and the
     walk must NOT look past it.
@@ -146,7 +157,12 @@ def _effective(conn, start_id, memo, elevated):
             parent_rows = memsom.parents_of(conn, nid)
             # parents_of tuple: (id, content, channel, label, source_ref, created_at,
             #                    tombstoned, tombstoned_at, revoke_reason)
-            live_parent_ids = [r[0] for r in parent_rows if r[6] == 0]
+            # MS-09: also exclude a SUPERSEDED edge (freshen() marks the old
+            # parent edge superseded rather than deleting it -- parents_of()
+            # itself stays unfiltered for provenance/blame, only the ACTIVE
+            # floor computation must not count a retired parent).
+            superseded = _superseded_parent_ids(conn, nid)
+            live_parent_ids = [r[0] for r in parent_rows if r[6] == 0 and r[0] not in superseded]
 
             if not live_parent_ids:
                 # Zero live parents: fall back to stored label

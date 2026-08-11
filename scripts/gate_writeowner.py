@@ -22,8 +22,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _gatelib as g  # noqa: E402
 
-_DEFINER = "__init__.py"          # memsom/__init__.py defines insert_node today
-_FUTURE_OWNER = "kernel/ingest.py"  # A1.4's eventual single caller
+# Both paths below were Phase-0 guesses, written before the concrete moves
+# landed. `insert_node`/`derive_node` moved to integrity/dag.py in Phase 2
+# (the core split); the write path landed at integrity/ingest.py in Phase 4
+# (PLAN.md Sec1.4/Sec1.5), not the placeholder `kernel/ingest.py` -- ingest's
+# write-path logic is not pure, so kernel/ was never the right layer for it.
+_DEFINER = "integrity/dag.py"          # defines insert_node; derive_node's own internal call lives here too
+_FUTURE_OWNER = "integrity/ingest.py"  # the one write path (PLAN.md Sec1.4)
 
 
 def find_direct_callers() -> dict[str, list[int]]:

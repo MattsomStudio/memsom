@@ -13,9 +13,14 @@ CONTROL TEST (run 2026-07-31 against 9d165b1) — measured results:
     test_bridge_sweep_cascades_to_descendants       FAILED  (derived stayed live)
     test_freshen_is_atomic_across_both_phases       FAILED  (edge rewired despite raise)
 
-All five are RED-xfail gates. The first is a static AST gate — it is the one
-that also catches the NEXT hard delete somebody adds, which is why it is worth
-having even after stale.py is fixed.
+MS-09/MS-36 FIXED (Phase 4): freshen() now marks the old parent edge
+SUPERSEDED (edges.superseded_at) instead of hard-deleting it, and the rewire +
+regenerate call share one transaction. The first test below is a static AST
+gate — it is the one that also catches the NEXT hard delete somebody adds,
+which is why it is worth having even after stale.py is fixed.
+
+test_bridge_sweep_cascades_to_descendants (MS-35) is still RED — Phase 4 scope,
+fixed separately in bridge_import.py.
 
 RUN:
     pytest gates/test_gate_provenance_immutability.py -v
@@ -67,13 +72,11 @@ def _hard_delete_sites():
     return hits
 
 
-@pytest.mark.xfail(strict=True, reason="MS-11: stale.freshen DELETEs FROM edges (stale.py:402)")
 def test_no_hard_delete_on_frozen_tables():
     """Static gate: zero DELETE statements against nodes/edges anywhere.
 
-    CONTROL-TESTED: currently RED with exactly one site
-    (memsom/integrity/stale.py:402, inside freshen()). Inverting the gate — i.e.
-    asserting `hits` is non-empty — goes green, so the gate is discriminating.
+    CONTROL-TESTED: was RED with exactly one site
+    (memsom/integrity/stale.py, inside freshen()) before Phase 4.
     """
     hits = _hard_delete_sites()
     assert hits == [], (
@@ -112,7 +115,6 @@ def _freshened(conn):
     return p_old, p_new, derived
 
 
-@pytest.mark.xfail(strict=True, reason="MS-11: freshen hard-deletes the old provenance edge")
 def test_freshen_preserves_provenance_edge(conn):
     """The came-from edge is the product. freshen must not erase it."""
     import memsom
@@ -123,7 +125,6 @@ def test_freshen_preserves_provenance_edge(conn):
         f"parents are now {parents}")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-11: the deleted edge makes revoke_cascade miss the descendant")
 def test_revocation_reaches_freshened_descendant(conn):
     """Revoking a source must tombstone anything still quoting it."""
     import memsom
@@ -138,12 +139,11 @@ def test_revocation_reaches_freshened_descendant(conn):
         f"survived revoke_cascade")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-11: rewire and regenerate are separate transactions")
 def test_freshen_is_atomic_across_both_phases(conn, tmp_path, monkeypatch):
-    """freshen's docstring (stale.py:381) says "explicit, ATOMIC, audited".
+    """freshen's docstring says "explicit, ATOMIC, audited".
 
-    Phase 1 (edge rewire) commits in its own `with conn:`; phase 2
-    (rederive.regenerate) runs outside it. Force phase 2 to raise and assert the
+    Phase 1 (edge rewire) used to commit in its own `with conn:`; phase 2
+    (rederive.regenerate) ran outside it. Force phase 2 to raise and assert the
     DAG is unchanged. Reproduced here by NOT running rederive.migrate(), which
     makes get_recipe raise `no such table: derivation_recipe`.
     """
@@ -165,11 +165,12 @@ def test_freshen_is_atomic_across_both_phases(conn, tmp_path, monkeypatch):
         f"freshen raised but had already mutated the DAG: parents {before} -> {after}")
 
 
-@pytest.mark.xfail(strict=True, reason="MS-12: the bridge sweep tombstones the source without cascading")
+# MS-35 FIXED (Phase 4): the reconcile sweep now calls memsom.revoke_cascade
+# for every swept id, after its own transaction commits.
 def test_bridge_sweep_cascades_to_descendants(conn, tmp_path):
     """Deleting a memory file must cascade the tombstone to its derivatives.
 
-    memsom/bridge/bridge_import.py:727 issues a bare
+    memsom/bridge/bridge_import.py issues a bare
     `UPDATE nodes SET tombstoned = 1 ... WHERE id = ?` instead of calling
     memsom.revoke_cascade, so descendants are left live — and live derived nodes
     are exactly what distill/reflex export into training weights.

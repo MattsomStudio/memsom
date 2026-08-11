@@ -253,6 +253,8 @@ TOOLS = [
             "properties": {
                 "node": {"type": "integer", "description": "Node id to export (omit to use query)"},
                 "query": {"type": "string", "description": "Compose an answer to export"},
+                "clearance": {"type": "string",
+                              "description": "confidentiality ceiling (public|internal|secret|topsecret) for the node_id branch"},
                 "vault": {"type": "string", "description": "Vault path (default: $MEMDAG_OBSIDIAN_VAULT)"},
                 "folder": {"type": "string", "description": "Subfolder within the vault (default: memsom)"},
                 "title": {"type": "string", "description": "Note title (default: derived)"},
@@ -556,7 +558,14 @@ def _tool_argv(name, arguments):
     if name == "obsidian_export":
         argv = ["obsidian-export"]
         if arguments.get("node") is not None:
-            argv.append(str(arguments["node"]))
+            # MS-17: `node` is declared nargs='?' on the CLI, so a bare string
+            # value parses as whatever it looks like -- a value shaped like
+            # `--vault=...` is read as the OPTION, not the positional, and
+            # never reaches `_checked_vault`. Coerce to int at this boundary;
+            # a non-numeric node id is refused here, never forwarded.
+            argv.append(str(int(arguments["node"])))
+        if arguments.get("clearance"):
+            argv += ["--clearance", str(arguments["clearance"])]
         if arguments.get("query"):
             argv += ["--query", str(arguments["query"])]
         if arguments.get("vault"):

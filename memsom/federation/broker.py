@@ -283,7 +283,7 @@ def decide_and_forward(conn, cfg, policy, sid, fq, arguments, caller) -> dict:
         reason = "web_fetch" if fq in cfg.get("web_fetch_tools", []) else "policy_taint"
         memsom_session.lower_floor(conn, sid, taint, fq, reason)
         if cfg.get("ingest_external"):
-            from memsom.interface import ingest as memsom_ingest
+            from memsom.integrity import ingest as memsom_ingest
             text = _result_text(result)
             if text.strip():
                 with conn:
