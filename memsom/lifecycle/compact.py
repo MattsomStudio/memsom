@@ -34,9 +34,9 @@ import sys
 import memsom
 from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
-from memsom.retrieval import rederive as memsom_rederive
+from memsom.lifecycle import rederive as memsom_rederive
 from memsom.integrity import quarantine as memsom_quarantine
-from memsom.distill import llm as memsom_llm
+from memsom.retrieval import llm as memsom_llm
 from memsom.integrity import confid as memsom_confid
 
 

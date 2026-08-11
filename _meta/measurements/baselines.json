@@ -88,11 +88,11 @@
     "value": 70
   },
   "gate_readpool.builders": {
-    "control": "control-tested red: baseline > 1 at Phase 0 (MS-13/MS-08 -- live_sources, cmd_dump, redact.live_unredacted_sources, quarantine.live_unquarantined_sources all hand-roll a partial filter)",
-    "note": "Phase 7 wires this into CI and expects exactly 1 (the primitive's own site).",
+    "control": "control-tested red: baseline > 1 at Phase 0 (MS-13/MS-08 -- live_sources, cmd_dump, redact.live_unredacted_sources, quarantine.live_unquarantined_sources all hand-roll a partial filter). Phase 7 (layers land): the 10 modules the unrefined classifier flagged were adjudicated one by one -- distill.py's export_training and two dead partial-filter helpers (confid.sources_for_clearance, quarantine.live_source_ids, zero production consumers) were the only genuine duplicates, now fixed/deleted; the rest were false positives (single-row-by-key fetches, edges-table DAG walks, OR-joined inclusion predicates, positive quarantined-status listings) and the classifier was refined to stop flagging them, matching C-1's federation.py precedent.",
+    "note": "The scan excludes storage/schema.py (the primitive's own module) by construction, so 0 outside it is the fully-consolidated state.",
     "source": "python scripts/gate_readpool.py",
-    "target": 1,
-    "value": 10
+    "target": 0,
+    "value": 0
   },
   "gate_writeowner.direct_callers": {
     "control": "control-tested red: baseline > 1 at Phase 0 (bridge_import.py, obsidian.py and others each call insert_node directly; MS-20)",

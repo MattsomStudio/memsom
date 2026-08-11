@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-from memsom.bridge.bridge_import import parse_primary_index
+from memsom.kernel.frontmatter import parse_primary_index
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 from memsom.kernel.paths import default_memory_dir
 from memsom.distill.digest import resolve_budget

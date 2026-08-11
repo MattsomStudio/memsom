@@ -62,21 +62,18 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Architectural contracts. `.importlinter` documents itself as ENFORCED
-  # ("a break is a bug") and was GREEN AND UNTRACKED until 2026-07-31 — which
-  # is the same category of non-enforcement as an unwired goals file: a rule
-  # that only holds on one dev box is a preference.
+  # ("a break is a bug"). `memsom-layers` (the strict 9-rank total order,
+  # PLAN.md Sec1.1) is now IN this file -- Phase 7 ("the layers land")
+  # deleted `.importlinter-goals`, the aspirational file this used to be
+  # ratcheted against, and made the target itself the law.
   #
-  # Invoked as the console script ON PURPOSE, here and in goals_ratchet.py.
-  # MEASURED on the dev box: `python -m importlinter.cli lint-imports` prints
-  # NOTHING and exits 0, i.e. a permanently, silently green gate. Same note
-  # as the panel repo's ci.yml.
+  # Invoked as the console script ON PURPOSE. MEASURED on the dev box:
+  # `python -m importlinter.cli lint-imports` prints NOTHING and exits 0,
+  # i.e. a permanently, silently green gate. Same note as the panel repo's
+  # ci.yml.
   #
-  # Fails loudly if the config is missing rather than passing — a gate that
+  # Fails loudly if the config is missing rather than passing -- a gate that
   # cannot find its rules must not report success.
-  #
-  # `.importlinter-goals` is deliberately NOT run here: it is RED by design.
-  # Its violation count is ratcheted below (goals-ratchet), self-contained
-  # since Phase 0 — no sibling checkout of memsom-agentic-os required.
   # ---------------------------------------------------------------------
   contracts:
     runs-on: ubuntu-latest
@@ -106,13 +103,13 @@ jobs:
           fi
           lint-imports --config .importlinter
 
-  # The refactor-target file (`.importlinter-goals`) is red by design, but its
-  # violation count must never grow while the refactor is in flight (Phase 0,
-  # A9 / A-4). Brought home so memsom can enforce it without a sibling
-  # checkout of memsom-agentic-os. scripts/goals_ratchet.py's docstring has
-  # the two ways this kind of ratchet goes silently vacuous, and why neither
-  # applies here.
-  goals-ratchet:
+  # The two AST gates `.importlinter` cannot see (PLAN.md Sec1.6): it parses
+  # `import` statements, so a second read pool that builds its own WHERE
+  # clause, or a second write path that opens `nodes`/`edges` directly, is a
+  # legal import and a total silent bypass of the trust model. Both are
+  # ratchets seeded in Phase 0 and wired into CI here in Phase 7 ("the layers
+  # land"), per that phase's own exit gate.
+  ast-gates:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -122,11 +119,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install import-linter
-        run: python -m pip install --upgrade pip && python -m pip install import-linter
+      - name: One read-pool builder outside the primitive
+        run: python scripts/gate_readpool.py --check
 
-      - name: Goals-file violation ratchet
-        run: python scripts/goals_ratchet.py
+      - name: One write owner for nodes/edges outside the write path
+        run: python scripts/gate_writeowner.py --check
 
   # Server-side enforcement of the author-identifying-token gate across ALL git
   # history. The pre-push hook (.githooks/pre-push) is opt-in per clone and never

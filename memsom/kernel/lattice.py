@@ -83,6 +83,32 @@ def join(a, b):
     return max(a, b)
 
 
+def parse_min_integrity(val):
+    """Accept an int or a RANK name string; return an integer label floor.
+
+    Raises ValueError for unrecognised strings or out-of-range ints. Moved out
+    of distill.py (Phase 7): reflex.py needed the identical logic and could
+    not import distill (rank 5, above lifecycle's rank 4).
+    """
+    if isinstance(val, int):
+        if val not in NAME:
+            raise ValueError(f"integrity floor {val!r} out of range (0-3)")
+        return val
+    s = str(val).strip().lower()
+    if s in RANK:
+        return RANK[s]
+    name_map = {v.lower(): k for k, v in NAME.items()}
+    if s in name_map:
+        return name_map[s]
+    try:
+        n = int(s)
+    except ValueError:
+        raise ValueError(f"unrecognised integrity name: {val!r}")
+    if n not in NAME:
+        raise ValueError(f"integrity floor {n!r} out of range (0-3)")
+    return n
+
+
 def parse_conf(value) -> int:
     """Accept int 0-3 or string name (case-insensitive). Raise ValueError otherwise."""
     if isinstance(value, int):

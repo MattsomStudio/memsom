@@ -3,7 +3,7 @@ instead of a hardcoded ~/memsom, everything else unchanged."""
 import ast, collections
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent / "memsom"
-PKGS = {"interface","bridge","federation","distill","lifecycle","retrieval","integrity","storage"}
+PKGS = {"interface","bridge","federation","distill","lifecycle","retrieval","integrity","effects","storage","kernel"}
 
 def modname(p):
     rel = p.relative_to(ROOT.parent).with_suffix("")

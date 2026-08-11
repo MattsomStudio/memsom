@@ -47,7 +47,7 @@ PKG = pathlib.Path(memsom.__file__).resolve().parent
 #: it when the site goes. An allowlist that outlives its call site silently
 #: pre-authorises the next thing that reuses the name.
 _LINE_PARSERS = {
-    ("memsom/bridge/bridge_import.py", "_PRIMARY_RE"),
+    ("memsom/kernel/frontmatter.py", "_PRIMARY_RE"),
     ("memsom/kernel/frontmatter.py", "_FM_LIST_ITEM"),
     ("memsom/kernel/frontmatter.py", "_FM_KV"),
     ("memsom/lifecycle/contradict.py", "_META_TOK"),

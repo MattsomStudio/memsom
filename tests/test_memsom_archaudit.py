@@ -5,7 +5,7 @@ C-1: memsom_recompute.effective_labels — the shared-memo bulk pass must agree
      with the per-node recompute_label() oracle AND with what recompute_all()
      writes, including elevation fixed points.
 C-2: memsom_schema.taint_filter_clauses — the three full-pool read paths
-     (memsom_cli._build_pool, memsom_retrieve._build_retrieve_pool,
+     (memsom_retrieve._build_pool, memsom_retrieve._build_retrieve_pool,
      memsom_anticipatory.untainted_sources) must agree on the same poisoned
      fixture: tombstoned / quarantined / redacted / archived / above-clearance
      nodes are excluded by ALL of them; clean nodes are included by ALL.
@@ -121,7 +121,7 @@ class TestThreePoolsAgreeOnPoisonedFixture(Base):
         self.tainted = {self.tomb, self.quar, self.reda, self.arch, self.secret}
 
     def _pools_at_internal_clearance(self):
-        cli_pool = {r[0] for r in memsom_cli._build_pool(self.conn, "internal")}
+        cli_pool = {r[0] for r in memsom_retrieve._build_pool(self.conn, "internal")}
         retr_pool = memsom_retrieve._build_retrieve_pool(
             self.conn, memsom_confid.parse_conf("internal"),
             min_integrity=None, exclude_quarantined=True, exclude_redacted=True)

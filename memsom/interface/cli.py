@@ -48,10 +48,10 @@ from memsom.lifecycle import anticipatory as memsom_anticipatory
 from memsom.distill import distill as memsom_distill
 from memsom.lifecycle import heal as memsom_heal
 from memsom.integrity import trust as memsom_trust
-from memsom.distill import llm as memsom_llm
+from memsom.retrieval import llm as memsom_llm
 from memsom.interface import profile as memsom_profile
 from memsom.integrity import gate as memsom_gate
-from memsom.integrity import corroborate as memsom_corroborate
+from memsom.lifecycle import corroborate as memsom_corroborate
 from memsom.integrity import ingest as memsom_ingest
 from memsom.interface import ingest as memsom_ingest_cli
 from memsom.retrieval import retrieve as memsom_retrieve
@@ -63,13 +63,13 @@ from memsom.bridge import chats as memsom_chats
 from memsom.lifecycle import doctor as memsom_doctor
 from memsom.storage import config as memsom_config
 from memsom.bridge import obsidian as memsom_obsidian
-from memsom.retrieval import rederive as memsom_rederive
+from memsom.lifecycle import rederive as memsom_rederive
 from memsom.storage import session as memsom_session
 from memsom.integrity import capgate as memsom_capgate
 from memsom.federation import broker as memsom_broker
 from memsom.bridge import hook as memsom_hook
-from memsom.integrity import stale as memsom_stale
-from memsom.integrity import verify_stale as memsom_verify_stale
+from memsom.lifecycle import stale as memsom_stale
+from memsom.lifecycle import verify_stale as memsom_verify_stale
 from memsom.bridge import bridge_render as memsom_bridge_render
 from memsom.bridge import claude as memsom_claude
 from memsom.bridge import wire_claude as memsom_wire_claude
@@ -152,34 +152,6 @@ def migrate_all(conn):
 # Enhanced ask
 # ---------------------------------------------------------------------------
 
-def _build_pool(conn, clearance_name):
-    """Build the filtered source pool for the enhanced ask.
-
-    Filters applied (all stacked on top of the frozen live_sources behaviour):
-      - tombstoned = 0
-      - channel != 'agent-derived'
-      - status != 'quarantined'   (quarantine module layer)
-      - redacted = 0              (redact module layer)
-      - conf_label <= clearance   (Bell-LaPadula no-read-up)
-
-    Returns list of rows shaped like memsom.live_sources:
-    (id, content, channel, label, source_ref).
-
-    Taint dimensions come from memsom_schema.taint_filter_clauses — the ONE
-    shared untainted-pool primitive (same clauses as
-    memsom_retrieve._build_retrieve_pool and
-    memsom_anticipatory._untainted_clauses, by construction).
-    """
-    clearance = memsom_confid.parse_conf(clearance_name)
-    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=clearance)
-    return conn.execute(
-        "SELECT id, content, channel, label, source_ref FROM nodes"
-        " WHERE channel != 'agent-derived' AND " + " AND ".join(clauses) +
-        " ORDER BY label DESC, id ASC",
-        params
-    ).fetchall()
-
-
 def _count_excluded(conn, pool_ids, clearance_name):
     """Return a dict of exclusion counts for the summary line.
 
@@ -251,7 +223,7 @@ def cmd_ask(args):
                       "single query; prefer a warm reindex/server for repeated use.",
                       file=sys.stderr)
 
-        pool = _build_pool(conn, clearance)
+        pool = memsom_retrieve._build_pool(conn, clearance)
 
         if getattr(args, "graph", False):
             # GraphRAG-lite: retrieval re-ranked by the rel_edges (wikilink) graph.

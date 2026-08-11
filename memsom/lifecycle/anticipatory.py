@@ -8,7 +8,7 @@ corpus it touches (surprise comparison, prefetch composition, recombination
 history) excludes: tombstoned=1, redacted=1, status='quarantined', archived=1,
 external-tainted derivations (agent-derived nodes whose integrity label is
 EXTERNAL/0), and anything above the caller's clearance.  This mirrors the
-spine's pool filters (memsom_cli._build_pool / memsom_retrieve.retrieve).
+spine's pool filters (memsom_retrieve._build_pool / memsom_retrieve.retrieve).
 A poisoned node can therefore never be amplified by prefetch, cited by the
 surprise gate, or counted as recombination precedent.
 
@@ -48,7 +48,7 @@ import sys
 
 import memsom
 from memsom.storage import schema as memsom_schema
-from memsom.retrieval import rederive as memsom_rederive
+from memsom.lifecycle import rederive as memsom_rederive
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
 from memsom.integrity import confid as memsom_confid
@@ -101,7 +101,7 @@ def _untainted_clauses(conn, clearance):
     never run, so no node can carry that taint marker — nothing to exclude).
 
     Delegates to memsom_schema.taint_filter_clauses — the ONE shared
-    untainted-pool primitive (same clauses as memsom_cli._build_pool and
+    untainted-pool primitive (same clauses as memsom_retrieve._build_pool and
     memsom_retrieve._build_retrieve_pool, by construction).
     """
     return memsom_schema.taint_filter_clauses(

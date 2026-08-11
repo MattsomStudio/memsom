@@ -15,7 +15,7 @@ import memsom
 from memsom.bridge import bridge_import as bi
 from memsom.lifecycle import forget as forget
 from memsom.distill import digest as digest
-from memsom.integrity import stale as memsom_stale
+from memsom.lifecycle import stale as memsom_stale
 
 
 FILES = {

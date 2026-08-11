@@ -23,7 +23,7 @@ import memsom
 from memsom import childenv
 from memsom.federation import federation as memsom_fed
 from memsom.integrity import confid as memsom_confid
-from memsom.integrity import corroborate as memsom_corr
+from memsom.lifecycle import corroborate as memsom_corr
 from memsom.integrity import redact as memsom_redact
 from memsom.interface import mcp as memsom_mcp
 from memsom.lifecycle import compact as memsom_compact

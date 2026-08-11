@@ -58,8 +58,9 @@ import argparse
 import sys
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
-from memsom.retrieval import rederive as memsom_rederive
+from memsom.lifecycle import rederive as memsom_rederive
 from memsom.integrity import recompute as memsom_recompute
 from memsom.integrity import confid as memsom_confid
 
@@ -350,6 +351,22 @@ def on_reingest_supersede(conn, old_id, new_id, source_ref):
     return mark_stale_cascade(
         conn, old_id,
         f"source superseded by node {new_id} (re-ingest of {source_ref})")
+
+
+# ---------------------------------------------------------------------------
+# Event subscription -- integrity/ingest.py (rank 2) cannot import this
+# module (lifecycle, rank 4) directly, so the re-ingest staleness trigger is
+# wired through kernel.events (rank 0). Best-effort, matching the try/except
+# it replaces: emit() itself already isolates this subscriber's failure from
+# ingest_text and from any other subscriber, so nothing here needs its own
+# try/except to preserve that.
+# ---------------------------------------------------------------------------
+
+def _on_node_reingest_supersede(conn, old_id, new_id, source_ref):
+    on_reingest_supersede(conn, old_id, new_id, source_ref)
+
+
+memsom_events.subscribe("node_reingest_supersede", _on_node_reingest_supersede)
 
 
 # ---------------------------------------------------------------------------

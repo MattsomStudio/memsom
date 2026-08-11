@@ -34,9 +34,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from memsom.lifecycle import compact as memsom_compact
-from memsom.distill import llm as memsom_llm
+from memsom.retrieval import llm as memsom_llm
 from memsom.retrieval import retrieve as memsom_retrieve
-from memsom.distill.llm import LlmUnavailable, keep_alive, llm_compose
+from memsom.retrieval.llm import LlmUnavailable, keep_alive, llm_compose
 
 
 # ---------------------------------------------------------------------------

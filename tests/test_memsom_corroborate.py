@@ -17,7 +17,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
 from memsom.integrity import recompute as memsom_recompute
-from memsom.integrity import corroborate as memsom_corroborate
+from memsom.lifecycle import corroborate as memsom_corroborate
 
 
 class Base(unittest.TestCase):

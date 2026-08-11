@@ -30,13 +30,56 @@ import _gatelib as g  # noqa: E402
 _TAINT_COLS = ("tombstoned", "redacted", "archived", "status", "conf_label")
 _PRIMITIVE_MODULE = "storage/schema.py"
 
+# Phase 7 refinement, control-tested against the 10 modules the unrefined
+# substring scan flagged at that phase's start: a raw "NODES + >=2 taint
+# columns" match also fires on shapes that are NOT a read-pool builder and
+# were never meant to route through taint_filter_clauses --
+#
+#   - a single-row fetch by primary key ("WHERE id = ?" / "WHERE uuid = ?"):
+#     a column LIST for one already-known row, not a pool.
+#   - an INSERT statement: a column list for a write, not a read pool.
+#   - an edges-table parent/ancestor walk (this codebase's "e.child"/"e.parent"
+#     aliasing convention): a DAG traversal for one node, not a pool scan.
+#   - an OR-joined predicate with no AND joining two taint columns: this is
+#     an INCLUSION test ("is this node tainted") -- e.g. reflex.py's MS-01
+#     backstop and federation.py's changeset export, which must ship dead
+#     rows for revocation to propagate (DECISIONS-AND-DEVIATIONS.md C-1).
+#     The primitive builds an AND-joined EXCLUSION clause; these are its
+#     logical inverse, not a duplicate of it.
+#   - a positive "status = 'quarantined'" listing: an audit view that must
+#     SHOW quarantined rows -- the opposite of the primitive's own
+#     "status != 'quarantined'" exclusion clause, which never appears
+#     outside storage/schema.py.
+#
+# Measured against the Phase-7 baseline: applying these rules leaves exactly
+# the genuine duplicate-pool sites flagged (which were then routed through
+# the primitive, or deleted as dead partial-filter helpers per the MS-39
+# precedent), matching the same text-classifier-vs-AST correction C-1
+# already made for federation.py.
+import re as _re
+_SINGLE_ROW_RE = _re.compile(r"WHERE\s+(id|uuid)\s*=\s*\?", _re.IGNORECASE)
+_POS_QUARANTINED_RE = _re.compile(r"STATUS\s*=\s*'QUARANTINED'", _re.IGNORECASE)
+_NEG_QUARANTINED_RE = _re.compile(r"STATUS\s*!=\s*'QUARANTINED'", _re.IGNORECASE)
+
 
 def _is_readpool_literal(value: str) -> bool:
     up = value.upper()
     if "NODES" not in up:
         return False
     hits = sum(1 for c in _TAINT_COLS if c.upper() in up)
-    return hits >= 2
+    if hits < 2:
+        return False
+    if up.lstrip().startswith("INSERT"):
+        return False
+    if _SINGLE_ROW_RE.search(value):
+        return False
+    if "E.CHILD" in up or "E.PARENT" in up:
+        return False
+    if _POS_QUARANTINED_RE.search(value) and not _NEG_QUARANTINED_RE.search(value):
+        return False
+    if " OR " in up and " AND " not in up:
+        return False
+    return True
 
 
 def find_builders() -> dict[str, list[int]]:
@@ -73,9 +116,18 @@ def main() -> int:
               source="python scripts/gate_readpool.py",
               control="control-tested red: baseline > 1 at Phase 0 (MS-13/MS-08 -- "
                       "live_sources, cmd_dump, redact.live_unredacted_sources, "
-                      "quarantine.live_unquarantined_sources all hand-roll a partial filter)",
-              target=1,
-              note="Phase 7 wires this into CI and expects exactly 1 (the primitive's own site).")
+                      "quarantine.live_unquarantined_sources all hand-roll a partial filter). "
+                      "Phase 7 (layers land): the 10 modules the unrefined classifier flagged "
+                      "were adjudicated one by one -- distill.py's export_training and two dead "
+                      "partial-filter helpers (confid.sources_for_clearance, "
+                      "quarantine.live_source_ids, zero production consumers) were the only "
+                      "genuine duplicates, now fixed/deleted; the rest were false positives "
+                      "(single-row-by-key fetches, edges-table DAG walks, OR-joined inclusion "
+                      "predicates, positive quarantined-status listings) and the classifier was "
+                      "refined to stop flagging them, matching C-1's federation.py precedent.",
+              target=0,
+              note="The scan excludes storage/schema.py (the primitive's own module) by "
+                   "construction, so 0 outside it is the fully-consolidated state.")
     return 0
 
 

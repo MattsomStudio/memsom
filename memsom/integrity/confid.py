@@ -14,7 +14,6 @@ Public API:
     classify(conn, nid, level)
     recompute_conf(conn, nid) -> (old, new)
     recompute_conf_all(conn) -> list[(id, old, new)]
-    sources_for_clearance(conn, clearance) -> list[int]
 
 CLI sub-commands registered via register(subparsers).
 """
@@ -213,8 +212,11 @@ def effective_confs(conn: sqlite3.Connection) -> dict:
     flag exactly the rows recompute_conf_all would fix — including multi-hop
     laundered chains a single-level check misses (HEAL-1).
     """
+    # tombstoned=0 dimension sourced from the ONE taint-filter primitive
+    # (storage.schema.taint_filter_clauses) rather than a hand-rolled literal.
+    tomb_clause = memsom_schema.taint_filter_clauses(conn)[0][0]
     nodes = conn.execute(
-        "SELECT id, channel, conf_label FROM nodes WHERE tombstoned = 0"
+        f"SELECT id, channel, conf_label FROM nodes WHERE {tomb_clause}"
     ).fetchall()
     conf = {nid: c for nid, _ch, c in nodes}
     derived = [nid for nid, ch, _c in nodes if ch == "agent-derived"]
@@ -238,27 +240,6 @@ def effective_confs(conn: sqlite3.Connection) -> dict:
         if not progressed:
             break
     return conf
-
-
-def sources_for_clearance(conn: sqlite3.Connection, clearance) -> list:
-    """Return ids of live source nodes whose conf_label <= clearance (no read-up).
-
-    Clearance is parsed via parse_conf (int 0-3 or string name).
-    """
-    clearance = parse_conf(clearance)
-    # Defense-in-depth (Bypass-2G): archived nodes are consolidated-away and must
-    # never re-enter a clearance read pool — exclude them when the column exists.
-    archived_clause = ""
-    if memsom_schema.column_exists(conn, "nodes", "archived"):
-        archived_clause = " AND archived = 0"
-    rows = conn.execute(
-        "SELECT id FROM nodes "
-        "WHERE tombstoned = 0 AND channel != 'agent-derived' AND conf_label <= ?"
-        + archived_clause +
-        " ORDER BY id",
-        (clearance,)
-    ).fetchall()
-    return [r[0] for r in rows]
 
 
 # ---------------------------------------------------------------------------

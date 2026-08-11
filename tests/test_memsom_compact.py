@@ -438,7 +438,7 @@ class TestExplainAndBlameStillWalkArchived(Base):
 
 class TestGroupByClaim(Base):
     def test_group_by_claim(self):
-        from memsom.integrity import corroborate as memsom_corroborate
+        from memsom.lifecycle import corroborate as memsom_corroborate
 
         memsom_corroborate.migrate(self.conn)
         memsom_corroborate.register_root(self.conn, "rootA", by="test")

@@ -33,8 +33,9 @@ import sys
 from pathlib import Path
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
-from memsom.bridge.bridge_import import parse_index_entries, parse_primary_index
+from memsom.kernel.frontmatter import parse_index_entries, parse_primary_index
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 from memsom.kernel.paths import default_memory_dir
 from memsom.lifecycle import forget as _forget
@@ -284,14 +285,22 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
                                  "rs": e["rs"]})
     # Read-time fact resolution (docs/facts-design.md Phase 2): substitute
     # [[fact_*]] in hooks and literal lines with the CURRENT value. Must happen
-    # BEFORE the budget loop below — resolved values change line length, and
+    # BEFORE the budget loop below -- resolved values change line length, and
     # eviction has to see the real rendered sizes, not the placeholder's.
-    from memsom.bridge import facts as memsom_facts
+    # bridge.facts (rank 7) cannot be imported directly from here (rank 5),
+    # so this is routed through kernel.events (rank 0); a missing subscriber
+    # degrades to "text unchanged", matching resolve_ref's own designed
+    # behaviour for an unresolvable reference (module docstring, facts.py).
+    def _resolve_facts(text):
+        result = {"text": text}
+        memsom_events.emit("resolve_fact_refs", conn=conn, text=text,
+                            as_of=None, result=result)
+        return result["text"]
     for e in hot:
         if e["kind"] == "literal":
-            e["line"] = memsom_facts.resolve_fact_refs(conn, e["line"])
+            e["line"] = _resolve_facts(e["line"])
         elif e.get("desc"):
-            e["desc"] = memsom_facts.resolve_fact_refs(conn, e["desc"])
+            e["desc"] = _resolve_facts(e["desc"])
     # droppable = non-pinned user files, lowest RS first (dropped in THIS order)
     droppable = sorted([e for e in hot if e["kind"] == "file" and not e["pinned"]],
                        key=lambda e: (e["rs"] if e["rs"] is not None else 0.0))

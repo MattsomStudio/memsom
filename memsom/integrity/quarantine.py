@@ -12,7 +12,6 @@ consolidate(conn)                    -> list[(id, cause_str)]
 quarantine_node(conn, nid, reason)   -> bool        True=flipped, False=no-op
 promote(conn, nid, by)               -> None        raises ValueError on gate fail
 list_quarantined(conn)               -> list[dict]
-live_source_ids(conn)                -> list[int]
 
 CLI sub-commands (via register(subparsers))
 -------------------------------------------
@@ -57,7 +56,7 @@ def migrate(conn: sqlite3.Connection) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _has_live_ancestor_channel(conn: sqlite3.Connection, nid: int, channel: str) -> bool:
+def has_live_ancestor_channel(conn: sqlite3.Connection, nid: int, channel: str) -> bool:
     """Return True if *nid* has at least one live (non-tombstoned) ancestor
     whose channel == *channel*."""
     row = conn.execute(
@@ -84,9 +83,12 @@ def consolidate(conn: sqlite3.Connection) -> list:
     Second call returns [] (idempotent).
     """
     migrate(conn)
+    # tombstoned=0 dimension sourced from the ONE taint-filter primitive
+    # (storage.schema.taint_filter_clauses) rather than a hand-rolled literal.
+    tomb_clause = memsom_schema.taint_filter_clauses(conn)[0][0]
     candidates = conn.execute(
-        "SELECT id, label FROM nodes"
-        " WHERE tombstoned = 0 AND channel = 'agent-derived' AND status = 'live'"
+        f"SELECT id, label FROM nodes"
+        f" WHERE {tomb_clause} AND channel = 'agent-derived' AND status = 'live'"
         " ORDER BY id"
     ).fetchall()
 
@@ -115,7 +117,7 @@ def consolidate(conn: sqlite3.Connection) -> list:
             cause = None
             if label == 0:
                 cause = "integrity=EXTERNAL"
-            elif _has_live_ancestor_channel(conn, nid, "external"):
+            elif has_live_ancestor_channel(conn, nid, "external"):
                 cause = "live external ancestor"
 
             if cause is None:
@@ -188,8 +190,8 @@ def promote(conn: sqlite3.Connection, nid: int, by: str) -> None:
         if tombstoned or status != "quarantined":
             raise ValueError(f"node {nid} is not quarantined (status={status!r})")
 
-        has_endorsed = _has_live_ancestor_channel(conn, nid, "endorsed")
-        has_external = _has_live_ancestor_channel(conn, nid, "external")
+        has_endorsed = has_live_ancestor_channel(conn, nid, "endorsed")
+        has_external = has_live_ancestor_channel(conn, nid, "external")
 
         if not has_endorsed and has_external:
             raise ValueError(
@@ -221,21 +223,6 @@ def list_quarantined(conn: sqlite3.Connection) -> list:
     ).fetchall()
     keys = ("id", "channel", "label", "quarantine_reason", "quarantined_at")
     return [dict(zip(keys, r)) for r in rows]
-
-
-def live_source_ids(conn: sqlite3.Connection) -> list:
-    """Return ids of live_sources rows whose status == 'live'.
-
-    memsom.live_sources is the source of truth for which rows are sources;
-    this function just filters out quarantined ones.
-    """
-    migrate(conn)
-    rows = conn.execute(
-        "SELECT id FROM nodes"
-        " WHERE tombstoned = 0 AND channel != 'agent-derived' AND status = 'live'"
-        " ORDER BY label DESC, id ASC"
-    ).fetchall()
-    return [r[0] for r in rows]
 
 
 # MS-39: live_unquarantined_sources deleted (charter R2). Zero production

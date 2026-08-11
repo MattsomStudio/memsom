@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 from memsom.kernel.paths import default_memory_dir
 from memsom.paths import UnsafePath, safe_join
@@ -101,9 +102,30 @@ def tombstone_memory(conn, mem_dir, stem, *, reason="", force=False, delete_file
     # this call's memory dir (honours --memory-dir), not just the live location.
     erased = 0
     if hard and node_id is not None:
-        from memsom.retrieval import rederive as memsom_rederive
-        erased = len(memsom_rederive.erase(
-            conn, node_id, reason or "hard tombstone", memory_dir=mem_root))
+        # rederive.erase() lives in lifecycle/ (rank 4); tombstone stays in
+        # integrity/ (rank 2), so this is a rank-2-reaching-rank-4 call --
+        # routed through kernel.events (rank 0) rather than a direct upward
+        # import. `result` is a mutable out-param the subscriber writes into,
+        # since emit() itself only ever returns collected failures, never a
+        # subscriber's return value (kernel/events.py's own no-swallow
+        # contract). A subscriber failure is re-raised, not swallowed --
+        # tombstone --hard must fail loudly, exactly as the direct call did.
+        result = {}
+        failures = memsom_events.emit(
+            "node_tombstoned_hard", conn=conn, node_id=node_id,
+            reason=reason or "hard tombstone", memory_dir=mem_root, result=result)
+        if failures:
+            raise failures[0][1]
+        if "erased" not in result:
+            # No subscriber ran -- lifecycle.rederive (which registers the
+            # subscriber at import time) was never imported on this path.
+            # Fail loud rather than silently reporting 0 erasures: a hard
+            # tombstone that reports success without erasing anything is
+            # exactly the defect class this codebase exists to close.
+            raise RuntimeError(
+                "hard tombstone: no subscriber answered 'node_tombstoned_hard' -- "
+                "memsom.lifecycle.rederive was never imported on this path")
+        erased = len(result["erased"])
         conn.commit()
 
     # file_deleted means THIS call removed a file. In hard mode redact_node's purge

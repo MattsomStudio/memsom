@@ -23,6 +23,7 @@ break atomicity); `migrate(conn)` is run at startup by cli.migrate_all.
 import json
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
 
 # Must match extractive_summary's default so a recipe that never stored k
@@ -299,3 +300,21 @@ def erase(conn, node_id, reason, *, memory_dir=None, vault=None):
         erased.update(memsom_redact.redact_node(
             conn, target, reason, cascade=True, memory_dir=memory_dir, vault=vault))
     return sorted(erased)
+
+
+# ---------------------------------------------------------------------------
+# Event subscription -- tombstone.py (integrity, rank 2) needs erase()'s
+# result synchronously (the erased count feeds its own return dict) but
+# cannot import this module directly once it moves to lifecycle (rank 4).
+# `result` is a mutable out-param the emitter passes in and this subscriber
+# writes into, since emit() itself never returns a subscriber's return value
+# (kernel/events.py: it only ever collects failures). An exception here is
+# NOT swallowed -- it propagates back to the emitter as a collected failure,
+# which tombstone.py re-raises rather than treating as a soft degrade.
+# ---------------------------------------------------------------------------
+
+def _on_node_tombstoned_hard(conn, node_id, reason, memory_dir, result, **_ignored):
+    result["erased"] = erase(conn, node_id, reason, memory_dir=memory_dir)
+
+
+memsom_events.subscribe("node_tombstoned_hard", _on_node_tombstoned_hard)

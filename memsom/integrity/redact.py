@@ -245,10 +245,18 @@ def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
     # it, so the highest-value fragment of a "destroyed" document survived
     # verbatim in `claims` and was printed unfiltered by `claims-list`. Reap
     # every claim_assertions row this redaction produced, and any claims row
-    # left with no assertion at all once that is done.
+    # left with no assertion at all once that is done. corroborate.py lives in
+    # lifecycle/ (rank 4); redact.py is integrity/ (rank 2), so this too goes
+    # through kernel.events (rank 0) rather than a direct upward import -- its
+    # own event, kept separate from "node_redacted" above so a claims-reap
+    # failure is never miscounted as an index-purge failure.
+    claims_reap_failures = []
     if redacted_ids:
-        from memsom.integrity import corroborate as memsom_corroborate
-        memsom_corroborate.reap_claims_for_nodes(conn, redacted_ids)
+        for tid in redacted_ids:
+            claims_reap_failures += memsom_events.emit(
+                "node_redacted_claims", conn=conn, node_id=tid)
+        if purge_stats is not None:
+            purge_stats["claims_reap_failed"] = len(claims_reap_failures)
 
     # Reach disk: unlink the flat memory file + any vault note backing a redacted
     # node, so the plaintext is gone from disk and can't resurrect on the next

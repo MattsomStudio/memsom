@@ -16,8 +16,8 @@ warnings.simplefilter("error", DeprecationWarning)
 import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.interface import ingest as memsom_ingest
-from memsom.retrieval import rederive as memsom_rederive
-from memsom.integrity import stale as memsom_stale
+from memsom.lifecycle import rederive as memsom_rederive
+from memsom.lifecycle import stale as memsom_stale
 
 
 class Base(unittest.TestCase):

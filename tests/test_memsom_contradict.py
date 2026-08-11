@@ -22,7 +22,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
 from memsom.interface import ingest as memsom_ingest
-from memsom.integrity import stale as memsom_stale
+from memsom.lifecycle import stale as memsom_stale
 from memsom.lifecycle import contradict as memsom_contradict
 
 
@@ -163,7 +163,7 @@ class TestObserveOnly(Base):
         self.assertFalse(obs[0]["enforced"])
 
     def test_reason_namespace_survives_verify_stale(self):
-        from memsom.integrity import verify_stale as memsom_verify_stale
+        from memsom.lifecycle import verify_stale as memsom_verify_stale
         old = self.add("Sucuri is the active WAF.", source_ref="memory:acme_waf")
         new = self.add("Cloudflare is the active WAF.", source_ref="b")
         memsom_contradict.detect(self.conn, new,

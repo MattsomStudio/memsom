@@ -3,9 +3,15 @@
 #   pip install import-linter
 #   lint-imports                     # picks this file up automatically
 #
-# Aspirational contracts that are red today live in .importlinter-goals and are
-# NOT wired into CI. Run them deliberately to watch the refactor land:
-#   lint-imports --config .importlinter-goals
+# `memsom-layers` below is the strict 9-rank total order (PLAN.md Sec1.1,
+# charter amendment A-2). It replaced `.importlinter-goals` (Phase 7,
+# "the layers land") -- that file's aspirational, siblings-plus-independence
+# layout is now this file's law: the whole refactor target collapses to ONE
+# `layers` contract, binary green or red, with no `independence` contracts and
+# no same-level pairs. See PLAN.md Sec1.1 for why (a `layers` contract enforces
+# nothing WITHIN a level, so a declared sibling pair was a deferred decision
+# buying zero enforcement -- the charter's own `acyclic-siblings-mid` contract
+# was red via an indirect chain and reported nothing `memsom-layers` didn't).
 #
 # ---------------------------------------------------------------------------
 # FOOTGUN, read before editing: in a `forbidden` contract a bare module name
@@ -28,6 +34,30 @@ root_package = memsom
 # memsom_panel is not a root package here on purpose: memsom must lint cleanly
 # on a machine where the panel is not installed at all.
 include_external_packages = True
+
+# ---------------------------------------------------------------------------
+# The strict 9-rank total order (PLAN.md Sec1.1). Listed top (most permissive,
+# may import everything below) to bottom (most foundational, stdlib only).
+# `effects` and `storage` are tied at rank 1 -- both sit directly on top of
+# kernel and neither may import the other (no measured edge either way).
+# Allowed downward skip: anything -> kernel. Forbidden skip: anything above
+# integrity reaching effects directly (an effects boundary with a back door
+# is not a boundary) -- a `layers` contract already refuses ANY skip, so this
+# is enforced for free, not by a separate rule.
+# ---------------------------------------------------------------------------
+[importlinter:contract:memsom-layers]
+name = memsom internal layering
+type = layers
+layers =
+    memsom.interface
+    memsom.bridge
+    memsom.federation
+    memsom.distill
+    memsom.lifecycle
+    memsom.retrieval
+    memsom.integrity
+    memsom.effects : memsom.storage
+    memsom.kernel
 
 # ---------------------------------------------------------------------------
 # The rule the 2026-07-30 split rests on. memsom is the public, stdlib-only

@@ -643,7 +643,7 @@ class TestFactDependencyCascade(Base):
         descendants = {r[0] for r in memsom.cascade_set(self.conn, a)}
         self.assertEqual(descendants, {a, b})
 
-        from memsom.integrity import stale as memsom_stale
+        from memsom.lifecycle import stale as memsom_stale
         n = memsom_stale.mark_stale_cascade(self.conn, a, "cycle test")
         self.assertEqual(n, 2)   # both a and b marked stale; no infinite loop
 

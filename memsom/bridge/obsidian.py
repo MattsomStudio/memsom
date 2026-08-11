@@ -68,6 +68,7 @@ from memsom.paths import UnsafePath, safe_join
 from memsom.storage import schema as memsom_schema
 from memsom.integrity import ingest as memsom_ingest
 from memsom.retrieval import relate as memsom_relate
+from memsom.retrieval import retrieve as memsom_retrieve
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -579,8 +580,7 @@ def _compose_answer(conn, query: str, clearance: str):
     as wikilink backlinks in a Sources section — and the REAL cited source node
     ids are returned (so memsom-source-nodes and the backlinks are populated).
     """
-    from memsom.interface import cli as memsom_cli
-    pool = memsom_cli._build_pool(conn, clearance)
+    pool = memsom_retrieve._build_pool(conn, clearance)
     if not pool:
         return "", []
     text, used = memsom.compose(query, pool)

@@ -13,7 +13,7 @@ taint_filter_clauses(conn, clearance=None, include_quarantined=False)
                                   -> (clauses, params)
     THE shared untainted-pool WHERE fragments (tombstoned / quarantined /
     redacted / archived / conf_label).  Every full-pool read path
-    (memsom_cli._build_pool, memsom_retrieve._build_retrieve_pool,
+    (memsom_retrieve._build_pool, memsom_retrieve._build_retrieve_pool,
     memsom_anticipatory._untainted_clauses) builds on this so a future taint
     column is added in ONE place and all of them inherit it.
 

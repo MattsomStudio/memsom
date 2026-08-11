@@ -97,8 +97,8 @@ def conn(tmp_path, monkeypatch):
 
 def _freshened(conn):
     import memsom
-    from memsom.integrity import stale as memsom_stale
-    from memsom.retrieval import rederive as memsom_rederive
+    from memsom.lifecycle import stale as memsom_stale
+    from memsom.lifecycle import rederive as memsom_rederive
 
     memsom_stale.migrate(conn)
     memsom_rederive.migrate(conn)
@@ -148,7 +148,7 @@ def test_freshen_is_atomic_across_both_phases(conn, tmp_path, monkeypatch):
     makes get_recipe raise `no such table: derivation_recipe`.
     """
     import memsom
-    from memsom.integrity import stale as memsom_stale
+    from memsom.lifecycle import stale as memsom_stale
     memsom_stale.migrate(conn)
     with conn:
         a = memsom.insert_node(conn, "alpha payload text", "user", source_ref="s.md")

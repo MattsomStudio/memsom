@@ -41,8 +41,9 @@ import re
 import sys
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
-from memsom.retrieval import rederive as memsom_rederive
+from memsom.lifecycle import rederive as memsom_rederive
 from memsom.integrity import trust as memsom_trust
 from memsom.integrity import recompute as memsom_recompute
 
@@ -504,6 +505,21 @@ def cmd_register_root(args):
             print(f"root already registered")
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Event subscription -- redact.py (integrity, rank 2) cannot import this
+# module (lifecycle, rank 4) directly, so MS-16's claims reap is wired
+# through kernel.events (rank 0) instead, one event per redacted node id
+# (mirrors the "node_redacted" index-purge subscriber in retrieval/retrieve.py).
+# ---------------------------------------------------------------------------
+
+def _on_node_redacted_claims(conn, node_id):
+    reap_claims_for_nodes(conn, [node_id])
+
+
+memsom_events.subscribe("node_redacted_claims", _on_node_redacted_claims)
+
 
 
 def cmd_assert_claim(args):

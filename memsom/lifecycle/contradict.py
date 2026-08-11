@@ -407,7 +407,7 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
 
     marked = []
     ts = _now()
-    from memsom.integrity import stale as memsom_stale
+    from memsom.lifecycle import stale as memsom_stale
     for cid, ctext in candidates:
         if cid == new_id:
             continue

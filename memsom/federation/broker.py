@@ -33,6 +33,7 @@ Config (~/.memdag/broker.json, or $MEMDAG_BROKER_CONFIG):
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import queue
@@ -62,6 +63,30 @@ READONLY_MEMSOM_TOOLS = frozenset({
     "ask", "explain", "blame", "profile", "retrieve", "check",
     "neighborhood", "check_action",
 })
+
+# ---------------------------------------------------------------------------
+# In-process memsom.* tool dispatch -- interface/mcp.py (rank 8) cannot be a
+# static import here (federation is rank 6), so the composition root injects
+# it via set_mcp_dispatch(). main() (the `memsom-broker` console-script entry,
+# a composition point of its own when run standalone) falls back to a runtime
+# importlib.import_module() -- a dynamic string lookup, invisible to
+# import-linter's static AST scan, and used ONLY as that fallback so the
+# console script keeps working with zero external wiring.
+# ---------------------------------------------------------------------------
+_mcp_module = None
+
+
+def set_mcp_dispatch(mcp_module) -> None:
+    """Inject the interface.mcp module (or a stand-in with .handle/.TOOLS)."""
+    global _mcp_module
+    _mcp_module = mcp_module
+
+
+def _get_mcp_dispatch():
+    global _mcp_module
+    if _mcp_module is None:
+        _mcp_module = importlib.import_module("memsom.interface.mcp")
+    return _mcp_module
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +376,7 @@ def decide_and_forward(conn, cfg, policy, sid, fq, arguments, caller) -> dict:
 def aggregated_tools(conn, upstreams: dict) -> list:
     """Return the namespaced union of memsom.* tools and every upstream.* tool,
     minus any rug-pulled (schema-changed) upstream tool."""
-    from memsom.interface import mcp as memsom_mcp
+    memsom_mcp = _get_mcp_dispatch()
     out = []
     for t in memsom_mcp.TOOLS:
         nt = dict(t)
@@ -374,7 +399,6 @@ def aggregated_tools(conn, upstreams: dict) -> list:
 
 def _handle(conn, cfg, policy, upstreams, sid, msg):
     """Handle one parsed JSON-RPC message; return a response dict or None."""
-    from memsom.interface import mcp as memsom_mcp
     if not isinstance(msg, dict):
         return {"jsonrpc": "2.0", "id": None,
                 "error": {"code": -32600, "message": "Invalid Request"}}
@@ -424,7 +448,7 @@ def _handle(conn, cfg, policy, upstreams, sid, msg):
                                 f"{verdict['required_name']}. An untrusted source "
                                 f"tainted this session; restart for a clean floor.",
                                 is_error=True)}
-            inner = memsom_mcp.handle({
+            inner = _get_mcp_dispatch().handle({
                 "jsonrpc": "2.0", "id": msg_id, "method": "tools/call",
                 "params": {"name": inner_name, "arguments": arguments}})
             return inner

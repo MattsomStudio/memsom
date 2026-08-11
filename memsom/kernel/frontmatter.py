@@ -148,3 +148,114 @@ def frontmatter_dict(text: str):
                 fm[key] = _strip_scalar(val)
 
     return fm, body
+
+# --- MEMORY.md primary-index / section-map parsing -------------------------
+# Moved out of bridge/bridge_import.py (Phase 7 -- these are pure text
+# parsers over an already-read MEMORY.md string, no bridge-specific state,
+# and distill/digest.py + interface/audit.py both need them without being
+# able to reach up into bridge/ (rank 7) from distill's rank 5.
+
+_PRIMARY_RE = re.compile(
+    r"^\s*[-*]\s*\[([^\]]+)\]\(([^)]+\.md)\)(?:\s*[—–-]\s*(.+\S))?\s*$")
+
+
+_HOOK_RE = re.compile(r"\]\(([^)]+\.md)\)\s*[—–-]\s*(.+\S)")
+
+
+def index_hooks(memory_md_text: str) -> dict:
+    """Map each linked filename -> its hand-curated hook (text after the em dash)."""
+    out = {}
+    for line in memory_md_text.split("\n"):
+        m = _HOOK_RE.search(line)
+        if m:
+            out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _strip_render_marker(hook):
+    """Drop a render-time staleness marker (' ⚠ ...') from a captured hook.
+
+    The digest appends a ' ⚠' flag to stale lines AT RENDER.  Because the next
+    import re-derives each hook by parsing the previous MEMORY.md, an un-stripped
+    marker round-trips into the stored hook and compounds one glyph per cycle
+    (the 16x-⚠ bug).  Stripping at capture makes the hook idempotent and
+    self-healing: a polluted MEMORY.md collapses back to a single flag next render.
+    """
+    if not hook:
+        return hook
+    i = hook.find("⚠")
+    if i != -1:
+        hook = hook[:i].rstrip()
+    return hook or None
+
+
+def parse_primary_index(memory_md_text: str) -> dict:
+    """{filename: (title, hook_or_None, section)} for line-leading primary entries.
+
+    The curated title + hook are captured so the digest renders byte-for-byte like
+    the hand-maintained index (frontmatter name/description are longer and bloat
+    the file past its budget).  Files that appear only as secondary inline links
+    (or not at all) are absent -> they get no digest line, matching MEMORY.md.
+    """
+    out = {}
+    section = None
+    for line in memory_md_text.split("\n"):
+        h = re.match(r"^##\s+(.*\S)\s*$", line)
+        if h:
+            section = h.group(1).strip()
+            continue
+        if section is None:
+            continue
+        m = _PRIMARY_RE.match(line)
+        if m:
+            out[m.group(2)] = (m.group(1).strip(),
+                               _strip_render_marker((m.group(3) or "").strip()),
+                               section)
+    return out
+
+
+# --- MEMORY.md section map ----------------------------------------------------
+
+_LINK_IN_LINE = re.compile(r"\]\(([^)]+\.md)\)")
+
+
+def section_map(memory_md_text: str) -> dict:
+    """Map each linked filename -> its `## Section` header in MEMORY.md."""
+    out = {}
+    current = None
+    for line in memory_md_text.split("\n"):
+        h = re.match(r"^##\s+(.*\S)\s*$", line)
+        if h:
+            current = h.group(1).strip()
+            continue
+        for m in _LINK_IN_LINE.finditer(line):
+            out[m.group(1)] = current
+    return out
+
+
+def parse_index_entries(memory_md_text: str):
+    """Yield (section, kind, payload) for every index line, in document order.
+
+    kind 'file'    -> payload = linked filename (one yield per link on the line).
+    kind 'literal' -> payload = the raw bullet line text (a hand-authored index
+                      entry with no file behind it, e.g. the identity lead line or
+                      the dated progress-check reminder).
+    Section headers, the H1, and blank lines are skipped.
+    """
+    section = None
+    for line in memory_md_text.split("\n"):
+        h = re.match(r"^##\s+(.*\S)\s*$", line)
+        if h:
+            section = h.group(1).strip()
+            continue
+        if section is None:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        files = _LINK_IN_LINE.findall(line)
+        if files:
+            for f in files:
+                yield (section, "file", f)
+        elif stripped[0] in "-*⏰•":  # bullet / ⏰ / •  -> a literal entry
+            yield (section, "literal", line.rstrip())

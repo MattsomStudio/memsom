@@ -27,8 +27,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import memsom
-from memsom.distill import llm as memsom_llm
-from memsom.distill.llm import LlmUnavailable, llm_compose, ping, resolve
+from memsom.retrieval import llm as memsom_llm
+from memsom.retrieval.llm import LlmUnavailable, llm_compose, ping, resolve
 
 
 # ---------------------------------------------------------------------------

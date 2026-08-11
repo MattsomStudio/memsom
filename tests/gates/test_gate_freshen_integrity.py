@@ -46,9 +46,9 @@ def conn(tmp_path, monkeypatch):
 def _setup(conn):
     """endorsed source -> derived node (NO recipe), plus an external successor."""
     import memsom
-    from memsom.integrity import stale as memsom_stale
+    from memsom.lifecycle import stale as memsom_stale
     from memsom.integrity import gate as memsom_gate
-    from memsom.retrieval import rederive as memsom_rederive
+    from memsom.lifecycle import rederive as memsom_rederive
 
     memsom_stale.migrate(conn)
     memsom_gate.migrate(conn)

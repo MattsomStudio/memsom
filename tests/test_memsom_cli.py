@@ -279,7 +279,7 @@ class TestParserSubcommands(Base):
         from memsom.distill import distill as memsom_distill
         from memsom.lifecycle import heal as memsom_heal
         from memsom.integrity import trust as memsom_trust
-        from memsom.distill import llm as memsom_llm
+        from memsom.retrieval import llm as memsom_llm
 
         memsom_recompute.register(sub)
         memsom_redact.register(sub)

@@ -120,8 +120,11 @@ def _check_conf_mismatch(conn):
     if not memsom_schema.column_exists(conn, "nodes", "conf_label"):
         return []
     eff = memsom_confid.effective_confs(conn)
+    # tombstoned=0 dimension sourced from the ONE taint-filter primitive
+    # (storage.schema.taint_filter_clauses) rather than a hand-rolled literal.
+    tomb_clause = memsom_schema.taint_filter_clauses(conn)[0][0]
     rows = conn.execute(
-        "SELECT id, conf_label FROM nodes WHERE tombstoned=0 AND channel='agent-derived'"
+        f"SELECT id, conf_label FROM nodes WHERE {tomb_clause} AND channel='agent-derived'"
         " ORDER BY id"
     ).fetchall()
     violations = []

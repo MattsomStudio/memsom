@@ -118,32 +118,17 @@ class TestAxesIndependent(Base):
 
 # ---------------------------------------------------------------------------
 # 3. Clearance filter hides above-clearance sources
+#
+# TestClearanceFilterHidesAbove removed (Phase 7): it existed solely to test
+# memsom_confid.sources_for_clearance, deleted as a dead partial-filter helper
+# with zero production consumers (same class as MS-39's
+# live_unredacted_sources/live_unquarantined_sources). The behaviour it
+# checked -- clearance hides above-ceiling sources -- is covered by the
+# routed-through-the-primitive paths: test_gate_clearance_and_citation.py and
+# test_gate_one_taint_primitive.py's test_enhanced_ask_pool_is_clean. See
+# test_gate_one_taint_primitive.py::test_alternate_source_pools_apply_every_dimension
+# for the existence gate on the deleted name.
 # ---------------------------------------------------------------------------
-
-class TestClearanceFilterHidesAbove(Base):
-
-    def test_clearance_filter_hides_above(self):
-        """sources_for_clearance(internal) must hide secret; allow public+internal."""
-        n0 = self.add("public source prose line one", "external")
-        n1 = self.add("internal source prose line two", "user")
-        n2 = self.add("secret source prose line three", "endorsed")
-
-        memsom_confid.classify(self.conn, n0, "public")    # 0
-        memsom_confid.classify(self.conn, n1, "internal")  # 1
-        memsom_confid.classify(self.conn, n2, "secret")    # 2
-
-        visible = memsom_confid.sources_for_clearance(self.conn, "internal")
-        self.assertIn(n0, visible)
-        self.assertIn(n1, visible)
-        self.assertNotIn(n2, visible)
-        self.assertEqual(len(visible), 2)
-
-        all_ids = memsom_confid.sources_for_clearance(self.conn, 3)  # topsecret
-        self.assertIn(n0, all_ids)
-        self.assertIn(n1, all_ids)
-        self.assertIn(n2, all_ids)
-        self.assertEqual(len(all_ids), 3)
-
 
 # ---------------------------------------------------------------------------
 # 4. Multi-hop high-water propagation in one ordered pass
@@ -342,10 +327,12 @@ class TestArchivedConfLaunderingBlocked(Base):
         memsom_confid.recompute_conf(self.conn, nid)
         self.assertEqual(self.get_conf(nid), 2)
 
-        # sources_for_clearance(public) must not surface the archived sources.
-        pub = memsom_confid.sources_for_clearance(self.conn, "public")
-        self.assertNotIn(s1, pub)
-        self.assertNotIn(s2, pub)
+        # (sources_for_clearance's own "archived sources never surface" check
+        # was removed here in Phase 7 along with the function itself -- dead
+        # partial-filter helper, zero production consumers. The archived-flag
+        # assertion above already proves both sources are excluded from any
+        # taint_filter_clauses-routed pool, which is the property that
+        # mattered.)
 
     def test_archived_node_can_still_be_raised(self):
         """The guard only blocks DOWNGRADES — raising an archived node is allowed."""

@@ -365,11 +365,14 @@ def ingest_text(
         if len(chunks) == 1 and source_ref:
             pred = _find_live_predecessor(conn, source_ref, channel, h)
             if pred is not None and pred != nid:
-                try:
-                    from memsom.integrity import stale as memsom_stale
-                    memsom_stale.on_reingest_supersede(conn, pred, nid, source_ref)
-                except Exception:  # noqa: BLE001 -- staleness is best-effort
-                    pass
+                # lifecycle.stale (rank 4) cannot be imported directly from
+                # here (rank 2) -- kernel.events, same as "node_ingested"
+                # above. Failures are collected, not swallowed, by emit()
+                # itself, but staleness detection stays best-effort here
+                # exactly as the try/except it replaces was: an empty or
+                # failing subscriber must never break ingest.
+                memsom_events.emit("node_reingest_supersede", conn=conn,
+                                    old_id=pred, new_id=nid, source_ref=source_ref)
 
     return ids
 

@@ -93,9 +93,14 @@ class TestConsolidateCatchesElevatedButTainted(Base):
 
 
 class TestQuarantinedExcludedFromPool(Base):
-    """A quarantined SOURCE disappears from live_source_ids
-    and, since MS-13 routed it through the same taint primitive, from
-    memsom.live_sources too -- ONE taint primitive feeds every read pool."""
+    """A quarantined SOURCE disappears from memsom.live_sources -- MS-13
+    routed it through the same taint primitive every read pool now shares.
+
+    (live_source_ids itself was deleted in Phase 7 as a dead partial-filter
+    helper with zero production consumers -- same class as MS-39's
+    live_unredacted_sources/live_unquarantined_sources; see
+    test_gate_one_taint_primitive.py::test_alternate_source_pools_apply_every_dimension,
+    which now also gates this one.)"""
 
     def test_quarantined_excluded_from_pool(self):
         endorsed = self.add("Endorsed source for exclusion test.", "endorsed")
@@ -104,12 +109,7 @@ class TestQuarantinedExcludedFromPool(Base):
         # Quarantine the external source node directly
         memsom_quarantine.quarantine_node(self.conn, external, "manual test quarantine")
 
-        # live_source_ids excludes quarantined
-        ids = memsom_quarantine.live_source_ids(self.conn)
-        self.assertIn(endorsed, ids)
-        self.assertNotIn(external, ids)
-
-        # MS-13: memsom.live_sources is now routed through the same taint
+        # MS-13: memsom.live_sources is routed through the same taint
         # primitive, so it excludes the quarantined source too.
         all_sources = memsom.live_sources(self.conn)
         all_ids = [s[0] for s in all_sources]

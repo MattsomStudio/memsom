@@ -36,11 +36,15 @@ import json
 import re
 import sys
 
+import json
+from pathlib import Path
+
 import memsom
+from memsom.kernel import lattice as memsom_lattice
 from memsom.lifecycle import compact as memsom_compact
-from memsom.distill import distill as memsom_distill
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
+from memsom.integrity import confid as memsom_confid
 from memsom.storage import schema as memsom_schema
 
 # Minimal on purpose: for the ADAPTER the schema must live in the WEIGHTS.
@@ -83,8 +87,16 @@ _CITE_RE = re.compile(r"\[mem:(\d+)\|([a-z-]+)\]")
 
 
 def migrate(conn):
-    """Redact + quarantine columns (via distill) plus archived (via compact)."""
-    memsom_distill.migrate(conn)
+    """Redact + quarantine + confid columns plus archived (via compact).
+
+    distill.py needs the identical trio for the same reason (its own training
+    export gate); calling all three directly here (rather than through
+    distill.migrate) avoids an upward lifecycle -> distill import for a
+    three-line migration wrapper.
+    """
+    memsom_redact.migrate(conn)
+    memsom_quarantine.migrate(conn)
+    memsom_confid.migrate(conn)
     memsom_compact.migrate(conn)
 
 
@@ -121,7 +133,7 @@ def eligible_consolidated(conn, min_integrity=1):
     {id, content, label, n_parents}.
     """
     migrate(conn)
-    floor = memsom_distill._parse_min_integrity(min_integrity)
+    floor = memsom_lattice.parse_min_integrity(min_integrity)
     cids = consolidated_ids(conn)
 
     # Taint gate from the ONE shared primitive — the hand-rolled clause here
@@ -147,7 +159,7 @@ def eligible_consolidated(conn, min_integrity=1):
         if nid not in cids:
             continue
         # Reuse the verified ancestor-taint CTE — belt and braces.
-        if memsom_distill._has_live_external_ancestor(conn, nid):
+        if memsom_quarantine.has_live_ancestor_channel(conn, nid, "external"):
             continue
         n_parents = len(memsom.parents_of(conn, nid))
         out.append({"id": nid, "content": content, "label": label,
@@ -317,12 +329,21 @@ def _assert_no_tainted_source(records, tainted_ids):
             f"TAINT GATE FAILURE: training record(s) sourced from tainted node(s) {bad}")
 
 
+def _write_jsonl(path, records):
+    """Write *records* as line-delimited JSON to *path*, UTF-8, no BOM."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
 def cmd_export_reflex(args):
     conn = memsom.get_connection()
     try:
         records = export_reflex(conn, args.min_integrity)
         _assert_no_tainted_source(records, _tainted_node_ids(conn))  # REFLEX-1
-        memsom_distill.write_jsonl(args.out, records)
+        _write_jsonl(args.out, records)
         n_ans = sum(1 for r in records if r["kind"] == "answer")
         n_ref = len(records) - n_ans
         print(f"wrote {len(records)} records ({n_ans} answer, {n_ref} refusal)"

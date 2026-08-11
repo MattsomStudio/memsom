@@ -44,6 +44,7 @@ from memsom.kernel.paths import default_memory_dir
 from memsom.kernel import chunking as memsom_chunking
 from memsom.kernel.frontmatter import (
     split_frontmatter, fm_top_level, memory_type, stamp_fm, stamp_section,
+    parse_primary_index, parse_index_entries, section_map, index_hooks,
 )
 from memsom.integrity import ingest as memsom_ingest
 from memsom.storage import schema as memsom_schema
@@ -76,7 +77,7 @@ def migrate(conn) -> None:
     memsom_schema.add_column(conn, "nodes", "bridge_path", "TEXT")
     memsom_schema.add_column(conn, "nodes", "bridge_mtime", "TEXT")
     memsom_ingest.migrate(conn)
-    from memsom.integrity import stale as memsom_stale
+    from memsom.lifecycle import stale as memsom_stale
     memsom_stale.migrate(conn)   # nodes.{stale,stale_at,stale_reason} + supersedes/log
     _migrate_legacy_obsidian_columns(conn)
 
@@ -102,113 +103,6 @@ def _migrate_legacy_obsidian_columns(conn) -> None:
             "AND bridge_path IS NULL"
         )
 
-
-_HOOK_RE = re.compile(r"\]\(([^)]+\.md)\)\s*[—–-]\s*(.+\S)")
-# a PRIMARY index entry: a bullet line whose FIRST link is the file, optionally
-# followed by an em-dash hook.  Secondary inline links (not line-leading) and the
-# file-less literal lines do not match — so each file gets its own line iff it has
-# a curated primary line, exactly as in the hand-maintained MEMORY.md.
-_PRIMARY_RE = re.compile(
-    r"^\s*[-*]\s*\[([^\]]+)\]\(([^)]+\.md)\)(?:\s*[—–-]\s*(.+\S))?\s*$")
-
-
-def index_hooks(memory_md_text: str) -> dict:
-    """Map each linked filename -> its hand-curated hook (text after the em dash)."""
-    out = {}
-    for line in memory_md_text.split("\n"):
-        m = _HOOK_RE.search(line)
-        if m:
-            out[m.group(1)] = m.group(2).strip()
-    return out
-
-
-def _strip_render_marker(hook):
-    """Drop a render-time staleness marker (' ⚠ ...') from a captured hook.
-
-    The digest appends a ' ⚠' flag to stale lines AT RENDER.  Because the next
-    import re-derives each hook by parsing the previous MEMORY.md, an un-stripped
-    marker round-trips into the stored hook and compounds one glyph per cycle
-    (the 16x-⚠ bug).  Stripping at capture makes the hook idempotent and
-    self-healing: a polluted MEMORY.md collapses back to a single flag next render.
-    """
-    if not hook:
-        return hook
-    i = hook.find("⚠")
-    if i != -1:
-        hook = hook[:i].rstrip()
-    return hook or None
-
-
-def parse_primary_index(memory_md_text: str) -> dict:
-    """{filename: (title, hook_or_None, section)} for line-leading primary entries.
-
-    The curated title + hook are captured so the digest renders byte-for-byte like
-    the hand-maintained index (frontmatter name/description are longer and bloat
-    the file past its budget).  Files that appear only as secondary inline links
-    (or not at all) are absent -> they get no digest line, matching MEMORY.md.
-    """
-    out = {}
-    section = None
-    for line in memory_md_text.split("\n"):
-        h = re.match(r"^##\s+(.*\S)\s*$", line)
-        if h:
-            section = h.group(1).strip()
-            continue
-        if section is None:
-            continue
-        m = _PRIMARY_RE.match(line)
-        if m:
-            out[m.group(2)] = (m.group(1).strip(),
-                               _strip_render_marker((m.group(3) or "").strip()),
-                               section)
-    return out
-
-
-# --- MEMORY.md section map ----------------------------------------------------
-
-_LINK_IN_LINE = re.compile(r"\]\(([^)]+\.md)\)")
-
-
-def section_map(memory_md_text: str) -> dict:
-    """Map each linked filename -> its `## Section` header in MEMORY.md."""
-    out = {}
-    current = None
-    for line in memory_md_text.split("\n"):
-        h = re.match(r"^##\s+(.*\S)\s*$", line)
-        if h:
-            current = h.group(1).strip()
-            continue
-        for m in _LINK_IN_LINE.finditer(line):
-            out[m.group(1)] = current
-    return out
-
-
-def parse_index_entries(memory_md_text: str):
-    """Yield (section, kind, payload) for every index line, in document order.
-
-    kind 'file'    -> payload = linked filename (one yield per link on the line).
-    kind 'literal' -> payload = the raw bullet line text (a hand-authored index
-                      entry with no file behind it, e.g. the identity lead line or
-                      the dated progress-check reminder).
-    Section headers, the H1, and blank lines are skipped.
-    """
-    section = None
-    for line in memory_md_text.split("\n"):
-        h = re.match(r"^##\s+(.*\S)\s*$", line)
-        if h:
-            section = h.group(1).strip()
-            continue
-        if section is None:
-            continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        files = _LINK_IN_LINE.findall(line)
-        if files:
-            for f in files:
-                yield (section, "file", f)
-        elif stripped[0] in "-*⏰•":  # bullet / ⏰ / •  -> a literal entry
-            yield (section, "literal", line.rstrip())
 
 
 def _literal_content(section, text: str) -> str:
@@ -709,7 +603,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
         # walks the SAME edges table relate_fact_deps materialised (parent =
         # this swept node), so sweeping a node nothing depends_on is a no-op
         # cascade beyond marking itself stale too (harmless — stale and
-        # tombstoned are orthogonal flags; see memsom.integrity.stale's
+        # tombstoned are orthogonal flags; see memsom.lifecycle.stale's
         # module docstring).
         #
         # This MUST run after the sweep's own transaction above has already
@@ -745,7 +639,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                             " revoke_reason = ? WHERE id = ? AND tombstoned = 0",
                             (ts, f"cascade from node {nid} (bridge reconcile,"
                                  f" source file removed: {opath})", did))
-            from memsom.integrity import stale as memsom_stale
+            from memsom.lifecycle import stale as memsom_stale
             for nid, opath in swept_ids:
                 stats["stale_cascaded"] += memsom_stale.mark_stale_cascade(
                     conn, nid, f"dependency retired: source file removed ({opath})")

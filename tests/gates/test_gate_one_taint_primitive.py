@@ -122,15 +122,27 @@ def test_alternate_source_pools_apply_every_dimension(conn):
     zero production callers — precisely the shape of a trap for the next
     caller. Charter R2: deleted rather than fixed. This is now an EXISTENCE
     gate (charter R4) — it fails if either name reappears on its module.
+    
+
+    Phase 7 found the identical shape twice more (same pattern, gate_readpool's
+    AST scan surfaced them): confid.sources_for_clearance and
+    quarantine.live_source_ids -- both a "documented safe helper" with zero
+    production consumers and a partial filter. Deleted the same way; gated here
+    the same way.
     """
     from memsom.integrity import redact as memsom_redact
     from memsom.integrity import quarantine as memsom_quarantine
+    from memsom.integrity import confid as memsom_confid
 
     offenders = []
     if hasattr(memsom_redact, "live_unredacted_sources"):
         offenders.append("redact.live_unredacted_sources")
     if hasattr(memsom_quarantine, "live_unquarantined_sources"):
         offenders.append("quarantine.live_unquarantined_sources")
+    if hasattr(memsom_confid, "sources_for_clearance"):
+        offenders.append("confid.sources_for_clearance")
+    if hasattr(memsom_quarantine, "live_source_ids"):
+        offenders.append("quarantine.live_source_ids")
 
     assert not offenders, (
         f"alternate source pools return nodes the primitive excludes: {offenders}")
@@ -139,13 +151,13 @@ def test_alternate_source_pools_apply_every_dimension(conn):
 def test_enhanced_ask_pool_is_clean(conn):
     """NEGATIVE CONTROL — passes on current code.
 
-    interface/cli.py:175 `_build_pool` DOES route through the primitive. If this
-    ever fails, the harness itself is wrong and the three failures above cannot
-    be trusted.
+    retrieval/retrieve.py's `_build_pool` (moved from interface/cli.py, Phase 7)
+    DOES route through the primitive. If this ever fails, the harness itself is
+    wrong and the three failures above cannot be trusted.
     """
-    from memsom.interface import cli as memsom_cli
+    from memsom.retrieval import retrieve as memsom_retrieve
     _pub, sec = _public_and_secret(conn)
 
-    pool = {r[0] for r in memsom_cli._build_pool(conn, "public")}
+    pool = {r[0] for r in memsom_retrieve._build_pool(conn, "public")}
     assert sec not in pool, "the enhanced pool leaked a secret node"
     assert pool == _primitive_pool(conn, clearance=0)

@@ -34,28 +34,11 @@ import sys
 from pathlib import Path
 
 import memsom
+from memsom.kernel import lattice as memsom_lattice
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import redact as memsom_redact
 from memsom.integrity import confid as memsom_confid
 from memsom.storage import schema as memsom_schema
-
-# ---------------------------------------------------------------------------
-# Ancestor CTE — walks UP the DAG from a node to find all ancestors.
-# We need LIVE (tombstoned=0) ancestors whose channel='external'.
-# ---------------------------------------------------------------------------
-
-_ANC_CTE = """
-WITH RECURSIVE anc(id) AS (
-    SELECT e.parent FROM edges e WHERE e.child = ?
-    UNION
-    SELECT e.parent FROM edges e JOIN anc a ON e.child = a.id
-)
-SELECT COUNT(*) FROM nodes n
-WHERE n.id IN (SELECT id FROM anc)
-  AND n.channel = 'external'
-  AND n.tombstoned = 0
-"""
-
 
 # ---------------------------------------------------------------------------
 # Migration
@@ -71,39 +54,6 @@ def migrate(conn):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _parse_min_integrity(val):
-    """Accept an int or a RANK name string; return an integer label floor.
-
-    Raises ValueError for unrecognised strings or out-of-range ints.
-    """
-    if isinstance(val, int):
-        if val not in memsom.NAME:
-            raise ValueError(f"integrity floor {val!r} out of range (0-3)")
-        return val
-    s = str(val).strip().lower()
-    # Accept full channel names as used in RANK dict
-    if s in memsom.RANK:
-        return memsom.RANK[s]
-    # Also accept the display names from NAME (upper or mixed)
-    name_map = {v.lower(): k for k, v in memsom.NAME.items()}
-    if s in name_map:
-        return name_map[s]
-    # Accept plain integers passed as strings
-    try:
-        n = int(s)
-    except ValueError:
-        raise ValueError(f"unrecognised integrity name: {val!r}")
-    if n not in memsom.NAME:
-        raise ValueError(f"integrity floor {n!r} out of range (0-3)")
-    return n
-
-
-def _has_live_external_ancestor(conn, nid):
-    """Return True if node *nid* has at least one LIVE ancestor with channel='external'."""
-    row = conn.execute(_ANC_CTE, (nid,)).fetchone()
-    return bool(row and row[0] > 0)
-
 
 def _instruction_from_content(content):
     """Extract the instruction from a node's content.
@@ -156,40 +106,30 @@ def export_training(conn, min_integrity=1):
     """
     migrate(conn)
 
-    floor = _parse_min_integrity(min_integrity)
+    floor = memsom_lattice.parse_min_integrity(min_integrity)
 
-    # Fetch candidate rows.  The redacted column may not exist in a fresh DB
-    # before migrate() is called — migrate() guarantees it exists first.
-    # DISTILL-AUDIT-1: also exclude archived (consolidated-away) nodes when the
-    # column exists — a superseded node must not bake into the distilled weights,
-    # matching the taint dimensions every other read path enforces.
-    archived_clause = ""
-    if memsom_schema.column_exists(conn, "nodes", "archived"):
-        archived_clause = " AND archived=0"
-    # MS-01: training weights are an IRREVERSIBLE sink — no tombstone/redact/
-    # cascade can claw content back out once baked in. The confidentiality axis
-    # gets the strictest reading here, not the loosest: only PUBLIC (conf_label
-    # 0) content is ever exported, regardless of integrity floor.
-    conf_clause = ""
-    if memsom_schema.column_exists(conn, "nodes", "conf_label"):
-        conf_clause = " AND conf_label <= 0"
+    # Fetch candidate rows, routed through the ONE taint-filter primitive
+    # (storage.schema.taint_filter_clauses) instead of a hand-rolled WHERE --
+    # DISTILL-AUDIT-1 (archived) and MS-01 (conf_label) are both dimensions it
+    # already owns. MS-01: training weights are an IRREVERSIBLE sink -- no
+    # tombstone/redact/cascade can claw content back out once baked in. The
+    # confidentiality axis gets the strictest reading here, not the loosest:
+    # only PUBLIC (conf_label 0) content is ever exported, regardless of
+    # integrity floor.
+    taint_clauses, taint_params = memsom_schema.taint_filter_clauses(conn, clearance=0)
     rows = conn.execute(
         "SELECT id, content FROM nodes"
         " WHERE channel='agent-derived'"
-        "   AND tombstoned=0"
-        "   AND redacted=0"
-        "   AND status != 'quarantined'"
-        + archived_clause +
-        conf_clause +
+        "   AND " + " AND ".join(taint_clauses) +
         "   AND label >= ?"
         " ORDER BY id",
-        (floor,)
+        (*taint_params, floor)
     ).fetchall()
 
     records = []
     for nid, content in rows:
         # Ancestor taint check
-        if _has_live_external_ancestor(conn, nid):
+        if memsom_quarantine.has_live_ancestor_channel(conn, nid, "external"):
             continue
         # Build provenance from immediate parents
         parent_rows = memsom.parents_of(conn, nid)

@@ -108,7 +108,7 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     # module's own resolver (single source of truth — no divergent default here);
     # <= 0 disables the pass.
     try:
-        from memsom.integrity import verify_stale as verify
+        from memsom.lifecycle import verify_stale as verify
         if verify._threshold_days() > 0:
             vstats = verify.recompute_verify_stale(conn)
             stale_marked = len(vstats.get("marked", []))

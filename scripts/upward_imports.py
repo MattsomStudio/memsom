@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """upward_imports -- try-wrapped imports of a higher layer from a lower one.
 
-Phase 4 exit gate target: 0. Uses the same rank table `.importlinter-goals`
-documents (interface > bridge > federation/distill > lifecycle > retrieval >
-integrity > storage), and looks specifically for `try: import ...` /
-`try: from ... import ...` blocks -- the shape Phase 4 converts into event
-subscribers (A1.4) -- naming a module at a STRICTLY higher rank than the file
-it appears in. An unwrapped (non-try) upward import is a separate, harder
-failure `.importlinter` already catches; this script is about the soft,
+Phase 4 exit gate target: 0. Uses the strict 9-rank order `.importlinter`'s
+`memsom-layers` contract enforces (PLAN.md Sec1.1): interface > bridge >
+federation > distill > lifecycle > retrieval > integrity > effects/storage >
+kernel, and looks specifically for `try: import ...` / `try: from ... import
+...` blocks -- the shape Phase 4 converts into event subscribers (A1.4) --
+naming a module at a STRICTLY higher rank than the file it appears in. An
+unwrapped (non-try) upward import is a separate, harder failure
+`.importlinter` already catches; this script is about the soft,
 silently-degrading kind.
 """
 
@@ -22,9 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _gatelib as g  # noqa: E402
 
 _RANK = {
-    "interface": 0, "bridge": 1, "federation": 2, "distill": 2,
-    "lifecycle": 3, "retrieval": 4, "integrity": 5, "storage": 6,
-    "kernel": 7, "effects": 7,
+    "interface": 0, "bridge": 1, "federation": 2, "distill": 3,
+    "lifecycle": 4, "retrieval": 5, "integrity": 6,
+    "effects": 7, "storage": 7,
+    "kernel": 8,
 }
 
 

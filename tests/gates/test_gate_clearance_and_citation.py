@@ -26,6 +26,7 @@ import pytest
 import memsom
 from memsom.integrity import confid as memsom_confid
 from memsom.interface import cli as memsom_cli
+from memsom.retrieval import retrieve as memsom_retrieve
 from memsom.interface import mcp as memsom_mcp
 
 CITE_RE = re.compile(r"\[mem:(\d+)\|([^\]]+)\]")   # memsom/distill/llm.py:40
@@ -114,7 +115,7 @@ def test_compose_emits_exactly_one_citation_per_bullet(conn):
                              "through a lighthouse.", "endorsed")
     memsom.insert_node(conn, POISON, "external", source_ref="https://evil/x")
     conn.commit()
-    pool = memsom_cli._build_pool(conn, "topsecret")
+    pool = memsom_retrieve._build_pool(conn, "topsecret")
     text, _used = memsom.compose("How does Nebula hole punching work?", pool)
     for line in text.splitlines():
         if not line.startswith("- "):
@@ -134,7 +135,7 @@ def test_control_compose_is_correct_on_clean_sources(conn):
     memsom.insert_node(conn, "A lighthouse is a well-known static host that "
                              "brokers the NAT traversal handshake.", "user")
     conn.commit()
-    pool = memsom_cli._build_pool(conn, "topsecret")
+    pool = memsom_retrieve._build_pool(conn, "topsecret")
     text, _ = memsom.compose("How does Nebula hole punching work?", pool)
     counts = [len(CITE_RE.findall(l)) for l in text.splitlines()
               if l.startswith("- ")]

@@ -41,7 +41,7 @@ from memsom.effects import net as memsom_net
 from memsom.storage import schema as memsom_schema
 from memsom.kernel import events as memsom_events
 from memsom.integrity import confid as memsom_confid
-from memsom.distill import llm as memsom_llm
+from memsom.retrieval import llm as memsom_llm
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -619,7 +619,7 @@ def _rrf_fuse(*rank_lists, rrf_c: int = 60) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Pool filter (mirrors memsom_cli._build_pool)
+# Pool filter (mirrors memsom_retrieve._build_pool)
 # ---------------------------------------------------------------------------
 
 def _build_retrieve_pool(
@@ -632,7 +632,7 @@ def _build_retrieve_pool(
     """Return set of nids passing all pool filters.
 
     Taint dimensions come from memsom_schema.taint_filter_clauses — the ONE
-    shared untainted-pool primitive (same clauses as memsom_cli._build_pool
+    shared untainted-pool primitive (same clauses as memsom_retrieve._build_pool
     and memsom_anticipatory._untainted_clauses, by construction).
 
     F-15 fail-safe: tombstoned, redacted, and archived are ALWAYS excluded
@@ -854,10 +854,6 @@ def retrieve_graph(
 # ---------------------------------------------------------------------------
 
 def _cmd_retrieve(args):
-    # Hoisted out of the try/finally below: this is an ordinary (non-optional)
-    # import, not a graceful-degrade fallback, so it does not belong inside a
-    # Try node at all.
-    from memsom.bridge import facts as memsom_facts
     conn = memsom.get_connection()
     try:
         migrate(conn)
@@ -880,8 +876,16 @@ def _cmd_retrieve(args):
             if "[[fact_" in (content or ""):
                 created = conn.execute(
                     "SELECT created_at FROM nodes WHERE id = ?", (nid,)).fetchone()
-                content = memsom_facts.resolve_fact_refs(
-                    conn, content, as_of=created[0] if created else None)
+                # bridge.facts (rank 7) cannot be imported directly from
+                # here (rank 3); routed through kernel.events (rank 0). A
+                # missing subscriber degrades to "text unchanged", matching
+                # resolve_ref's own designed behaviour for an unresolvable
+                # reference (module docstring, bridge/facts.py).
+                _fact_result = {"text": content}
+                memsom_events.emit(
+                    "resolve_fact_refs", conn=conn, text=content,
+                    as_of=created[0] if created else None, result=_fact_result)
+                content = _fact_result["text"]
             print(f"[{nid}] {channel:<13} integrity={memsom.NAME[label]:<13} {ref}")
             print(f'      "{memsom.snippet(content)}"')
     finally:
@@ -949,3 +953,36 @@ def main(argv=None) -> None:
 
 if __name__ == "__main__":
     main()
+
+# ---------------------------------------------------------------------------
+# Enhanced-ask pool (moved from interface/cli.py, Phase 7 -- bridge/obsidian.py
+# needs the identical pool for its vault-answer compose path and cannot import
+# interface/, rank 8, from bridge's rank 7).
+# ---------------------------------------------------------------------------
+
+def _build_pool(conn, clearance_name):
+    """Build the filtered source pool for the enhanced ask.
+
+    Filters applied (all stacked on top of the frozen live_sources behaviour):
+      - tombstoned = 0
+      - channel != 'agent-derived'
+      - status != 'quarantined'   (quarantine module layer)
+      - redacted = 0              (redact module layer)
+      - conf_label <= clearance   (Bell-LaPadula no-read-up)
+
+    Returns list of rows shaped like memsom.live_sources:
+    (id, content, channel, label, source_ref).
+
+    Taint dimensions come from memsom_schema.taint_filter_clauses — the ONE
+    shared untainted-pool primitive (same clauses as
+    memsom_retrieve._build_retrieve_pool and
+    memsom_anticipatory._untainted_clauses, by construction).
+    """
+    clearance = memsom_confid.parse_conf(clearance_name)
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=clearance)
+    return conn.execute(
+        "SELECT id, content, channel, label, source_ref FROM nodes"
+        " WHERE channel != 'agent-derived' AND " + " AND ".join(clauses) +
+        " ORDER BY label DESC, id ASC",
+        params
+    ).fetchall()

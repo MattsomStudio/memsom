@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 import memsom
+from memsom.kernel import events as memsom_events
 from memsom.bridge.bridge_import import (
     split_frontmatter, fm_top_level, stamp_fm, default_memory_dir,
     migrate as bridge_migrate,
@@ -142,6 +143,23 @@ def resolve_fact_refs(conn: sqlite3.Connection, text: str, *, as_of: str | None 
         return resolve_ref(conn, m.group(1), as_of=as_of) or m.group(0)
 
     return FACT_REF_RE.sub(_sub, text)
+
+
+# ---------------------------------------------------------------------------
+# Event subscription -- distill/digest.py (rank 5) and retrieval/retrieve.py
+# (rank 3) both do read-time fact substitution "wherever memory content
+# becomes visible" (module docstring above), but neither may import bridge/
+# (rank 7) directly. Routed through kernel.events (rank 0). Degrades exactly
+# like an unresolvable single ref already does -- the raw [[fact_*]] link is
+# left in place, not an error -- so a missing subscriber is a silent no-op
+# here, deliberately, matching resolve_ref's own "should LOOK broken" design.
+# ---------------------------------------------------------------------------
+
+def _on_resolve_fact_refs(conn, text, as_of, result):
+    result["text"] = resolve_fact_refs(conn, text, as_of=as_of)
+
+
+memsom_events.subscribe("resolve_fact_refs", _on_resolve_fact_refs)
 
 
 # ---------------------------------------------------------------------------
