@@ -237,6 +237,15 @@ def cmd_ask(args):
             print(f"[memsom] invalid --clearance: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        # MS-32/Phase-8: disclose a degraded vector embed up front, on every
+        # ask -- not just --retrieve/--graph -- so an operator sees it even
+        # when the answer path never touches bm25()/vector_search() itself.
+        degraded = memsom_retrieve.degraded_nodes(conn)
+        if degraded:
+            print(f"[memsom] {len(degraded)} source node(s) are BM25-only "
+                  "(vector embed degraded; see `memsom features --json`) -- "
+                  "answering with bm25 ranking for those sources.", file=sys.stderr)
+
         # --embed-backend overrides MEMDAG_EMBED_BACKEND for this process so the
         # retrieve/reindex paths pick it up. Warn once on an interactive bge
         # single-shot: a per-invocation CLI reloads ~2.2GB cold (10-30s) — bge is

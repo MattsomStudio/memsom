@@ -169,17 +169,18 @@ different path (`interface/tuning.py`) before Phase 8 existed to build the modul
    `cmd_doctor_with_features()`, which resolves the registry and calls `memsom_doctor.gather(features=
    ...)`, then overrides the `doctor` subparser's `func` after `memsom_doctor.register(sub)` runs
    (`sub.choices["doctor"].set_defaults(...)`). `doctor.py` itself never imports `interface/`.
-5. **The exit gate's "kill the bge service -> `retrieval.bge` state degraded" control test does not
-   apply as literally written to this codebase's bge integration.** `retrieval/embed.py`'s bge-m3
-   path is an in-process `FlagEmbedding` model load (import + `.encode()`), not a reachable network
-   service with a health endpoint (unlike Ollama, which `doctor.py`'s `_ollama_status()` already
-   probes over HTTP). `interface/features.py`'s `_retrieval_bge()` therefore reports `disabled`
-   (backend not selected), `absent` (FlagEmbedding/torch/numpy not importable -- a cheap, cached
-   import-only probe, matching `embed.bge_available()`'s own contract), or `active`; there is no
-   cheap signal available for "selected, importable, but the last encode call actually failed" that
-   does not itself require the model load the vocabulary rule (Sec2.1) says `status()` must avoid.
-   Recorded here rather than faked with a bounded network probe against a service that, in this
-   codebase, does not exist.
+5. **CORRECTED (fix round, 2026-08-11): item 5 as originally written was wrong.** It argued no cheap
+   signal existed for "selected, importable, but the last encode call actually failed" -- but
+   Phase 6's MS-32 `retrieval_degraded` table (`retrieval/retrieve.py`) is exactly that signal,
+   already built, keyed by node and populated on any vector-embed failure regardless of backend
+   (bge encode failing falls through to the Ollama attempt, which also gets recorded on failure).
+   It was sitting unread. `_retrieval_dense()`/`_retrieval_bge()` now take `conn` and report
+   `degraded` when `retrieve.degraded_nodes(conn)` is non-empty for the active backend -- one
+   indexed `SELECT`, no model load, no network call, satisfying Sec2.1's status() cost rule.
+   `cmd_ask` now also checks it unconditionally (not just on `--retrieve`/`--graph`) and prints a
+   stderr notice naming "bm25" whenever any source is BM25-only, closing the exit gate's `ask ...
+   | grep -i bm25` control test. Verified: kill Ollama (refused port), `add` + `reindex` ->
+   `retrieval.dense` reports `degraded`; `ask` still answers and stderr contains "bm25".
 
 MEASURED at this commit: `python scripts/env_ratchet.py --check` -> 0; `lint-imports --config
 .importlinter` -> `3 kept, 0 broken`; `python scripts/mutual_pairs.py` -> `TOTAL PAIRS 0`; `python

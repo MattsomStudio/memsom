@@ -46,19 +46,37 @@ def _safe(name, fn) -> FeatureStatus:
 # retrieval.*
 # ---------------------------------------------------------------------------
 
-def _retrieval_dense():
+def _degraded_count(conn) -> int:
+    """MS-32's retrieval_degraded re-index queue: nodes whose vector embed
+    failed and were indexed BM25-only. A CHEAP signal (one indexed SELECT, no
+    model load, no network call -- Sec2.1's status() rule) that Phase 6 already
+    built and left unread; this is the "last encode call actually failed"
+    evidence retrieval.dense/retrieval.bge were missing."""
+    if conn is None:
+        return 0
+    from memsom.retrieval import retrieve as memsom_retrieve
+    return len(memsom_retrieve.degraded_nodes(conn))
+
+
+def _retrieval_dense(conn):
     from memsom.retrieval import embed as memsom_embed
     backend = memsom_embed.backend()
     if backend != "ollama":
         return _status("retrieval.dense", "disabled",
                        f"embed.backend={backend!r} (ollama not selected)",
                        knobs=["embed.backend"])
+    n = _degraded_count(conn)
+    if n:
+        return _status("retrieval.dense", "degraded",
+                       f"{n} node(s) BM25-only -- vector embed failing "
+                       "(see retrieval_degraded)",
+                       knobs=["embed.backend", "retrieval.embed_url", "retrieval.embed_model"])
     return _status("retrieval.dense", "active",
                    "ollama selected; reachability is checked live by `memsom doctor`",
                    knobs=["embed.backend", "retrieval.embed_url", "retrieval.embed_model"])
 
 
-def _retrieval_bge():
+def _retrieval_bge(conn):
     from memsom.retrieval import embed as memsom_embed
     backend = memsom_embed.backend()
     if backend != "bge-m3":
@@ -69,6 +87,12 @@ def _retrieval_bge():
         return _status("retrieval.bge", "absent",
                        "FlagEmbedding/torch/numpy not importable",
                        required=False, knobs=["embed.backend", "retrieval.bge_device"])
+    n = _degraded_count(conn)
+    if n:
+        return _status("retrieval.bge", "degraded",
+                       f"{n} node(s) BM25-only -- bge encode (and Ollama "
+                       "fall-through) failing (see retrieval_degraded)",
+                       knobs=["embed.backend", "retrieval.bge_device"])
     return _status("retrieval.bge", "active", "bge-m3 selected and importable",
                    knobs=["embed.backend", "retrieval.bge_device"])
 
@@ -233,8 +257,8 @@ def _panel():
 # ---------------------------------------------------------------------------
 
 _REGISTRANTS = {
-    "retrieval.dense": lambda conn: _retrieval_dense(),
-    "retrieval.bge": lambda conn: _retrieval_bge(),
+    "retrieval.dense": lambda conn: _retrieval_dense(conn),
+    "retrieval.bge": lambda conn: _retrieval_bge(conn),
     "retrieval.colbert": lambda conn: _retrieval_colbert(),
     "retrieval.ppr": lambda conn: _retrieval_ppr(),
     "code_rag": lambda conn: _code_rag(),

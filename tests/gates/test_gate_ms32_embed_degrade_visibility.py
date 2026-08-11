@@ -17,6 +17,11 @@ from memsom.retrieval import retrieve as memsom_retrieve
 
 
 def test_a_failed_embed_is_queued_and_warned(conn, monkeypatch, capsys):
+    # _WARNED_EMBED_FALLBACK is a process-global "once per process" latch;
+    # under pytest-randomly a different test earlier in THIS run may already
+    # have tripped it, leaving this test's stderr empty through no fault of
+    # the code under test. Force this test's own precondition.
+    monkeypatch.setattr(memsom_retrieve, "_WARNED_EMBED_FALLBACK", False)
     nid = memsom.insert_node(conn, "content that needs a vector embed", "user")
     conn.commit()
 
