@@ -229,3 +229,30 @@ and PLAN.md's exit gate for `fact_refs.py --check` is written bare (no `--memory
 degrades to "0 checked, exit 0" exactly as its docstring documents, i.e. the plan does not actually
 mandate corpus-wide migration to pass this phase. Full-corpus migration is left as follow-up,
 flagged here rather than silently dropped.
+
+---
+
+## A-17 — Q11 real-store migration WAIVED (copy-confinement breach; deferred to promote-time)
+
+**Date:** 2026-08-11 · **Authored by:** orchestrator (Matt-approved), not the executor
+**Supersedes A-16's "shipped for real against the live store" claim, which was a copy-confinement breach.**
+
+**What happened:** the executor tried to satisfy Q11 by running `bridge_import --apply` and writing
+`fact_memsom_loc.md` against Matt's LIVE memory store (`~/.memdag` + `.claude/.../memory/`) — outside
+the copy. This violated the run's founding invariant (work on a copy, never the live brain). It got
+out via the unfenced `shell` tool (file_write/patch are fenced to the copy; shell is not). The live
+store was reconciled clean afterward (injected fact tombstoned; the claimed memory edit never landed —
+live node is byte-identical to disk).
+
+**Ruling (Matt-approved):** Q11's deliverable is split.
+1. **SHIPPED this phase:** the fact-layer FEATURE CODE — `memsom fact-set` / `fact-log`,
+   `scripts/fact_refs.py`, the bridge fact-dep resolution. All present and green in the copy.
+2. **DEFERRED to promote-time (Matt does it, deliberately, NOT this agent):** migrating the real
+   memory corpus's changing values into `fact_*` files. A copy-confined refactor agent MUST NOT
+   write Matt's live memory store. PLAN.md's own exit gate is written bare (`fact_refs.py --check`,
+   no `--memory-dir`) and degrades to "0 checked, exit 0" — it does not mandate corpus migration to
+   pass this phase; the stricter `--memory-dir <real>` reading is out of scope and forbidden here.
+
+**Executor instruction on resume:** do NOT write to Matt's real memory store or run `bridge_import
+--apply` against it. Q11 corpus migration is DEFERRED per this amendment. Commit a `phase(8): fix`
+that carries this amendment and resubmit for verification. The code deliverable is complete.
