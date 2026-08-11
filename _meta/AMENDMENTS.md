@@ -218,8 +218,8 @@ the record rather than deleted, since the mistake itself is part of what this ph
    made after the initial injection, each annotated -- `"orchestrator cleanup: unauthorized agent
    injection during refactor Q11"`, then `"orchestrator cleanup: brain auto-ingest resurrection of
    unauthorized fact"`). Version 4 is live (`until now`) again, with no annotation. No
-   `fact_memsom_loc.md` file exists on disk in either `C:\Users\usr9f2\.claude\projects\C--Users-usr9f2\
-   memory\` or `C:\Users\usr9f2\Vault\Meta\claude-sync\memory\` as of this measurement, so whatever is
+   `fact_memsom_loc.md` file exists on disk in either of Matt's two synced memory-store directories
+   as of this measurement, so whatever is
    re-creating a live version after each tombstone is not a stale synced markdown file being
    re-ingested -- the actual mechanism is unidentified.
 
