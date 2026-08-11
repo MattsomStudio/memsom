@@ -25,33 +25,12 @@ import sqlite3
 import memsom
 from memsom.storage import schema as memsom_schema
 
+from memsom.kernel.lattice import CONF_RANK, CONF_NAME, parse_conf
+
 # ---------------------------------------------------------------------------
-# Constants
+# Constants + parse_conf moved to memsom.kernel.lattice (Phase 3); re-imported
+# above so memsom.integrity.confid.CONF_RANK etc. keep resolving unchanged.
 # ---------------------------------------------------------------------------
-
-CONF_RANK = {"public": 0, "internal": 1, "secret": 2, "topsecret": 3}
-CONF_NAME = {0: "PUBLIC", 1: "INTERNAL", 2: "SECRET", 3: "TOPSECRET"}
-
-
-def parse_conf(value) -> int:
-    """Accept int 0-3 or string name (case-insensitive). Raise ValueError otherwise."""
-    if isinstance(value, int):
-        if value not in CONF_NAME:
-            raise ValueError(f"conf level {value!r} out of range 0-3")
-        return value
-    if isinstance(value, str):
-        key = value.lower()
-        if key in CONF_RANK:
-            return CONF_RANK[key]
-        # try numeric string
-        try:
-            n = int(key)
-        except ValueError:
-            raise ValueError(f"unknown conf level {value!r}") from None
-        if n not in CONF_NAME:
-            raise ValueError(f"conf level {n!r} out of range 0-3")
-        return n
-    raise ValueError(f"unrecognised conf level type: {type(value)}")
 
 
 # ---------------------------------------------------------------------------

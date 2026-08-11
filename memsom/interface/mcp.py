@@ -319,11 +319,11 @@ MCP_EXPORT_DIR_ENV = "MEMSOM_MCP_EXPORT_DIR"
 def _mcp_channel_ceiling():
     """The highest channel rank this transport may stamp. Never None."""
     import memsom
+    from memsom.kernel.lattice import parse_rank
 
-    raw = (os.environ.get(MCP_CHANNEL_CEILING_ENV) or "").strip().lower()
-    if raw in memsom.RANK:
-        return memsom.RANK[raw]
-    return memsom.RANK[_DEFAULT_MCP_CHANNEL_CEILING]
+    raw = (os.environ.get(MCP_CHANNEL_CEILING_ENV) or "").strip()
+    n = parse_rank(raw) if raw else None
+    return n if n is not None else memsom.RANK[_DEFAULT_MCP_CHANNEL_CEILING]
 
 
 def _checked_channel(raw):

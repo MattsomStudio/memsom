@@ -41,7 +41,7 @@ from pathlib import Path
 
 import memsom
 from memsom.integrity import capgate as memsom_capgate
-from memsom.integrity import policy as memsom_policy
+from memsom.kernel import policy as memsom_policy
 from memsom.storage import schema as memsom_schema
 from memsom.storage import session as memsom_session
 

@@ -466,7 +466,7 @@ def taint_filter_clauses(conn: sqlite3.Connection, clearance=None,
 
 
 CLEARANCE_CEILING_ENV = "MEMDAG_CLEARANCE_CEILING"
-_CONF_RANK = {"public": 0, "internal": 1, "secret": 2, "topsecret": 3}
+# CONF_RANK moved to memsom.kernel.lattice (Phase 3)
 
 
 def clearance_ceiling():
@@ -481,8 +481,9 @@ def clearance_ceiling():
     if raw is None or not raw.strip():
         return None
     key = raw.strip().lower()
-    if key in _CONF_RANK:
-        return _CONF_RANK[key]
+    from memsom.kernel.lattice import CONF_RANK
+    if key in CONF_RANK:
+        return CONF_RANK[key]
     try:
         v = int(key)
     except ValueError:

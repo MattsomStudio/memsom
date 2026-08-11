@@ -22,7 +22,8 @@ import sys
 from pathlib import Path
 
 import memsom
-from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, default_memory_dir
+from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom.kernel.paths import default_memory_dir
 from memsom.paths import UnsafePath, safe_join
 
 ENDORSED_PREFIXES = ("user_", "feedback_", "personal_")

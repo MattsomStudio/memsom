@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.integrity import stale as memsom_stale
-from memsom.bridge.bridge_import import split_frontmatter, fm_top_level
+from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 
 # --- config -------------------------------------------------------------------
 

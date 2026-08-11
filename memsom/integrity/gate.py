@@ -32,7 +32,7 @@ import argparse
 import sys
 
 import memsom
-from memsom.interface import blame as memsom_blame
+from memsom.integrity import blame as memsom_blame
 from memsom.storage import schema as memsom_schema
 
 # ---------------------------------------------------------------------------

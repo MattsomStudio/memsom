@@ -48,8 +48,8 @@ PKG = pathlib.Path(memsom.__file__).resolve().parent
 #: pre-authorises the next thing that reuses the name.
 _LINE_PARSERS = {
     ("memsom/bridge/bridge_import.py", "_PRIMARY_RE"),
-    ("memsom/bridge/obsidian.py", "_FM_LIST_ITEM"),
-    ("memsom/bridge/obsidian.py", "_FM_KV"),
+    ("memsom/kernel/frontmatter.py", "_FM_LIST_ITEM"),
+    ("memsom/kernel/frontmatter.py", "_FM_KV"),
     ("memsom/integrity/contradict.py", "_META_TOK"),
 }
 

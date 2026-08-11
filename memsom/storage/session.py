@@ -36,6 +36,7 @@ import uuid
 
 import memsom
 from memsom.storage import schema as memsom_schema
+from memsom.kernel import lattice as memsom_lattice
 
 # ---------------------------------------------------------------------------
 # Migration
@@ -75,24 +76,13 @@ def _parse_floor(value) -> int:
 
     Accepts int 0..3, numeric string '0'..'3', or a case-insensitive RANK name
     ('external', 'agent-derived', 'user', 'endorsed').  Raises ValueError
-    otherwise.  Mirrors memsom_gate._parse_required but kept local so this
-    module does not depend on the gate.
+    otherwise.  Core parse is memsom.kernel.lattice.parse_rank (Phase 3); this
+    wrapper only owns the error on a None result.
     """
-    if isinstance(value, bool):  # bool is an int subclass — reject explicitly
+    n = memsom_lattice.parse_rank(value)
+    if n is None:
         raise ValueError(f"bad floor: {value!r}")
-    if isinstance(value, int):
-        if 0 <= value <= 3:
-            return value
-        raise ValueError(f"bad floor: {value!r}")
-    s = str(value).strip()
-    if s.isdigit():
-        n = int(s)
-        if 0 <= n <= 3:
-            return n
-        raise ValueError(f"bad floor: {value!r}")
-    if s.lower() in memsom.RANK:
-        return memsom.RANK[s.lower()]
-    raise ValueError(f"bad floor: {value!r}")
+    return n
 
 
 # ---------------------------------------------------------------------------

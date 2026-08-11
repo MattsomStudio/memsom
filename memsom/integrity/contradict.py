@@ -214,7 +214,7 @@ def _sentences(text, *, max_sents=40, min_len=12):
     no NLP dependency."""
     body = text or ""
     try:
-        from memsom.bridge.bridge_import import split_frontmatter
+        from memsom.kernel.frontmatter import split_frontmatter
         _fm, body, _ = split_frontmatter(body)
     except Exception:  # noqa: BLE001 — frontmatter parsing is best-effort
         body = text or ""

@@ -40,6 +40,10 @@ import sys
 from pathlib import Path
 
 import memsom
+from memsom.kernel.paths import default_memory_dir
+from memsom.kernel.frontmatter import (
+    split_frontmatter, fm_top_level, memory_type, stamp_fm, stamp_section,
+)
 from memsom.interface import ingest as memsom_ingest
 from memsom.storage import schema as memsom_schema
 
@@ -96,72 +100,6 @@ def _migrate_legacy_obsidian_columns(conn) -> None:
             "WHERE source_ref LIKE 'memory:%' AND obsidian_path IS NOT NULL "
             "AND bridge_path IS NULL"
         )
-
-
-# --- frontmatter parsing (light, stdlib) -------------------------------------
-
-def split_frontmatter(text: str):
-    """Return (fm_lines, body, had_fm).
-
-    fm_lines is the raw list of lines between the opening and closing '---'
-    fences (exclusive).  If there is no frontmatter, returns ([], text, False).
-    """
-    if not text.startswith("---"):
-        return [], text, False
-    lines = text.split("\n")
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            return lines[1:i], "\n".join(lines[i + 1:]), True
-    return [], text, False  # unterminated fence -> treat as no frontmatter
-
-
-def fm_top_level(fm_lines) -> dict:
-    """Parse top-level (non-indented) `key: value` pairs from frontmatter lines.
-
-    Nested blocks (e.g. an indented `metadata:` child) are ignored — we only
-    need the flat keys (type, salience, pin, name, description).
-    """
-    out = {}
-    for ln in fm_lines:
-        if not ln or ln[0] in " \t#":  # skip indented children + comments
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s?(.*)$", ln)
-        if m:
-            out[m.group(1)] = m.group(2).strip()
-    return out
-
-
-def memory_type(stem: str, fm: dict) -> str:
-    """Type from frontmatter `type:` if present, else the filename prefix."""
-    t = (fm.get("type") or "").strip()
-    if t:
-        return t
-    return stem.split("_", 1)[0] if "_" in stem else stem
-
-
-def stamp_fm(text: str, **kv):
-    """Return *text* with the given top-level frontmatter keys set (idempotent).
-
-    Existing top-level lines for any key in *kv* are replaced; a key whose value
-    is None is dropped.  If there was no frontmatter and nothing is added, the
-    text is returned unchanged.
-    """
-    fm_lines, body, had = split_frontmatter(text)
-    keys = set(kv)
-    fm_lines = [ln for ln in fm_lines if ln.split(":", 1)[0].strip() not in keys]
-    added = False
-    for k, v in kv.items():
-        if v is not None:
-            fm_lines.append(f"{k}: {v}")
-            added = True
-    if not had and not added:
-        return text
-    return "---\n" + "\n".join(fm_lines) + "\n---\n" + body
-
-
-def stamp_section(text: str, section):
-    """Thin wrapper: stamp only the `section:` key (kept for the unit tests)."""
-    return stamp_fm(text, section=section)
 
 
 _HOOK_RE = re.compile(r"\]\(([^)]+\.md)\)\s*[—–-]\s*(.+\S)")
@@ -766,29 +704,6 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
 
 # --- CLI ----------------------------------------------------------------------
 
-def default_memory_dir():
-    """Locate the live Claude memory dir without hard-coding a username.
-
-    Override with $MEMDAG_BRIDGE_MEMORY_DIR; otherwise discover the first
-    `~/.claude/projects/*/memory/MEMORY.md` (the project-dir name differs per
-    machine, so it is globbed, never hard-coded)."""
-    env = os.environ.get("MEMDAG_BRIDGE_MEMORY_DIR")
-    if env:
-        return Path(env)
-    candidates = [m.parent for m in
-                  (Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")]
-    if not candidates:
-        # Fail LOUDLY. The old fallback returned ~/.claude/projects itself — a
-        # directory with zero .md files — which sent the importer's reconcile
-        # sweep off to tombstone every live memory node (the mass-wipe path the
-        # import guard also blocks). No plausible dir means no import.
-        raise FileNotFoundError(
-            "no Claude memory dir found (no ~/.claude/projects/*/memory/MEMORY.md); "
-            "set MEMDAG_BRIDGE_MEMORY_DIR explicitly")
-    # the real brain is the memory dir with the MOST .md files; project-scoped
-    # memory dirs (created by running Claude in another cwd) hold ~1 file and must
-    # not be mistaken for it just because they sort first.
-    return max(candidates, key=lambda d: len(list(d.glob("*.md"))))
 
 
 def _print_stats(stats, dry_run):

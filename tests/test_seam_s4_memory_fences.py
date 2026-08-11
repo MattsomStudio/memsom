@@ -46,7 +46,7 @@ from memsom.bridge import bridge_render
 from memsom.bridge import hook as memsom_hook
 from memsom.bridge import obsidian as memsom_obsidian
 from memsom.distill import digest
-from memsom.integrity import policy as memsom_policy
+from memsom.kernel import policy as memsom_policy
 from memsom.interface import ingest as memsom_ingest
 from memsom.interface import mcp as memsom_mcp
 from memsom.storage import schema as memsom_schema

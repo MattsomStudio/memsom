@@ -34,7 +34,9 @@ from pathlib import Path
 
 import memsom
 from memsom.storage import schema as memsom_schema
-from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, parse_index_entries, parse_primary_index, default_memory_dir
+from memsom.bridge.bridge_import import parse_index_entries, parse_primary_index
+from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom.kernel.paths import default_memory_dir
 from memsom.lifecycle import forget as _forget
 
 # Default section display order. Carries no user-specific taxonomy so the shipped

@@ -90,7 +90,7 @@ def test_control_blame_does_suppress_above_clearance_content(conn):
     """GREEN and must stay green -- the defence EXISTS, it is just per-command
     instead of per-pool. Proves the xfails above are about coverage, not about
     a missing capability."""
-    from memsom.interface import blame as memsom_blame
+    from memsom.integrity import blame as memsom_blame
     _s, _p, d = _secret_store(conn)
     out = "\n".join(memsom_blame.format_blame(
         conn, d, memsom_confid.parse_conf("public")))

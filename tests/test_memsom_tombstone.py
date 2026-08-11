@@ -131,7 +131,7 @@ class TestHardTombstone(Base):
             (f"memory:{stem}",)).fetchone()[0]
 
     def test_hard_erases_payload_db_disk_blame(self):
-        from memsom.interface import blame as memsom_blame
+        from memsom.integrity import blame as memsom_blame
         nid = self._nid("project_widget")
         self.assertNotEqual(
             self.conn.execute("SELECT content FROM nodes WHERE id=?", (nid,)).fetchone()[0], "")

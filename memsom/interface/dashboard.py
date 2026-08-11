@@ -27,7 +27,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memsom.bridge.bridge_import import default_memory_dir, split_frontmatter, fm_top_level
+from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom.kernel.paths import default_memory_dir
 from memsom.lifecycle import forget
 
 HOME = Path.home()

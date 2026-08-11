@@ -42,7 +42,7 @@ from memsom.integrity import redact as memsom_redact
 from memsom.integrity import quarantine as memsom_quarantine
 from memsom.integrity import confid as memsom_confid
 from memsom.federation import federation as memsom_federation
-from memsom.interface import blame as memsom_blame
+from memsom.integrity import blame as memsom_blame
 from memsom.retrieval import relate as memsom_relate
 from memsom.lifecycle import anticipatory as memsom_anticipatory
 from memsom.distill import distill as memsom_distill

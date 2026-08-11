@@ -13,8 +13,8 @@ Two-number model (Bjork's New Theory of Disuse):
        retrieval; seeded at birth from a memory's salience.
 
 The pure computation (`compute`, `_seed_rs_ss`, `_decay_rs`, `_salience_of`,
-DEFAULTS, `_parse_iso`, `now_iso`, `parse_frontmatter`) is copied VERBATIM from
-mem_weights.py so its behaviour is identical — proven by the golden-parity test
+DEFAULTS, `_parse_iso`, `now_iso`) is copied VERBATIM from mem_weights.py so
+its behaviour is identical — proven by the golden-parity test
 (test_memsom_forget.TestParity), which feeds the same inputs to both and asserts
 equality.  Only the storage adapter differs: state lives in node columns
 (forget_rs/forget_ss/forget_tier/...) instead of canonical.json, and the memory
@@ -35,6 +35,7 @@ from pathlib import Path
 
 import memsom
 from memsom.storage import schema as memsom_schema
+from memsom.kernel.frontmatter import parse_frontmatter as _parse_frontmatter
 
 
 # ====================================================================== #
@@ -58,7 +59,6 @@ DEFAULTS = {
     "salience_default": 0.0,
 }
 
-FM_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 PIN_TYPES = {"user", "feedback"}
 PIN_PREFIXES = ("user_", "feedback_")
 
@@ -74,14 +74,6 @@ def _parse_iso(s):
         return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-
-
-def parse_frontmatter(text):
-    """Return {key: value} from a markdown file's YAML-ish frontmatter (flat)."""
-    m = FM_RE.match(text)
-    out = {}
-    if not m:
-        return out
     for line in m.group(1).splitlines():
         if ":" in line and not line.lstrip().startswith("#"):
             k, _, v = line.partition(":")
@@ -359,7 +351,7 @@ def build_inventory(conn, params=None):
     """
     mems, memories, node_by_stem = [], {}, {}
     for (nid, content, channel, sref, rs, ss, cnt, fseen, lused, tier) in _bridge_rows(conn):
-        fm = parse_frontmatter(content or "")
+        fm, _ = _parse_frontmatter(content or "")
         stem = _stem_of(sref)
         node_by_stem[stem] = nid
         tier = tier or "hot"

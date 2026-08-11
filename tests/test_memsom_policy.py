@@ -14,7 +14,7 @@ from pathlib import Path
 
 warnings.simplefilter("error", DeprecationWarning)
 
-from memsom.integrity import policy as P
+from memsom.kernel import policy as P
 
 
 def policy(d):

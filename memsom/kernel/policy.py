@@ -43,7 +43,7 @@ import fnmatch
 import json
 from pathlib import Path
 
-import memsom
+from memsom.kernel import lattice as memsom_lattice
 
 # Sentinels outside the 0..3 RANK lattice for the always-allow / always-deny
 # specials, kept comparable under the gate's `floor >= required` test.
@@ -53,21 +53,10 @@ DENY = 4    # no floor 0..3 satisfies -> always deny
 
 def _parse_floor(value) -> int:
     """Parse *value* into an int rank 0..3 (RANK name, int, or numeric string)."""
-    if isinstance(value, bool):
+    n = memsom_lattice.parse_rank(value)
+    if n is None:
         raise ValueError(f"bad floor: {value!r}")
-    if isinstance(value, int):
-        if 0 <= value <= 3:
-            return value
-        raise ValueError(f"bad floor: {value!r}")
-    s = str(value).strip()
-    if s.isdigit():
-        n = int(s)
-        if 0 <= n <= 3:
-            return n
-        raise ValueError(f"bad floor: {value!r}")
-    if s.lower() in memsom.RANK:
-        return memsom.RANK[s.lower()]
-    raise ValueError(f"bad floor: {value!r}")
+    return n
 
 
 def _parse_required(value) -> int:
@@ -173,4 +162,4 @@ def taints(policy, tool):
 def is_consequential(policy, tool) -> bool:
     """True if *tool* needs more than external(0) — i.e. an external-tainted
     session would be denied it."""
-    return required_floor(policy, tool) > memsom.RANK["external"]
+    return required_floor(policy, tool) > memsom_lattice.RANK["external"]

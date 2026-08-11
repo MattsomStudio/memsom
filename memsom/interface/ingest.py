@@ -90,18 +90,13 @@ def channel_ceiling():
     raw = os.environ.get(CHANNEL_CEILING_ENV)
     if raw is None or not raw.strip():
         return None
-    key = raw.strip().lower()
-    if key in memsom.RANK:
-        return memsom.RANK[key]
-    try:
-        v = int(key)
-    except ValueError:
+    from memsom.kernel.lattice import parse_rank
+    n = parse_rank(raw.strip())
+    if n is None:
         raise ValueError(
             f"invalid {CHANNEL_CEILING_ENV}={raw!r}: expected a channel name or 0-3"
-        ) from None
-    if v not in memsom.NAME:
-        raise ValueError(f"{CHANNEL_CEILING_ENV} out of range 0-3: {v}")
-    return v
+        )
+    return n
 
 
 def enforce_channel_ceiling(channel: str) -> str:

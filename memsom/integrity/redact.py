@@ -90,7 +90,7 @@ def _resolve_memory_dir(memory_dir):
     if memory_dir is not None:
         return memory_dir
     try:
-        from memsom.bridge.bridge_import import default_memory_dir
+        from memsom.kernel.paths import default_memory_dir
         return default_memory_dir()
     except Exception:  # noqa: BLE001
         return None

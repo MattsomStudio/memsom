@@ -17,7 +17,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
 from memsom.federation import broker as B
-from memsom.integrity import policy as memsom_policy
+from memsom.kernel import policy as memsom_policy
 from memsom.storage import session as memsom_session
 
 

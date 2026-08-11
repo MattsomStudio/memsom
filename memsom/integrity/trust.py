@@ -36,6 +36,7 @@ import sys
 import memsom
 from memsom.storage import schema as memsom_schema
 from memsom.integrity import recompute as memsom_recompute
+from memsom.kernel.lattice import meet, join, _validate_label_int
 
 # ---------------------------------------------------------------------------
 # Migration
@@ -53,38 +54,10 @@ def migrate(conn):
   forced INTEGER NOT NULL DEFAULT 0,
   ts TEXT NOT NULL
 );""")
-
-
 # ---------------------------------------------------------------------------
-# Lattice operations (pure functions, no I/O)
+# Lattice operations moved to memsom.kernel.lattice (Phase 3)
 # ---------------------------------------------------------------------------
 
-def _validate_label_int(v):
-    """Raise ValueError if *v* is not an integer in 0..3."""
-    if not isinstance(v, int):
-        raise ValueError(f"label must be an int 0..3, got {v!r}")
-    if v < 0 or v > 3:
-        raise ValueError(f"label out of range 0..3: {v}")
-
-
-def meet(a, b):
-    """Lattice meet: min of two integrity labels.
-
-    Both values must be integers in 0..3, otherwise ValueError is raised.
-    """
-    _validate_label_int(a)
-    _validate_label_int(b)
-    return min(a, b)
-
-
-def join(a, b):
-    """Lattice join: max of two integrity labels.
-
-    Both values must be integers in 0..3, otherwise ValueError is raised.
-    """
-    _validate_label_int(a)
-    _validate_label_int(b)
-    return max(a, b)
 
 
 # ---------------------------------------------------------------------------

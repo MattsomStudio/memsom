@@ -155,72 +155,11 @@ def effective_channel(default_channel: str, declared) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Frontmatter (YAML subset, stdlib only)
+# Frontmatter -- moved to memsom.kernel.frontmatter (Phase 3 dedupe)
 # ---------------------------------------------------------------------------
 
-_FM_LIST_ITEM = re.compile(r"^\s*-\s+(.*)$")
-_FM_KV = re.compile(r"^([A-Za-z0-9_\-]+)\s*:\s*(.*)$")
+from memsom.kernel.frontmatter import parse_frontmatter
 
-
-def _strip_scalar(v: str):
-    """Strip surrounding quotes from a YAML scalar; return the bare string."""
-    v = v.strip()
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
-    return v
-
-
-def parse_frontmatter(text: str):
-    """Parse a leading ``---`` YAML block. Return (frontmatter_dict, body).
-
-    Recognizes ``key: scalar``, ``key: [a, b]`` inline lists, and block lists
-    (``key:`` then ``  - item`` lines). Values keep raw strings; lists -> list.
-    If there is no valid frontmatter (no ``---`` on line 1), returns ({}, text).
-    Only a tiny, predictable subset — enough for tags/aliases/memsom-* keys.
-    """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, text
-
-    # Find the closing fence.
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() in ("---", "..."):
-            end = i
-            break
-    if end is None:
-        return {}, text  # unterminated -> treat whole file as body
-
-    fm = {}
-    cur_key = None
-    for raw in lines[1:end]:
-        if not raw.strip():
-            continue
-        m_item = _FM_LIST_ITEM.match(raw)
-        if m_item and cur_key is not None:
-            # Only an EMPTY scalar ("") preceding '- ' lines becomes a block list.
-            # Promoting on any non-list value would silently discard a real scalar
-            # (e.g. malformed `tags: foo` then `- bar` must not drop "foo").
-            if fm.get(cur_key) == "":
-                fm[cur_key] = []
-            if isinstance(fm.get(cur_key), list):
-                fm[cur_key].append(_strip_scalar(m_item.group(1)))
-            continue
-        m_kv = _FM_KV.match(raw)
-        if m_kv:
-            key = m_kv.group(1)
-            val = m_kv.group(2).strip()
-            cur_key = key
-            if val == "":
-                fm[key] = ""  # may become a block list on following '- ' lines
-            elif val.startswith("[") and val.endswith("]"):
-                inner = val[1:-1].strip()
-                fm[key] = [_strip_scalar(x) for x in inner.split(",") if x.strip()] if inner else []
-            else:
-                fm[key] = _strip_scalar(val)
-
-    body = "\n".join(lines[end + 1:])
-    return fm, body
 
 
 # ---------------------------------------------------------------------------

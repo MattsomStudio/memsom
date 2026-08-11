@@ -16,7 +16,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
 from memsom.integrity import capgate as C
-from memsom.integrity import policy as P
+from memsom.kernel import policy as P
 
 
 class Base(unittest.TestCase):
