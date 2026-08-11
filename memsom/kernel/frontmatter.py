@@ -1,22 +1,22 @@
 """memsom.kernel.frontmatter -- the frontmatter parsers, deduped (Phase 3).
 
-Two shapes, one file, no more scattered copies:
-  split_frontmatter(text) -> (fm_lines, body, had_fm)  raw-line access, used by
-    stamp_fm for lossless round-trip editing (comments/indentation preserved).
-  frontmatter_dict(text) -> (dict, body)  the fuller YAML-subset parser (inline
-    + block lists), moved here from memsom.bridge.obsidian, and shared by
-    memsom.lifecycle.forget (whose own near-duplicate flat-only version this
-    replaces -- forget.build_inventory only ever reads flat scalar keys, so the
-    richer parser is behaviour-identical there; the golden-parity test
-    (test_memsom_forget.TestParity) never touches this function, only compute()
-    and its pure-math helpers).
+There is exactly one fence-finding implementation: split_frontmatter(text) ->
+(fm_lines, body, had_fm). Everything else that needs the frontmatter block is
+built on top of it, not a second independent scanner:
+  - stamp_fm() edits fm_lines directly (lossless round-trip: comments and
+    indentation survive).
+  - frontmatter_dict(text) -> (dict, body) calls split_frontmatter() for the
+    fence/body split, then interprets those same fm_lines as the richer
+    YAML-subset shape (inline + block lists). This is the parser that used
+    to be duplicated verbatim between memsom.bridge.obsidian and
+    memsom.lifecycle.forget; forget's copy read only flat scalar keys, so
+    pointing it at the shared implementation is behaviour-identical there
+    (test_memsom_forget.TestParity never touches this function, only
+    compute() and its pure-math helpers).
 
-Both defs are moved verbatim from their original modules; only the location and
-(for forget's ex-duplicate) the call site changed.
-
-Only one of the two original top-level names survives as a def here; the
-other is exposed under a non-colliding name and aliased back at its two
-call sites (obsidian.py, forget.py), so nothing outside this file changed.
+No fixture in the test suite relies on the legacy "..." YAML end-of-document
+marker as a frontmatter closer (only "---"), so frontmatter_dict's old
+independent support for it is dropped along with its independent scanner.
 """
 
 import re
@@ -109,25 +109,19 @@ def frontmatter_dict(text: str):
 
     Recognizes ``key: scalar``, ``key: [a, b]`` inline lists, and block lists
     (``key:`` then ``  - item`` lines). Values keep raw strings; lists -> list.
-    If there is no valid frontmatter (no ``---`` on line 1), returns ({}, text).
+    If there is no valid frontmatter, returns ({}, text).
     Only a tiny, predictable subset — enough for tags/aliases/memsom-* keys.
-    """
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return {}, text
 
-    # Find the closing fence.
-    end = None
-    for i in range(1, len(lines)):
-        if lines[i].strip() in ("---", "..."):
-            end = i
-            break
-    if end is None:
-        return {}, text  # unterminated -> treat whole file as body
+    Built directly on split_frontmatter(): this function owns no fence-finding
+    logic of its own, only the fm_lines -> dict interpretation.
+    """
+    fm_lines, body, had = split_frontmatter(text)
+    if not had:
+        return {}, text
 
     fm = {}
     cur_key = None
-    for raw in lines[1:end]:
+    for raw in fm_lines:
         if not raw.strip():
             continue
         m_item = _FM_LIST_ITEM.match(raw)
@@ -153,6 +147,4 @@ def frontmatter_dict(text: str):
             else:
                 fm[key] = _strip_scalar(val)
 
-    body = "\n".join(lines[end + 1:])
     return fm, body
-
