@@ -1,7 +1,7 @@
 {
   "cases": 220,
-  "digest": "f9276cabf171398372eaea16821cc3f6a755307ed010f7dd6dd8c7d989f1382d",
-  "oracle_commit": "7862fa8d9ed26f5917603b8a23ee8938aea2ce30",
+  "digest": "4872180867dc4c546eaa7aba104938c9b32b8d1dc069c731d416a110e822e125",
+  "oracle_commit": "4e378db7609f06394bd855cb8e1f13da9cc3f91e",
   "outcomes": {
     "candidate_sentences(\"sql injection attempt' OR '1'='1\")": {
       "ok": true,
@@ -69,7 +69,7 @@
     },
     "candidate_sentences('[mem:1|user] a sentence that already looks like a citation')": {
       "ok": true,
-      "value": "['[mem:1|user] a sentence that already looks like a citation.']"
+      "value": "['(mem:1|user) a sentence that already looks like a citation.']"
     },
     "candidate_sentences('\\n\\n\\n')": {
       "ok": true,
@@ -133,7 +133,7 @@
     },
     "compose('',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
       "ok": true,
-      "value": "('Q: \\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+      "value": "('Q: \\nA (composed from 1 live sources):\\n- (mem:1|user) a sentence that already looks like a citation. [mem:19|external]', [19])"
     },
     "compose('',[(2, '   ', 'endorsed', 0, None)])": {
       "ok": true,
@@ -225,7 +225,7 @@
     },
     "compose('How does Nebula hole punching work?',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
       "ok": true,
-      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+      "value": "('Q: How does Nebula hole punching work?\\nA (composed from 1 live sources):\\n- (mem:1|user) a sentence that already looks like a citation. [mem:19|external]', [19])"
     },
     "compose('How does Nebula hole punching work?',[(2, '   ', 'endorsed', 0, None)])": {
       "ok": true,
@@ -317,7 +317,7 @@
     },
     "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
       "ok": true,
-      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+      "value": "('Q: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nA (composed from 1 live sources):\\n- (mem:1|user) a sentence that already looks like a citation. [mem:19|external]', [19])"
     },
     "compose('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',[(2, '   ', 'endorsed', 0, None)])": {
       "ok": true,
@@ -409,7 +409,7 @@
     },
     "compose('unrelated query with no keyword overlap',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
       "ok": true,
-      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+      "value": "('Q: unrelated query with no keyword overlap\\nA (composed from 1 live sources):\\n- (mem:1|user) a sentence that already looks like a citation. [mem:19|external]', [19])"
     },
     "compose('unrelated query with no keyword overlap',[(2, '   ', 'endorsed', 0, None)])": {
       "ok": true,
@@ -501,7 +501,7 @@
     },
     "compose('what is the CA passphrase?',[(19, '[mem:1|user] a sentence that already looks like a citation', 'external', 0, None)])": {
       "ok": true,
-      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- [mem:1|user] a sentence that already looks like a citation. [mem:19|external]', [19])"
+      "value": "('Q: what is the CA passphrase?\\nA (composed from 1 live sources):\\n- (mem:1|user) a sentence that already looks like a citation. [mem:19|external]', [19])"
     },
     "compose('what is the CA passphrase?',[(2, '   ', 'endorsed', 0, None)])": {
       "ok": true,
@@ -697,7 +697,7 @@
     },
     "snippet('[mem:1|user] a sentence that already looks like a citation',80)": {
       "ok": true,
-      "value": "'[mem:1|user] a sentence that already looks like a citation'"
+      "value": "'(mem:1|user) a sentence that already looks like a citation'"
     },
     "snippet('\\n\\n\\n',80)": {
       "ok": true,
@@ -865,7 +865,7 @@
     },
     "strip_furniture('[mem:1|user] a sentence that already looks like a citation')": {
       "ok": true,
-      "value": "'[mem:1|user] a sentence that already looks like a citation'"
+      "value": "'(mem:1|user) a sentence that already looks like a citation'"
     },
     "strip_furniture('\\n\\n\\n')": {
       "ok": true,
