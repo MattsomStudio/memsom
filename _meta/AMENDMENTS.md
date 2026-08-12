@@ -336,3 +336,37 @@ with `isError: true`; this does not change `doctor --json`'s own process exit co
 the exit gate's `&&` chain actually checks, and PLAN.md's exit gate does not require the embedded
 selfcheck field to be clean. The macOS/Linux legs of this job are unverified locally (no such
 machine in this environment) and run for the first time in CI itself.
+
+---
+
+## A-21 -- Phase 11 fix: full-history rewrite to close `history_scan.py --all`, the leak-scan CI job
+
+**Date:** 2026-08-11
+**Affects:** phase-11 (fix), entire git history (`git filter-repo`), no working-tree content
+**Supersedes:** nothing.
+
+**RED finding:** `python scripts/history_scan.py --all` (the exact command the `leak-scan` job this
+phase's own `tests.yml` ships runs on every push/PR) exited 1: 17 leak token(s) across 6 historical
+commits, spanning both this refactor's own earlier "fix" commits (which corrected the working tree
+going forward but never rewrote the commit that introduced the leak) and pre-refactor base history
+inherited from the original project. Working-tree `scrub_gate` was and stayed clean throughout --
+the leak lived only in superseded blob/commit-message content still reachable in `git log`.
+
+**Fix:** `git filter-repo --force --replace-text <expr> --replace-message <expr>` across the full
+184-commit history, regex-replacing the three leaked token shapes named in `scrub_gate.py`'s own denylist
+(the author username, the overlay-subnet prefix, and the private vault-folder path fragment)
+case-insensitively in
+both blob content and commit messages. This is a full local history rewrite (new commit hashes
+throughout, `phase(N):` subjects unchanged) confined to this copy -- `origin` (the live repo) was
+never fetched from or pushed to; filter-repo's default post-rewrite removal of the local `origin`
+remote was undone by re-adding it (`git remote add origin`) once the rewrite verified clean, since
+nothing was ever sent there. A `.git` backup was taken before the rewrite (outside version control)
+and is not needed given the verified-clean result.
+
+MEASURED after rewrite, same commit: `python scripts/history_scan.py --all` -> clean, 0 tokens;
+`python scripts/scrub_gate.py .` -> clean; `git fsck --full` -> no errors; `git status --porcelain`
+-> empty; full section 6.0.1 gate set (env_ratchet, lint-imports, mutual_pairs, gate_readpool,
+gate_writeowner, `pytest tests/gates`, differential oracle, `mcp --selfcheck`, `broker --selfcheck`,
+`contradict-sweep`, `saveall` import, tuning-roundtrip, `code_rag` disabled-not-absent) all pass
+identically to the pre-rewrite baseline; full suite cold -> 1165 tests, `OK (expected failures=2)`,
+170.4s.
