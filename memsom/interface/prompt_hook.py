@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import sys
 import threading
 import time
@@ -107,13 +106,13 @@ def query_hits(query, k=HOOK_K, clearance="topsecret", deadline_ms=800,
     from memsom.retrieval import warm
     t_end = time.monotonic() + max(0.05, deadline_ms / 1000.0)
 
-    # 1. warm endpoint (the long-lived MCP server)
+    # 1. warm endpoint (the long-lived MCP server). Its budget is capped at
+    #    warm.WARM_BUDGET_S (~250 ms) INCLUDING the read: a slow or wedged
+    #    endpoint is treated as down and we fall back, never wait it out.
     try:
         hits = warm.warm_query(query, k=k, clearance=clearance,
                                deadline_s=t_end - time.monotonic(), db_path=db_path)
         return hits, "warm"
-    except socket.timeout:
-        return [], "timeout"
     except warm.WarmUnavailable:
         pass
     except Exception:  # noqa: BLE001 — any other failure: fall back, not crash

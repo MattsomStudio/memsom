@@ -193,6 +193,199 @@ class TestWarmEndpoint(_StoreCase):
         self.assertEqual(hits[0]["stem"], "reference_nebula_mesh_firewall")
 
 
+class TestWarmResilience(_StoreCase):
+    """The 2026-08-20 wedge: a listener that accepts but never serves. Every
+    layer that bounds it is exercised here through real sockets."""
+
+    def tearDown(self):
+        srv = getattr(self, "srv", None)
+        if srv is not None:
+            srv.stop()
+        super().tearDown()
+
+    def test_ping_answers_without_touching_db(self):
+        opened = []
+
+        def open_conn():
+            opened.append(1)
+            return memsom.get_connection()
+        self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
+        self.assertTrue(self.srv.ping(timeout_s=2))
+        raw = json.dumps({"token": self.srv.token, "method": "ping"}).encode()
+        self.assertEqual(warm.handle_request(raw, "127.0.0.1", self.srv.token, open_conn),
+                         {"pong": True, "pid": os.getpid()})
+        self.assertEqual(opened, [])
+        # ping still needs the token
+        raw = json.dumps({"token": "nope", "method": "ping"}).encode()
+        self.assertEqual(warm.handle_request(raw, "127.0.0.1", self.srv.token, open_conn),
+                         {"error": "unauthorized"})
+
+    def test_hanging_handler_does_not_block_second_client(self):
+        release = threading.Event()
+        calls = []
+
+        def open_conn():
+            calls.append(1)
+            if len(calls) == 1:
+                release.wait(10)          # first request hangs inside the handler
+            return memsom.get_connection()
+        self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
+        ep = warm.read_endpoint(self.db)
+        hung = socket.create_connection(("127.0.0.1", ep["port"]), timeout=5)
+        hung.sendall((json.dumps({"token": ep["token"], "method": "retrieve",
+                                  "query": "nebula"}) + "\n").encode())
+        for _ in range(200):              # wait until the handler is inside open_conn
+            if calls:
+                break
+            time.sleep(0.01)
+        self.assertEqual(calls, [1])
+        t0 = time.monotonic()
+        hits = warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertEqual(hits[0]["stem"], "reference_nebula_mesh_firewall")
+        self.assertTrue(self.srv.ping(timeout_s=2))
+        release.set()
+        hung.close()
+
+    def test_silent_client_does_not_block_others(self):
+        self.srv = warm.WarmServer(self.db).start()
+        ep = warm.read_endpoint(self.db)
+        idle = [socket.create_connection(("127.0.0.1", ep["port"]), timeout=5)
+                for _ in range(4)]        # connect, never send
+        try:
+            hits = warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+            self.assertEqual(hits[0]["stem"], "reference_nebula_mesh_firewall")
+            # the server hangs up on a silent client after CONN_TIMEOUT_S
+            idle[0].settimeout(2)
+            self.assertEqual(idle[0].recv(16), b"")
+        finally:
+            for s in idle:
+                s.close()
+
+    def test_handler_exception_does_not_kill_server(self):
+        calls = []
+
+        def open_conn():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return memsom.get_connection()
+        self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
+        with self.assertRaises(warm.WarmUnavailable) as cm:
+            warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+        self.assertIn("internal", str(cm.exception))
+        self.assertTrue(self.srv.alive())
+        hits = warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+        self.assertEqual(hits[0]["stem"], "reference_nebula_mesh_firewall")
+
+    def test_slow_endpoint_is_unavailable_not_waited_for(self):
+        def open_conn():
+            time.sleep(1.5)
+            return memsom.get_connection()
+        self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
+        t0 = time.monotonic()
+        hits, source = ph.query_hits("piped exit code pipefail", k=3, deadline_ms=2000)
+        self.assertLess(time.monotonic() - t0, 1.2)   # ~250 ms warm + bm25
+        self.assertEqual(source, "bm25")
+        self.assertTrue(hits)
+
+    def test_backoff_engages_after_two_failures_and_clears(self):
+        gate = {"hang": True}
+
+        def open_conn():
+            if gate["hang"]:
+                time.sleep(1.0)
+            return memsom.get_connection()
+        self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
+        ep = warm.read_endpoint(self.db)
+        with self.assertRaises(warm.WarmUnavailable):
+            warm.warm_query("nebula", db_path=self.db)
+        self.assertEqual(warm.read_backoff(self.db)["failures"], 1)
+        self.assertFalse(warm.in_backoff(ep, self.db))
+        with self.assertRaises(warm.WarmUnavailable):
+            warm.warm_query("nebula", db_path=self.db)
+        self.assertEqual(warm.read_backoff(self.db)["failures"], 2)
+        self.assertTrue(warm.in_backoff(ep, self.db))
+        # while backed off the warm path is skipped outright (no socket, no wait)
+        gate["hang"] = False
+        t0 = time.monotonic()
+        with self.assertRaises(warm.WarmUnavailable) as cm:
+            warm.warm_query("nebula", db_path=self.db)
+        self.assertEqual(str(cm.exception), "backoff")
+        self.assertLess(time.monotonic() - t0, 0.05)
+        # the window expires on its own ...
+        self.assertFalse(warm.in_backoff(ep, self.db, now=time.time() + warm.BACKOFF_S + 1))
+        # ... and a successful call clears the sidecar
+        warm.clear_backoff(self.db)
+        hits = warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+        self.assertTrue(hits)
+        self.assertIsNone(warm.read_backoff(self.db))
+
+    def test_no_backoff_when_server_pid_is_dead(self):
+        ep = {"port": 1, "pid": 4242}
+        warm.note_warm_failure(ep, self.db, alive=lambda pid: False)
+        n = warm.note_warm_failure(ep, self.db, alive=lambda pid: False)
+        self.assertEqual(n, 2)
+        self.assertFalse(warm.in_backoff(ep, self.db))
+        # and a counter never carries across listeners (different port)
+        warm.note_warm_failure({"port": 2, "pid": 4242}, self.db, alive=lambda pid: True)
+        self.assertEqual(warm.read_backoff(self.db)["failures"], 1)
+
+    def test_refused_connect_does_not_count_as_failure(self):
+        s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+        warm.endpoint_file(self.db).write_text(
+            json.dumps({"host": "127.0.0.1", "port": port, "token": "dead", "pid": 1}))
+        with self.assertRaises(warm.WarmUnavailable):
+            warm.warm_query("nebula", db_path=self.db)
+        self.assertIsNone(warm.read_backoff(self.db))
+
+    def test_restart_clears_backoff_and_rewrites_endpoint(self):
+        self.srv = warm.WarmServer(self.db).start()
+        ep = warm.read_endpoint(self.db)
+        warm.note_warm_failure(ep, self.db, alive=lambda pid: True)
+        warm.note_warm_failure(ep, self.db, alive=lambda pid: True)
+        self.assertTrue(warm.in_backoff(ep, self.db))
+        self.srv.restart()
+        ep2 = warm.read_endpoint(self.db)
+        self.assertNotEqual(ep2["token"], ep["token"])
+        self.assertIsNone(warm.read_backoff(self.db))
+        self.assertTrue(self.srv.ping(timeout_s=2))
+
+    def test_watchdog_restarts_a_wedged_listener(self):
+        self.srv = warm.WarmServer(self.db).start()
+        # wedge it: the accept loop stops but the socket stays bound + listening
+        self.srv._server.shutdown()
+        self.assertFalse(self.srv.ping(timeout_s=0.5))
+        wd = warm.WarmWatchdog(self.srv, interval_s=60, ping_timeout_s=0.5)
+        self.assertFalse(wd.check_once())
+        self.assertEqual(self.srv.restarts, 1)
+        self.assertTrue(self.srv.ping(timeout_s=2))
+        self.assertTrue(wd.check_once())
+        ep = warm.read_endpoint(self.db)
+        self.assertEqual(ep["port"], self.srv.port)
+        hits = warm.warm_query("nebula mesh firewall ufw", k=3, db_path=self.db)
+        self.assertTrue(hits)
+
+    def test_mcp_shutdown_removes_endpoint_file(self):
+        from memsom.interface import mcp as memsom_mcp
+        srv = memsom_mcp._start_warm_endpoint()
+        self.assertIsNotNone(srv)
+        f = warm.endpoint_file(self.db)
+        self.assertTrue(f.exists())
+        self.assertIsNotNone(getattr(srv, "watchdog", None))
+        memsom_mcp._stop_warm_endpoint(srv)
+        self.assertFalse(f.exists())
+        self.assertTrue(srv.watchdog._stop.is_set())
+
+    def test_serve_stdio_removes_endpoint_file_on_exit(self):
+        from memsom.interface import mcp as memsom_mcp
+        f = warm.endpoint_file(self.db)
+        with mock.patch.object(memsom_mcp, "_serve_lines",
+                               side_effect=lambda stream: None):
+            memsom_mcp.serve_stdio()
+        self.assertFalse(f.exists())
+
+
 class TestFallbackAndDeadline(_StoreCase):
     def test_bm25_fallback_when_endpoint_down(self):
         self.assertFalse(warm.endpoint_file(self.db).exists())

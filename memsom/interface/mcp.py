@@ -735,10 +735,28 @@ def _start_warm_endpoint():
         srv = memsom_warm.WarmServer().start()
         print(f"[memsom-mcp] warm endpoint on 127.0.0.1:{srv.port} ({srv.file})",
               file=sys.stderr)
-        return srv
     except Exception as exc:  # noqa: BLE001
         print(f"[memsom-mcp] warm endpoint not started: {exc!r}", file=sys.stderr)
         return None
+    # Watchdog: self-ping every ~60 s through the real socket; a listener that
+    # accepts but never answers (the 2026-08-20 CLOSE_WAIT wedge) is restarted
+    # on a fresh port + token, and the endpoint file is rewritten.
+    try:
+        srv.watchdog = memsom_warm.WarmWatchdog(srv).start()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[memsom-mcp] warm watchdog not started: {exc!r}", file=sys.stderr)
+    return srv
+
+
+def _stop_warm_endpoint(srv):
+    """Stop the watchdog first (so it cannot restart a listener we are tearing
+    down), then the listener; the endpoint file goes with it."""
+    if srv is None:
+        return
+    wd = getattr(srv, "watchdog", None)
+    if wd is not None:
+        wd.stop()
+    srv.stop()
 
 
 def serve_stdio():
@@ -757,8 +775,7 @@ def serve_stdio():
     try:
         _serve_lines(sys.stdin)
     finally:
-        if warm is not None:
-            warm.stop()
+        _stop_warm_endpoint(warm)   # removes the endpoint file on every exit path
 
 
 def _serve_lines(stream):
