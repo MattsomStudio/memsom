@@ -710,3 +710,116 @@ class TestIndexMetaFallback(Base):
             "section: Wrong Section\n---\n\nbody\n", encoding="utf-8")
         bi.import_memory_dir(self.conn, self.mem, dry_run=False)
         self.assertEqual(self._section_of("user_adhd.md"), "About the User")
+
+
+class TestProjectsSubdir(Base):
+    """memory/projects/*.md imports exactly like a flat file (basename-keyed)."""
+
+    def _write_project(self, name="project_widget.md", body="state\n"):
+        sub = self.mem / "projects"
+        sub.mkdir(exist_ok=True)
+        path = sub / name
+        path.write_text(
+            f"---\nname: Widget\ndescription: d\ntype: project\n"
+            f"section: Personal projects\n---\n\n{body}", encoding="utf-8")
+        return path
+
+    def test_iter_memory_files_walks_one_level_and_skips_indexes(self):
+        self._write_project()
+        (self.mem / "projects" / "INDEX.md").write_text("# Projects\n", encoding="utf-8")
+        (self.mem / "projects" / "deeper").mkdir()
+        (self.mem / "projects" / "deeper" / "project_nested.md").write_text("x", encoding="utf-8")
+        names = [p.name for p in bi.iter_memory_files(self.mem)]
+        self.assertIn("project_widget.md", names)
+        self.assertNotIn("MEMORY.md", names)
+        self.assertNotIn("INDEX.md", names)
+        self.assertNotIn("project_nested.md", names)     # one level only
+        self.assertEqual(len(names), len(SAMPLE) + 1)
+
+    def test_roundtrip_import_reimport_tombstone(self):
+        path = self._write_project()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["created"], len(SAMPLE) + 1)
+        node = self.live_node("project_widget.md")
+        self.assertIsNotNone(node)
+        self.assertEqual(node["source_ref"], "memory:project_widget")
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects")
+        self.assertEqual(fm.get("section"), "Personal projects")
+        # unchanged re-import: skipped, nothing created
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["created"], 0)
+        self.assertEqual(st["skipped"], len(SAMPLE) + 1)
+        # edit: supersede like a flat file
+        path.write_text(path.read_text(encoding="utf-8") + "more\n", encoding="utf-8")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["updated"], 1)
+        # delete: swept like a flat file
+        path.unlink()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["swept"], 1)
+        self.assertIsNone(self.live_node("project_widget.md"))
+
+    def test_move_between_levels_is_an_edit_not_a_new_memory(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = self.live_node("project_kali.md")
+        (self.mem / "projects").mkdir()
+        (self.mem / "project_kali.md").rename(self.mem / "projects" / "project_kali.md")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["created"], st["updated"], st["swept"]), (0, 1, 0))
+        new = self.live_node("project_kali.md")
+        self.assertNotEqual(new["id"], old["id"])
+        fm = bi.fm_top_level(bi.split_frontmatter(new["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects")
+        self.assertEqual(fm.get("section"), "Current Setup & Learning")  # curated line kept
+
+    def test_wikilink_resolves_across_levels_by_stem(self):
+        self._write_project(body="see [[user_adhd]]\n")
+        (self.mem / "reference_vault.md").write_text(
+            SAMPLE["reference_vault.md"] + "\nsee [[project_widget]]\n", encoding="utf-8")
+        st = bi.import_all(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["edges"]["unresolved"], 0)
+        self.assertEqual(st["edges"]["resolved"], 2)
+
+    def test_duplicate_stem_across_levels_errors_clearly(self):
+        self._write_project(name="project_kali.md")     # also exists flat
+        with self.assertRaises(bi.DuplicateMemoryStem) as cm:
+            bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertIn("project_kali.md", str(cm.exception))
+        with self.assertRaises(bi.DuplicateMemoryStem):
+            list(bi.iter_memory_files(self.mem))
+
+
+class TestExplicitUnsection(Base):
+    """`section: none` / `index: false` in the file withdraws it from the index."""
+
+    def _section_of(self, rel):
+        node = self.live_node(rel)
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        return fm.get("section")
+
+    def test_section_none_clears_stored_section_and_digest_excludes(self):
+        from memsom.lifecycle import forget
+        from memsom.distill import digest
+        forget.migrate(self.conn)
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(self._section_of("reference_vault.md"), "References")
+        # the file withdraws itself; the curated MEMORY.md line still exists
+        (self.mem / "reference_vault.md").write_text(
+            "---\nname: Vault path\ndescription: d\ntype: reference\n"
+            "section: None\n---\n\npath\n", encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertIsNone(self._section_of("reference_vault.md"))
+        forget.recompute_forget(self.conn)
+        excluded = []
+        out = digest.render_digest(self.conn, excluded_out=excluded)
+        self.assertNotIn("reference_vault.md", out)
+        self.assertIn({"stem": "reference_vault", "reason": "unsectioned"},
+                      [{k: e[k] for k in ("stem", "reason")} for e in excluded])
+
+    def test_index_false_also_withdraws(self):
+        (self.mem / "reference_vault.md").write_text(
+            "---\nname: Vault path\ntype: reference\nindex: false\n---\n\npath\n",
+            encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertIsNone(self._section_of("reference_vault.md"))

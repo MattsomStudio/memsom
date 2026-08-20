@@ -177,12 +177,26 @@ class TestDigestResolution(Base):
 
     def test_hook_resolves(self):
         self._write_fact(61)
+        (self.mem / "reference_llm.md").write_text(
+            "---\nname: llm\ndescription: local llm at [[fact_5070_toksps]]\n"
+            "type: reference\nsection: References\n---\nbody\n",
+            encoding="utf-8")
+        self._import()
+        text = digest.render_digest(conn=self.conn)
+        self.assertIn("local llm at 61 tok/s", text)
+
+    def test_project_hook_resolves_in_projects_index(self):
+        # project_ memories render in projects/INDEX.md, not MEMORY.md — the
+        # fact substitution must reach that surface too
+        self._write_fact(61)
         (self.mem / "project_llm.md").write_text(
             "---\nname: llm\ndescription: local llm at [[fact_5070_toksps]]\n"
             "type: project\nsection: Personal projects\n---\nbody\n",
             encoding="utf-8")
         self._import()
-        text = digest.render_digest(conn=self.conn)
+        self.assertNotIn("project_llm.md", digest.render_digest(conn=self.conn))
+        text = digest.render_projects_index(digest.project_entries(self.conn),
+                                            conn=self.conn)
         self.assertIn("local llm at 61 tok/s", text)
 
     def test_fact_entry_hook_is_its_value(self):

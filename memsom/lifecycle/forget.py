@@ -288,7 +288,10 @@ def _stem_of(source_ref):
 # 13 compute params but are NOT part of the golden compute contract.  Kept out of
 # DEFAULTS: test_memsom_forget.TestParity asserts DEFAULTS == mem_weights.DEFAULTS
 # byte-for-byte, and the original knows nothing about the digest budget.
-PANEL_PARAM_DEFAULTS = {"memory_budget": 16384}
+PANEL_PARAM_DEFAULTS = {
+    "memory_budget": 16384,      # MEMORY.md byte cap
+    "memory_max_lines": 180,     # MEMORY.md line cap (the consumer reads ~200 lines)
+}
 
 
 def _param_ok(key, v):
@@ -305,6 +308,8 @@ def _param_ok(key, v):
         return 0 <= v <= 1
     if key == "memory_budget":
         return v >= 1024
+    if key == "memory_max_lines":
+        return v >= 20
     return v >= 0  # gains, floors, thresholds, grace_days, decay_k, mig_k
 
 

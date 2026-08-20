@@ -21,7 +21,7 @@ from memsom.integrity import stale as memsom_stale
 FILES = {
     "user_adhd.md": "---\nname: ADHD\ndescription: has ADHD\ntype: user\n---\nbody\n",
     "feedback_debug.md": "---\nname: Debug loop\ndescription: use the loop\ntype: feedback\n---\nr\n",
-    "project_kali.md": "---\nname: Kali VM\ndescription: status\ntype: project\n---\ns\n",
+    "reference_kali.md": "---\nname: Kali VM\ndescription: status\ntype: reference\n---\ns\n",
     "reference_vault.md": "---\nname: Vault\ndescription: where\ntype: reference\n---\np\n",
 }
 INDEX = """# Memory - Alex
@@ -31,7 +31,7 @@ INDEX = """# Memory - Alex
 - [ADHD](user_adhd.md) — has ADHD
 
 ## Current Setup & Learning
-- [Kali VM](project_kali.md) — status
+- [Kali VM](reference_kali.md) — status
 
 ## References
 - [Vault](reference_vault.md) — where
@@ -105,9 +105,9 @@ class TestRender(Base):
         self.assertLess(i_setup, i_feedback)
 
     def test_cold_user_node_dropped(self):
-        self.demote("project_kali")
+        self.demote("reference_kali")
         out = digest.render_digest(self.conn)
-        self.assertNotIn("project_kali.md", out)
+        self.assertNotIn("reference_kali.md", out)
         # and the diff now reports it missing vs the real index
         diffs = digest.compare_index(INDEX, out)
         self.assertIn("Current Setup & Learning", diffs)
@@ -162,7 +162,7 @@ class TestWriteLive(Base):
 class TestBudget(Base):
     def test_drops_lowest_rs_user_first_under_tight_budget(self):
         # set distinct RS so the drop order is deterministic
-        self.conn.execute("UPDATE nodes SET forget_rs = 0.9 WHERE source_ref = 'memory:project_kali'")
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.9 WHERE source_ref = 'memory:reference_kali'")
         self.conn.execute("UPDATE nodes SET forget_rs = 0.1 WHERE source_ref = 'memory:reference_vault'")
         self.conn.commit()
         full = digest.render_digest(self.conn)
@@ -197,17 +197,17 @@ class TestStaleRender(Base):
         self.assertEqual(digest.compare_index(INDEX, out), {})
 
     def test_stale_marker_inline(self):
-        self._mark("project_kali", "unverified since 2026-04")
+        self._mark("reference_kali", "unverified since 2026-04")
         out = digest.render_digest(self.conn)
         # the inline body line carries a BARE glyph (reason lives in the section)
         line = next(ln for ln in out.splitlines()
-                    if "project_kali.md" in ln and "⚠" in ln)
+                    if "reference_kali.md" in ln and "⚠" in ln)
         self.assertIn("⚠", line)
         self.assertNotIn("unverified since", line)        # reason NOT inline (cheap)
         self.assertIn("unverified since 2026-04", out)     # reason IS in the section
 
     def test_needs_reverification_section_first(self):
-        self._mark("project_kali")
+        self._mark("reference_kali")
         out = digest.render_digest(self.conn)
         self.assertIn("## Needs Reverification", out)
         # it is the FIRST section under the H1
@@ -217,12 +217,12 @@ class TestStaleRender(Base):
     def test_compare_index_ignores_reverify_section(self):
         # the synthetic section carries no real file entries, so the GO criterion
         # (per-section file-set equivalence) is unaffected by staleness
-        self._mark("project_kali")
+        self._mark("reference_kali")
         out = digest.render_digest(self.conn)
         self.assertEqual(digest.compare_index(INDEX, out), {})
 
     def test_reverify_section_dropped_first_under_budget(self):
-        self._mark("project_kali")
+        self._mark("reference_kali")
         full = digest.render_digest(self.conn)
         self.assertIn("## Needs Reverification", full)
         # a budget just under full forces the worklist section to shed FIRST,
@@ -231,6 +231,188 @@ class TestStaleRender(Base):
         out = digest.render_digest(self.conn, budget=tight)
         self.assertNotIn("## Needs Reverification", out)
         self.assertIn("⚠", out)                       # inline marker still present
+
+
+class TestLineCap(Base):
+    """The shed loop must satisfy the LINE cap too (the consumer's ~200-line read)."""
+
+    def _set_rs(self, stem, rs):
+        self.conn.execute("UPDATE nodes SET forget_rs = ? WHERE source_ref = ?",
+                          (rs, f"memory:{stem}"))
+        self.conn.commit()
+
+    def test_line_cap_sheds_with_reason_lines(self):
+        self._set_rs("reference_kali", 0.9)
+        self._set_rs("reference_vault", 0.1)
+        full = digest.render_digest(self.conn)
+        nlines = full.count("\n")
+        excluded = []
+        out = digest.render_digest(self.conn, max_lines=nlines - 1,
+                                   excluded_out=excluded)
+        self.assertLessEqual(out.count("\n"), nlines - 1)
+        self.assertNotIn("reference_vault.md", out)   # lowest RS shed first
+        self.assertIn("reference_kali.md", out)
+        self.assertEqual([(e["stem"], e["reason"]) for e in excluded],
+                         [("reference_vault", "lines")])
+
+    def test_byte_cap_wins_the_label_when_both_are_over(self):
+        self._set_rs("reference_vault", 0.1)
+        full = digest.render_digest(self.conn)
+        excluded = []
+        digest.render_digest(self.conn, budget=len(full.encode("utf-8")) - 5,
+                             max_lines=full.count("\n") - 1, excluded_out=excluded)
+        self.assertEqual(excluded[0]["reason"], "budget")
+
+    def test_raises_when_pinned_exceed_line_cap(self):
+        with self.assertRaises(digest.DigestTooLarge):
+            digest.render_digest(self.conn, max_lines=2)
+
+    def test_validate_reports_line_cap(self):
+        problems = digest.validate(self.conn, max_lines=2)
+        self.assertTrue(problems)
+        self.assertEqual(problems[0]["kind"], "export-boundary")
+
+    def test_resolve_max_lines_from_canonical(self):
+        import json
+        (self.mem / ".weights").mkdir()
+        (self.mem / ".weights" / "canonical.json").write_text(
+            json.dumps({"params": {"memory_max_lines": 77}}), encoding="utf-8")
+        self.assertEqual(digest.resolve_max_lines(self.mem), 77)
+        self.assertEqual(digest.resolve_max_lines(self.root / "nowhere"), digest.MAX_LINES)
+
+
+class TestLiveStatePartition(Base):
+    """Live state (## Live state / type: fact) is shed LAST among droppables."""
+
+    def setUp(self):
+        super().setUp()
+        (self.mem / "reference_gpu.md").write_text(
+            "---\nname: GPU driver\ndescription: 580.x\ntype: reference\n"
+            "section: Live state\n---\nx\n", encoding="utf-8")
+        (self.mem / "fact_tps.md").write_text(
+            "---\nname: tps\ndescription: tokens per second\ntype: fact\n"
+            "value: 42\nsection: References\n---\nx\n", encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+        # live-state entries get the LOWEST RS: naive RS order would drop them first
+        for stem, rs in (("reference_gpu", 0.01), ("fact_tps", 0.02),
+                         ("reference_vault", 0.5), ("reference_kali", 0.9)):
+            self.conn.execute("UPDATE nodes SET forget_rs = ? WHERE source_ref = ?",
+                              (rs, f"memory:{stem}"))
+        self.conn.commit()
+
+    def test_live_state_section_renders_after_hardware_slot(self):
+        out = digest.render_digest(self.conn)
+        self.assertIn("## Live state", out)
+        self.assertLess(out.index("## Live state"), out.index("## References"))
+
+    def test_other_droppables_go_before_live_state(self):
+        full = digest.render_digest(self.conn)
+        excluded = []
+        # cap tight enough to force exactly two drops
+        two_lines_less = full.count("\n") - 2
+        out = digest.render_digest(self.conn, max_lines=two_lines_less,
+                                   excluded_out=excluded)
+        dropped = [e["stem"] for e in excluded if e["reason"] in ("budget", "lines")]
+        self.assertEqual(dropped[:2], ["reference_vault", "reference_kali"])
+        self.assertIn("reference_gpu.md", out)
+        self.assertIn("fact_tps.md", out)
+
+    def test_live_state_is_still_droppable_when_nothing_else_is_left(self):
+        # the smallest line cap that still renders = pinned + literals only
+        for cap in range(3, 200):
+            excluded = []
+            try:
+                out = digest.render_digest(self.conn, max_lines=cap,
+                                           excluded_out=excluded)
+                break
+            except digest.DigestTooLarge:
+                continue
+        dropped = [e["stem"] for e in excluded if e["reason"] == "lines"]
+        # all four user files gone, non-live first, then live-state by RS
+        self.assertEqual(dropped, ["reference_vault", "reference_kali",
+                                   "reference_gpu", "fact_tps"])
+        self.assertIn("user_adhd.md", out)            # pinned survives
+
+
+class TestProjectsSplit(Base):
+    """project_ stems leave MEMORY.md for projects/INDEX.md."""
+
+    def setUp(self):
+        super().setUp()
+        sub = self.mem / "projects"
+        sub.mkdir()
+        (sub / "project_widget.md").write_text(
+            "---\nname: Widget\ndescription: building it\ntype: project\n"
+            "section: Personal projects\n---\nx\n", encoding="utf-8")
+        (sub / "project_old.md").write_text(
+            "---\nname: Old thing\ndescription: shipped\ntype: project\n"
+            "status: Closed\nsection: Personal projects\n---\nx\n", encoding="utf-8")
+        (sub / "project_nosection.md").write_text(
+            "---\nname: Unsectioned\ndescription: still indexed\ntype: project\n"
+            "status: parked\n---\nx\n", encoding="utf-8")
+        # a legacy flat project memory, cold -> Closed by tier
+        (self.mem / "project_legacy.md").write_text(
+            "---\nname: Legacy\ndescription: flat file\ntype: project\n"
+            "section: Work\n---\nx\n", encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+        self.demote("project_legacy")
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.9 WHERE source_ref = 'memory:project_widget'")
+        self.conn.commit()
+
+    def test_projects_excluded_from_main_digest_with_pointer(self):
+        excluded = []
+        out = digest.render_digest(self.conn, excluded_out=excluded)
+        for stem in ("project_widget", "project_old", "project_nosection", "project_legacy"):
+            self.assertNotIn(f"{stem}.md", out)
+        self.assertIn("## Personal projects\n" + digest.PROJECTS_POINTER_LINE, out)
+        self.assertEqual(out.count(digest.PROJECTS_POINTER_LINE), 1)
+        reasons = {e["stem"]: e["reason"] for e in excluded}
+        self.assertEqual(reasons["project_widget"], "projects")
+        self.assertEqual(reasons["project_legacy"], "projects")
+
+    def test_pointer_not_duplicated_after_reimport_of_rendered_index(self):
+        # the importer mirrors the rendered pointer back as a literal node; the
+        # next render must still carry exactly one copy
+        out = digest.render_digest(self.conn)
+        (self.mem / "MEMORY.md").write_text(out, encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        out2 = digest.render_digest(self.conn)
+        self.assertEqual(out2.count(digest.PROJECTS_POINTER_LINE), 1)
+
+    def test_no_pointer_when_no_projects(self):
+        for p in list((self.mem / "projects").glob("*.md")) + [self.mem / "project_legacy.md"]:
+            p.unlink()
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        out = digest.render_digest(self.conn)
+        self.assertNotIn("projects/INDEX.md", out)
+
+    def test_projects_index_grouping_and_links(self):
+        text = digest.render_projects_index(digest.project_entries(self.conn))
+        self.assertTrue(text.startswith("# Projects\n"))
+        active = text.index("## Active")
+        parked = text.index("## Parked")
+        closed = text.index("## Closed")
+        self.assertLess(active, parked)
+        self.assertLess(parked, closed)
+        # status wins over tier; tier decides otherwise; links relative to projects/
+        self.assertIn("- [Widget](project_widget.md) — building it", text[active:parked])
+        self.assertIn("- [Unsectioned](project_nosection.md) — still indexed", text[parked:closed])
+        self.assertIn("- [Old thing](project_old.md) — shipped", text[closed:])
+        self.assertIn("- [Legacy](../project_legacy.md) — flat file", text[closed:])
+
+    def test_projects_index_sorted_by_rs_desc_within_group(self):
+        (self.mem / "projects" / "project_second.md").write_text(
+            "---\nname: Second\ndescription: also active\ntype: project\n---\nx\n",
+            encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.3 WHERE source_ref = 'memory:project_second'")
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.9 WHERE source_ref = 'memory:project_widget'")
+        self.conn.commit()
+        text = digest.render_projects_index(digest.project_entries(self.conn))
+        self.assertLess(text.index("project_widget.md"), text.index("project_second.md"))
 
 
 if __name__ == "__main__":

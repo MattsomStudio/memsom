@@ -31,7 +31,9 @@ import re
 import sys
 from pathlib import Path
 
-from memsom.bridge.bridge_import import split_frontmatter, fm_top_level, parse_primary_index, default_memory_dir
+from memsom.bridge.bridge_import import (split_frontmatter, fm_top_level, parse_primary_index,
+                                         default_memory_dir, iter_memory_files as _memory_files,
+                                         PROJECTS_SUBDIR)
 from memsom.distill.digest import resolve_budget
 
 BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
@@ -53,8 +55,9 @@ def _norm(s):
 
 
 def iter_memory_files(mem_dir):
-    """(file, stem, frontmatter dict, text) for each per-fact file (excl. the index)."""
-    for p in sorted(Path(mem_dir).glob("*.md")):
+    """(file, stem, frontmatter dict, text) for each per-fact file (excl. the
+    indexes) — flat files plus projects/*.md, via the bridge's own walker."""
+    for p in _memory_files(mem_dir):
         if p.name in SKIP_FILES:
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -103,6 +106,13 @@ def run_audit(mem_dir):
     memory_md = mem_dir / "MEMORY.md"
     md_text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
     hot = set(parse_primary_index(md_text))           # filenames linked in MEMORY.md
+    # project memories are indexed in projects/INDEX.md (generated next to
+    # MEMORY.md); a file listed there is indexed, not an orphan. Links there are
+    # relative to projects/ ("project_x.md" or "../project_x.md") -> basename.
+    proj_index = mem_dir / PROJECTS_SUBDIR / "INDEX.md"
+    if proj_index.exists():
+        hot |= {Path(f).name for f in
+                parse_primary_index(proj_index.read_text(encoding="utf-8"))}
     on_disk = {f for f, *_ in files}
     live, cold, db_ok = _store_tiers(mem_dir)
 

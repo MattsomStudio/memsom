@@ -44,11 +44,12 @@ def _is_author() -> bool:
     return os.environ.get("MEMDAG_BRIDGE_AUTHOR", "1") != "0"
 
 
-def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes) -> None:
+def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes,
+                         max_lines=None, rendered_lines=None) -> None:
     """Record which memories this render left OUT of MEMORY.md, and why.
 
     `.weights/shed.json` is the receipt for every index exclusion memsom decides
-    (cold / unsectioned / budget).  Consumers (mem_audit) treat a listed stem as
+    (projects / cold / unsectioned / budget / lines).  Consumers (mem_audit) treat a listed stem as
     a tracked, explained absence rather than an orphan.  Always rewritten in
     full — it describes the LAST render only, so a memory that comes back into
     the index drops out of it on its own with no reconciliation step.
@@ -69,6 +70,8 @@ def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes) -> None:
             "rendered_at": forget.now_iso(),
             "budget": budget,
             "rendered_bytes": rendered_bytes,
+            "max_lines": max_lines,
+            "lines": rendered_lines,
             "count": len(excluded),
             "by_reason": by_reason,
             "excluded": excluded,
@@ -80,10 +83,26 @@ def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes) -> None:
         print(f"[bridge] shed manifest skipped: {exc!r}")
 
 
+def _write_projects_index(conn, memory_dir):
+    """Render projects/INDEX.md atomically next to MEMORY.md (creates projects/).
+
+    No byte cap (read on demand, never always-loaded). Returns the path.
+    """
+    proj_dir = Path(memory_dir) / bi.PROJECTS_SUBDIR
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    text = digest.render_projects_index(digest.project_entries(conn), conn=conn)
+    path = proj_dir / digest.PROJECTS_INDEX_NAME
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(text.encode("utf-8"))  # LF on Windows too, like MEMORY.md
+    tmp.replace(path)
+    return path
+
+
 def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     """Run import -> forget -> (verify-stale) -> write_live over *memory_dir*.
 
-    Returns a result dict.  This is the pure orchestration core; the CLI wrapper
+    Also writes projects/INDEX.md (the project_ sub-index) after a successful
+    MEMORY.md write.  Returns a result dict.  This is the pure orchestration core; the CLI wrapper
     (`_cmd_bridge_render_safe`) is the fail-safe boundary that swallows errors so
     they never break the Stop-hook chain.
     """
@@ -115,10 +134,12 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     except Exception as exc:  # staleness is advisory — never block the render
         print(f"[bridge] verify-stale skipped: {exc!r}")
 
-    # Budget comes from the same loaded params (memory_budget) so one knob write
-    # moves the render threshold and the digest cap together, atomically.
+    # Budget + line cap come from the same loaded params (memory_budget /
+    # memory_max_lines) so one knob write moves the render threshold and the
+    # digest caps together, atomically.
     ok, info = digest.write_live(conn, str(memory_dir),
-                                 budget=params["memory_budget"])
+                                 budget=params["memory_budget"],
+                                 max_lines=params["memory_max_lines"])
 
     # Budget eviction is a real removal from the always-loaded index, but it is
     # NOT the forgetting layer's hot->cold demote and it never reaches
@@ -129,7 +150,15 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     # (this code path only), so no writer ever contends with the weights layer.
     if ok:
         _write_shed_manifest(memory_dir, info.get("excluded") or [],
-                             params["memory_budget"], info.get("bytes"))
+                             params["memory_budget"], info.get("bytes"),
+                             params["memory_max_lines"], info.get("lines"))
+        # projects/INDEX.md: the project_ memories MEMORY.md no longer carries
+        # (digest module docstring, "Projects split"). Written only after the
+        # main index succeeded, so the pointer line and its target move together.
+        try:
+            info["projects_index"] = str(_write_projects_index(conn, memory_dir))
+        except Exception as exc:  # noqa: BLE001 — advisory sub-index, never blocks
+            print(f"[bridge] projects index skipped: {exc!r}")
 
     # Keep the CLAUDE.md managed block current in the same pass (idempotent: a
     # second run is a no-op). Best-effort — a CLAUDE.md problem must never stop the

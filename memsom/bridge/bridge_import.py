@@ -98,6 +98,65 @@ def _migrate_legacy_obsidian_columns(conn) -> None:
         )
 
 
+# --- memory-dir layout --------------------------------------------------------
+
+PROJECTS_SUBDIR = "projects"
+# The two GENERATED index files. Never imported as memories: MEMORY.md is the
+# main digest, projects/INDEX.md the project sub-index (both rendered by
+# memsom.distill.digest from the store — importing them would loop).
+INDEX_NAMES = frozenset({"MEMORY.md", "INDEX.md"})
+
+
+class DuplicateMemoryStem(ValueError):
+    """Two memory files share a filename across the flat dir and projects/.
+
+    The bridge keys nodes on the BASENAME (bridge_path) and wikilinks resolve
+    by bare stem, so a stem must be globally unique across both levels — a
+    duplicate would make one file silently shadow the other.
+    """
+
+
+def iter_memory_files(memory_dir):
+    """Yield every per-fact memory file under *memory_dir*, sorted.
+
+    Layout (one level only): the flat ``*.md`` files plus ``projects/*.md``
+    (project memories live there so the main MEMORY.md stays small and they
+    get their own generated ``projects/INDEX.md``).  Generated index files
+    (``MEMORY.md``, any ``INDEX.md``) are excluded at every level.
+
+    Raises DuplicateMemoryStem when the same filename appears at both levels:
+    filenames are the node key and the wikilink target, so they must stay
+    globally unique.
+    """
+    memory_dir = Path(memory_dir)
+    top = [p for p in memory_dir.glob("*.md")
+           if p.is_file() and p.name not in INDEX_NAMES]
+    sub_dir = memory_dir / PROJECTS_SUBDIR
+    sub = ([p for p in sub_dir.glob("*.md")
+            if p.is_file() and p.name not in INDEX_NAMES]
+           if sub_dir.is_dir() else [])
+    seen = {}
+    for p in top + sub:
+        if p.name in seen:
+            raise DuplicateMemoryStem(
+                f"duplicate memory filename {p.name!r}: {seen[p.name]} and {p} "
+                f"— memory filenames must be unique across {memory_dir} and "
+                f"{memory_dir / PROJECTS_SUBDIR}")
+        seen[p.name] = p
+    return sorted(top + sub, key=lambda p: (p.name, str(p)))
+
+
+def memory_subdir(memory_dir, path) -> str | None:
+    """``"projects"`` when *path* lives in the projects/ subdir, else None.
+
+    Paths come from iter_memory_files (memory_dir / [projects /] name), so the
+    parent's name is the whole answer — no filesystem resolution needed."""
+    path = Path(path)
+    if path.parent.name == PROJECTS_SUBDIR and path.parent.parent == Path(memory_dir):
+        return PROJECTS_SUBDIR
+    return None
+
+
 # --- frontmatter parsing (light, stdlib) -------------------------------------
 
 def split_frontmatter(text: str):
@@ -129,6 +188,14 @@ def fm_top_level(fm_lines) -> dict:
         if m:
             out[m.group(1)] = m.group(2).strip()
     return out
+
+
+def unsectioned_by_frontmatter(fm: dict) -> bool:
+    """True when the file's own top-level frontmatter withdraws it from the
+    index: `section: none` (case-insensitive) or `index: false`."""
+    if (fm.get("section") or "").strip().lower() == "none":
+        return True
+    return (fm.get("index") or "").strip().lower() in ("false", "no", "0")
 
 
 def memory_type(stem: str, fm: dict) -> str:
@@ -378,7 +445,7 @@ def relate_wikilinks(conn, memory_dir, *, dry_run: bool = True) -> dict:
     memory_dir = Path(memory_dir)
     stats = {"edges": 0, "resolved": 0, "unresolved": 0, "skipped_self": 0}
 
-    files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
+    files = iter_memory_files(memory_dir)
     by_name, by_relpath = memsom_obsidian._build_resolver([p.name for p in files])
 
     # Parse each body's wikilinks with the same masking the vault sync uses, so a
@@ -467,7 +534,7 @@ def relate_fact_deps(conn, memory_dir, *, dry_run: bool = True) -> dict:
     memory_dir = Path(memory_dir)
     stats = {"edges": 0, "resolved": 0, "unresolved": 0, "skipped_self": 0}
 
-    files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
+    files = iter_memory_files(memory_dir)
     by_name, by_relpath = memsom_obsidian._build_resolver([p.name for p in files])
 
     # Pass A: parse every file's depends_on (comma/space-separated stems).
@@ -570,7 +637,8 @@ def _mtime_sig(path: Path) -> str:
 # --- the importer -------------------------------------------------------------
 
 def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
-    """Import every memory/*.md (excluding MEMORY.md) into memsom.
+    """Import every memory/*.md and memory/projects/*.md (excluding the
+    generated MEMORY.md / INDEX.md) into memsom.
 
     Returns stats: {total_files, created, updated, skipped, tombstoned}.
     Atomic: all writes happen in one transaction (or none, if dry_run) — with
@@ -587,7 +655,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     primary = (parse_primary_index(index_path.read_text(encoding="utf-8"))
                if index_path.exists() else {})
 
-    files = sorted(p for p in memory_dir.glob("*.md") if p.name != "MEMORY.md")
+    files = iter_memory_files(memory_dir)
     stats = {"total_files": len(files), "created": 0, "updated": 0,
              "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0,
              "stale_cascaded": 0}
@@ -641,7 +709,20 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 section = section or fm.get("section") or prev.get("section")
                 title = title or fm.get("index_title") or prev.get("index_title")
                 hook = hook or fm.get("index_hook") or prev.get("index_hook")
-            stamped = stamp_fm(raw, section=section, index_title=title, index_hook=hook)
+            # Explicit withdrawal: a file that says `section: none` (or
+            # `index: false`) in its OWN frontmatter is deliberately out of the
+            # index. It beats the curated line AND the stamped fallback — the
+            # fallback exists to stop accidental unfiling, and this is the one
+            # way to unfile on purpose without deleting the file.
+            if unsectioned_by_frontmatter(fm):
+                section = None
+            # memory_subdir: "projects" for files under projects/, absent for
+            # flat files — the digest links each entry relative to the index
+            # it renders into (projects/INDEX.md vs MEMORY.md) from this key.
+            # Node identity (bridge_path) stays the BASENAME, so moving a file
+            # between the two levels is an edit of the same memory, not a new one.
+            stamped = stamp_fm(raw, section=section, index_title=title, index_hook=hook,
+                               memory_subdir=memory_subdir(memory_dir, path))
             new_hash = memsom_ingest._content_hash(stamped)
 
             existing = _live_node_for_path(conn, rel)
@@ -788,7 +869,12 @@ def default_memory_dir():
     # the real brain is the memory dir with the MOST .md files; project-scoped
     # memory dirs (created by running Claude in another cwd) hold ~1 file and must
     # not be mistaken for it just because they sort first.
-    return max(candidates, key=lambda d: len(list(d.glob("*.md"))))
+    def _count(d):
+        try:
+            return len(iter_memory_files(d))
+        except DuplicateMemoryStem:
+            return len(list(d.glob("*.md")))  # still a candidate; import reports it
+    return max(candidates, key=_count)
 
 
 def _print_stats(stats, dry_run):

@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from memsom.bridge.bridge_import import default_memory_dir, split_frontmatter, fm_top_level
+from memsom.bridge.bridge_import import default_memory_dir, split_frontmatter, fm_top_level, iter_memory_files
 from memsom.lifecycle import forget
 
 HOME = Path.home()
@@ -240,8 +240,8 @@ def build_graph(mem_dir, rows):
     nodeset = {n["id"] for n in nodes}
     wl_re = re.compile(r"\[\[([a-z0-9_-]+)\]\]")
     seen = set()
-    for p in mem_dir.glob("*.md"):
-        if p.name == "MEMORY.md" or p.stem not in nodeset:
+    for p in iter_memory_files(mem_dir):
+        if p.stem not in nodeset:
             continue
         body = p.read_text(encoding="utf-8", errors="ignore")
         for target in wl_re.findall(body):
@@ -311,8 +311,8 @@ def build_code_graph(mem_dir, memory_ids):
         bases = sorted(base_to_file, key=len, reverse=True)
         pat = re.compile(r"(?<![\w./])(" +
                          "|".join(re.escape(b) for b in bases) + r")(?![\w])")
-        for p in mem_dir.glob("*.md"):
-            if p.name == "MEMORY.md" or p.stem not in memory_ids:
+        for p in iter_memory_files(mem_dir):
+            if p.stem not in memory_ids:
                 continue
             body = p.read_text(encoding="utf-8", errors="ignore")
             for fid in {base_to_file[m.group(1)] for m in pat.finditer(body)}:

@@ -13,10 +13,29 @@ Selection (the forgetting layer decides what's "hot enough" to inject):
                                                                  the store, just
                                                                  out of context).
 
-Budget: the rendered file must be <= 16,384 bytes (the harness loads it in full).
-If over, the lowest-RS user lines are dropped first; pinned + literal lines are
-never dropped.  If pinned+literal alone exceed the cap, DigestTooLarge is raised
-(surfaced, never silently truncated).
+Budget: the rendered file must fit BOTH a byte cap (`memory_budget`, fallback
+16,384 — the harness loads it in full) AND a line cap (`memory_max_lines`,
+fallback 180 — the consumer side reads only the first ~200 lines and has
+silently truncated the file before; bytes alone never caught that).  If over
+either, the lowest-RS user lines are dropped first; pinned + literal lines are
+never dropped.  If pinned+literal alone exceed a cap, DigestTooLarge is raised
+(surfaced, never silently truncated).  The shed manifest records WHICH cap
+forced each drop ("budget" when bytes were over at drop time, else "lines").
+
+Reserved live-state partition: among the droppable (non-pinned) entries, those
+filed under "## Live state" or carrying `type: fact` are shed LAST — the drop
+order is `(is_live_state, rs)`, so every other droppable entry goes before the
+first live-state one.  Live state is the stuff that is only useful if it is
+current and loaded (current versions, measured values, what is running where);
+a stale reference note losing its slot costs less than a live number going dark.
+
+Projects split: file entries whose stem starts with `project_` are NOT rendered
+into MEMORY.md at all.  They live in the `projects/` subdir of the memory dir
+and are rendered by render_projects_index into `projects/INDEX.md`, grouped
+Active / Parked / Closed (frontmatter `status:` when present, else the forget
+tier: hot -> Active, warm -> Parked, cold -> Closed), with no byte cap.  The
+main digest carries one literal pointer line under "## Personal projects" so a
+session knows where to look when a task touches ongoing work.
 
 SHADOW mode (Phase 3): write_shadow writes MEMORY.memsom.md NEXT TO the real
 MEMORY.md (never overwrites it).  compare_index does the per-section file-set
@@ -45,6 +64,7 @@ SECTIONS = [
     "About the User",
     "Personal context",
     "Hardware",
+    "Live state",
     "Current Setup & Learning",
     "Work",
     "Personal projects",
@@ -53,6 +73,20 @@ SECTIONS = [
 ]
 BUDGET = 16384  # hard-fallback cap; live value = `memory_budget` in the store's
 #                 canonical.json params (resolve_budget below / forget.load_params)
+MAX_LINES = 180  # hard-fallback line cap; live value = `memory_max_lines` (same file)
+
+# The projects split (module docstring): stems with this prefix render into
+# projects/INDEX.md, never into MEMORY.md.
+PROJECT_PREFIX = "project_"
+PROJECTS_INDEX_NAME = "INDEX.md"
+PROJECTS_POINTER_SECTION = "Personal projects"
+PROJECTS_POINTER_LINE = ("- Project memory lives in projects/ — read projects/INDEX.md "
+                         "(Active / Parked / Closed) when a task touches ongoing work.")
+PROJECT_GROUPS = ("Active", "Parked", "Closed")
+_TIER_TO_GROUP = {"hot": "Active", "warm": "Parked", "cold": "Closed"}
+_STATUS_TO_GROUP = {"active": "Active", "parked": "Parked", "closed": "Closed"}
+DEFAULT_PROJECTS_TITLE = "# Projects"
+LIVE_STATE_SECTION = "Live state"
 
 
 def resolve_budget(memory_dir):
@@ -65,6 +99,19 @@ def resolve_budget(memory_dir):
         return int(params["memory_budget"])
     except Exception:
         return BUDGET
+
+
+def resolve_max_lines(memory_dir):
+    """The live LINE cap for MEMORY.md: `memory_max_lines` from the store's
+    canonical.json params, falling back to MAX_LINES.  Same resolution as
+    resolve_budget — the consumer's ~200-line read limit is a separate, silent
+    truncation the byte cap never saw."""
+    try:
+        params, _ = _forget.load_params(
+            Path(memory_dir) / ".weights" / "canonical.json")
+        return int(params["memory_max_lines"])
+    except Exception:
+        return MAX_LINES
 # Content floor (fail-safe): a render that keeps fewer than this fraction of the
 # PRIOR MEMORY.md's index entries is rejected — a collapse that large means the
 # store is wrong (empty/mispointed), not that the brain legitimately halved
@@ -98,7 +145,7 @@ DEFAULT_TITLE = "# Memory"
 
 
 class DigestTooLarge(Exception):
-    """Raised when pinned + literal content alone exceeds the byte budget."""
+    """Raised when pinned + literal content alone exceeds the byte or line cap."""
 
 
 # --- read the bridge nodes ----------------------------------------------------
@@ -183,11 +230,17 @@ def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None):
         val = f"{fm['value']} {fm['unit']}" if fm.get("unit") else str(fm["value"])
         lv = fm.get("last-verified")
         hook = f"{val} (verified {lv})" if lv else val
+    ftype = (fm.get("type") or "").strip()
     return {"kind": "file", "section": section, "stem": stem,
             "name": name, "desc": hook,
             "pinned": channel == "endorsed", "tier": tier or "hot",
             "rs": rs, "channel": channel,
-            "stale": bool(stale), "stale_reason": stale_reason}
+            "stale": bool(stale), "stale_reason": stale_reason,
+            # projects split + live-state partition (module docstring)
+            "is_project": stem.startswith(PROJECT_PREFIX),
+            "is_live_state": (section == LIVE_STATE_SECTION or ftype == "fact"),
+            "status": (fm.get("status") or "").strip().lower() or None,
+            "subdir": fm.get("memory_subdir") or None}
 
 
 def _select_hot(entries):
@@ -195,10 +248,27 @@ def _select_hot(entries):
     out = []
     for e in entries:
         if e["kind"] == "literal":
+            if e["line"].strip() == PROJECTS_POINTER_LINE:
+                continue   # the importer mirrored last render's synthetic pointer
+                           # back as a literal node; render_digest re-adds it iff
+                           # project memories still exist (self-healing, no dupes)
             out.append(e)                      # literals always render
+        elif e.get("is_project"):
+            continue                           # -> projects/INDEX.md, never here
         elif e["section"] and (e["pinned"] or e["tier"] == "hot"):
             out.append(e)                      # sectioned + (pinned or hot)
     return out
+
+
+def _pointer_entry():
+    """The one literal line MEMORY.md carries for the whole projects/ tree."""
+    return {"kind": "literal", "section": PROJECTS_POINTER_SECTION,
+            "line": PROJECTS_POINTER_LINE, "channel": "endorsed",
+            "stale": False, "stale_reason": None, "synthetic": True}
+
+
+def _line_count(text):
+    return text.count("\n")
 
 
 def _marker():
@@ -246,16 +316,22 @@ def _assemble(title, entries, *, include_reverify=True):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_digest(conn, *, title=None, budget=None, excluded_out=None):
+def render_digest(conn, *, title=None, budget=None, max_lines=None, excluded_out=None):
     """Render the MEMORY.md digest string from the live bridge nodes.
+
+    `budget` is the byte cap, `max_lines` the line cap (both default to the
+    module fallbacks; callers with a memory dir resolve the live values via
+    resolve_budget / resolve_max_lines).  The shed loop must satisfy BOTH.
 
     `excluded_out`: pass a list to learn WHICH memories this render left out of
     MEMORY.md and why.  Extended with {"stem", "reason", "rs"} dicts, where
     reason is one of:
+      "projects"    — a project_ memory; it renders in projects/INDEX.md instead
       "cold"        — the forgetting layer demoted it (_select_hot skipped it)
       "unsectioned" — no section:, so there is nowhere in the index to put it
       "budget"      — it fit the rules but not the byte cap (lowest RS evicted
-                      first; these are listed in the order they were dropped)
+                      first, live-state last; listed in the order dropped)
+      "lines"       — bytes fit, but the line cap forced the drop (same order)
     Default None keeps the old behaviour byte-for-byte.
 
     Why this exists: memsom RENDERS MEMORY.md but never writes canonical.json
@@ -267,9 +343,13 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
     """
     if budget is None:
         budget = BUDGET
+    if max_lines is None:
+        max_lines = MAX_LINES
     title = title or os.environ.get("MEMDAG_DIGEST_TITLE", DEFAULT_TITLE)
     all_entries = [_entry(*r) for r in _rows(conn)]
     hot = _select_hot(all_entries)
+    if any(e["kind"] == "file" and e.get("is_project") for e in all_entries):
+        hot.append(_pointer_entry())
     if excluded_out is not None:
         # Everything _select_hot filtered out, with the rule that filtered it.
         # Literals always render, so only files can appear here.
@@ -277,7 +357,10 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
         for e in all_entries:
             if e["kind"] != "file" or id(e) in live_ids:
                 continue
-            reason = "cold" if e["section"] else "unsectioned"
+            if e.get("is_project"):
+                reason = "projects"
+            else:
+                reason = "cold" if e["section"] else "unsectioned"
             excluded_out.append({"stem": e["stem"], "reason": reason,
                                  "rs": e["rs"]})
     # Read-time fact resolution (docs/facts-design.md Phase 2): substitute
@@ -290,20 +373,25 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
             e["line"] = memsom_facts.resolve_fact_refs(conn, e["line"])
         elif e.get("desc"):
             e["desc"] = memsom_facts.resolve_fact_refs(conn, e["desc"])
-    # droppable = non-pinned user files, lowest RS first (dropped in THIS order)
+    # droppable = non-pinned user files, dropped in THIS order: everything that
+    # is not live state first (lowest RS first), then the live-state partition
+    # (again lowest RS first). See the module docstring.
     droppable = sorted([e for e in hot if e["kind"] == "file" and not e["pinned"]],
-                       key=lambda e: (e["rs"] if e["rs"] is not None else 0.0))
-    dropped = set()  # ids of dropped entries
+                       key=lambda e: (bool(e.get("is_live_state")),
+                                      e["rs"] if e["rs"] is not None else 0.0))
+    dropped = {}  # id(entry) -> reason ("budget" | "lines")
     include_reverify = True  # the worklist section is the FIRST thing shed if tight
     while True:
         live = [e for e in hot if id(e) not in dropped]
         text = _assemble(title, live, include_reverify=include_reverify)
-        if len(text.encode("utf-8")) <= budget:
+        over_bytes = len(text.encode("utf-8")) > budget
+        over_lines = _line_count(text) > max_lines
+        if not over_bytes and not over_lines:
             if excluded_out is not None:
-                # droppable order == drop order, so these read lowest-RS-first:
-                # exactly the eviction sequence that ran.
+                # droppable order == drop order, so these read in exactly the
+                # eviction sequence that ran.
                 excluded_out.extend(
-                    {"stem": e["stem"], "reason": "budget", "rs": e["rs"]}
+                    {"stem": e["stem"], "reason": dropped[id(e)], "rs": e["rs"]}
                     for e in droppable if id(e) in dropped)
             return text
         if include_reverify:
@@ -314,8 +402,69 @@ def render_digest(conn, *, title=None, budget=None, excluded_out=None):
         nxt = next((e for e in droppable if id(e) not in dropped), None)
         if nxt is None:
             raise DigestTooLarge(
-                f"pinned + literal content alone exceeds {budget} bytes")
-        dropped.add(id(nxt))
+                f"pinned + literal content alone exceeds the cap "
+                f"({budget} bytes / {max_lines} lines)")
+        # bytes over at drop time -> "budget" (even if lines are over too)
+        dropped[id(nxt)] = "budget" if over_bytes else "lines"
+
+
+# --- projects/INDEX.md --------------------------------------------------------
+
+def project_entries(conn):
+    """Every live project_ file entry (the projects/INDEX.md population).
+
+    Section and tier do NOT gate membership here — a project memory is indexed
+    by being a project memory; its tier only decides the group it lands in.
+    """
+    return [e for e in (_entry(*r) for r in _rows(conn))
+            if e["kind"] == "file" and e.get("is_project")]
+
+
+def _project_group(e):
+    st = e.get("status")
+    if st in _STATUS_TO_GROUP:
+        return _STATUS_TO_GROUP[st]
+    return _TIER_TO_GROUP.get(e.get("tier") or "hot", "Active")
+
+
+def _project_link(e):
+    """Link relative to projects/: a file IN projects/ is `project_x.md`; a
+    legacy flat one is `../project_x.md`."""
+    name = f"{e['stem']}.md"
+    return name if e.get("subdir") == "projects" else f"../{name}"
+
+
+def render_projects_index(entries, *, title=None, conn=None):
+    """Render projects/INDEX.md from project entries (see project_entries).
+
+    Groups `## Active` / `## Parked` / `## Closed` by frontmatter `status:`
+    (case-insensitive) when present, else by tier (hot/warm/cold).  Lines use
+    the main index format, sorted by RS desc within a group, links relative to
+    projects/.  No byte cap: this file is read on demand, not always loaded.
+    Empty groups are omitted.  Pass `conn` to resolve [[fact_*]] refs in hooks.
+    """
+    title = title or os.environ.get("MEMDAG_PROJECTS_TITLE", DEFAULT_PROJECTS_TITLE)
+    if conn is not None:
+        from memsom.bridge import facts as memsom_facts
+        for e in entries:
+            if e.get("desc"):
+                e["desc"] = memsom_facts.resolve_fact_refs(conn, e["desc"])
+    groups = {g: [] for g in PROJECT_GROUPS}
+    for e in entries:
+        groups[_project_group(e)].append(e)
+    lines = [title, ""]
+    for g in PROJECT_GROUPS:
+        if not groups[g]:
+            continue
+        lines.append(f"## {g}")
+        for e in sorted(groups[g],
+                        key=lambda x: (-(x["rs"] if x["rs"] is not None else 0.0),
+                                       x["stem"])):
+            hook = f" — {e['desc']}" if e["desc"] else ""
+            mk = _marker() if e.get("stale") else ""
+            lines.append(f"- [{e['name']}]({_project_link(e)}){hook}{mk}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _entry_counts(text):
@@ -334,7 +483,7 @@ def _entry_counts(text):
     return len(files), literals
 
 
-def validate(conn, *, budget=None, title=None, prior_text=None):
+def validate(conn, *, budget=None, max_lines=None, title=None, prior_text=None):
     """Export-boundary check: the digest must render, be non-empty, and fit budget.
 
     This is the Phase-6 cutover PRE-FLIGHT: the hook renders + validates, and only
@@ -351,8 +500,10 @@ def validate(conn, *, budget=None, title=None, prior_text=None):
     brain beats a freshly-blanked one every time."""
     if budget is None:
         budget = BUDGET
+    if max_lines is None:
+        max_lines = MAX_LINES
     try:
-        text = render_digest(conn, title=title, budget=budget)
+        text = render_digest(conn, title=title, budget=budget, max_lines=max_lines)
     except DigestTooLarge as exc:
         return [{"kind": "export-boundary", "detail": str(exc)}]
     except Exception as exc:  # any render failure must block the write, not crash it
@@ -364,6 +515,10 @@ def validate(conn, *, budget=None, title=None, prior_text=None):
     if size > budget:
         problems.append({"kind": "export-boundary",
                          "detail": f"digest {size} > {budget} byte budget"})
+    nlines = _line_count(text)
+    if nlines > max_lines:
+        problems.append({"kind": "export-boundary",
+                         "detail": f"digest {nlines} > {max_lines} line cap"})
     new_files, new_lits = _entry_counts(text)
     new_total = new_files + new_lits
     if new_total == 0:
@@ -390,7 +545,8 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memsom.md", title=None):
     """
     # Same live budget the real render uses — otherwise the shadow trims (or
     # doesn't) against a different cap than the status line reports.
-    text = render_digest(conn, title=title, budget=resolve_budget(memory_dir))
+    text = render_digest(conn, title=title, budget=resolve_budget(memory_dir),
+                         max_lines=resolve_max_lines(memory_dir))
     path = Path(memory_dir) / name
     # write_bytes (not write_text): keep LF on Windows so the on-disk size matches
     # the budget accounting and the file's line endings match the original.
@@ -398,7 +554,8 @@ def write_shadow(conn, memory_dir, *, name="MEMORY.memsom.md", title=None):
     return path, text
 
 
-def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
+def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None,
+               max_lines=None):
     """CUTOVER write: validate, then overwrite the REAL MEMORY.md ONLY if valid.
 
     Fail-safe, never fail-open: on ANY validation problem the existing file is left
@@ -412,6 +569,8 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
     """
     if budget is None:
         budget = resolve_budget(memory_dir)
+    if max_lines is None:
+        max_lines = resolve_max_lines(memory_dir)
     path = Path(memory_dir) / name
     prior_text = None
     if path.exists():
@@ -419,11 +578,12 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
             prior_text = path.read_text(encoding="utf-8")
         except OSError:
             prior_text = None  # unreadable prior: still enforce the zero-entry floor
-    problems = validate(conn, budget=budget, title=title, prior_text=prior_text)
+    problems = validate(conn, budget=budget, max_lines=max_lines, title=title,
+                        prior_text=prior_text)
     if problems:
         return False, problems
     excluded = []
-    text = render_digest(conn, title=title, budget=budget,
+    text = render_digest(conn, title=title, budget=budget, max_lines=max_lines,
                          excluded_out=excluded)
     tmp = path.with_suffix(path.suffix + ".tmp")
     # write_bytes (not write_text): keep LF on Windows so on-disk size == the
@@ -432,8 +592,8 @@ def write_live(conn, memory_dir, *, name="MEMORY.md", title=None, budget=None):
     tmp.replace(path)
     # `excluded` is every memory THIS render left out of MEMORY.md, with the
     # reason — the caller persists it so an absent memory is always explainable.
-    return True, {"bytes": len(text.encode("utf-8")), "path": str(path),
-                  "excluded": excluded}
+    return True, {"bytes": len(text.encode("utf-8")), "lines": _line_count(text),
+                  "path": str(path), "excluded": excluded}
 
 
 # --- verification (the cutover GO check) -------------------------------------

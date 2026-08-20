@@ -86,6 +86,43 @@ class TestRender(Base):
             os.environ.pop("MEMDAG_VERIFY_STALE_DAYS", None)
 
 
+class TestProjectsIndex(Base):
+    def test_writes_projects_index_and_pointer(self):
+        import json
+        (self.mem / "projects").mkdir()
+        (self.mem / "projects" / "project_gadget.md").write_text(
+            "---\nname: Gadget\ndescription: parked for now\ntype: project\n"
+            "status: parked\n---\nx\n", encoding="utf-8")
+        result = br.bridge_render(self.conn, self.mem)
+        self.assertTrue(result["ok"], result)
+        out = self.memory_md.read_text(encoding="utf-8")
+        # project_ memories leave MEMORY.md; the pointer line replaces them
+        self.assertNotIn("project_widget.md", out)
+        self.assertNotIn("project_gadget.md", out)
+        self.assertIn("## Personal projects\n" + digest.PROJECTS_POINTER_LINE, out)
+        idx = self.mem / "projects" / "INDEX.md"
+        self.assertTrue(idx.exists())
+        self.assertEqual(result["info"]["projects_index"], str(idx))
+        text = idx.read_text(encoding="utf-8")
+        self.assertIn("## Active\n- [Widget](../project_widget.md) — status", text)   # legacy flat
+        self.assertIn("## Parked\n- [Gadget](project_gadget.md) — parked for now", text)
+        self.assertFalse((self.mem / "projects" / "INDEX.md.tmp").exists())
+        # shed manifest carries the line accounting + the projects reason
+        shed = json.loads((self.mem / ".weights" / "shed.json").read_text(encoding="utf-8"))
+        self.assertEqual(shed["max_lines"], digest.MAX_LINES)
+        self.assertEqual(shed["lines"], out.count("\n"))
+        self.assertEqual(shed["by_reason"].get("projects"), 2)
+
+    def test_second_render_is_stable(self):
+        # the rendered pointer is re-imported as a literal; the next render must
+        # be byte-identical (no duplicate pointer, no churn)
+        br.bridge_render(self.conn, self.mem)
+        first = self.memory_md.read_text(encoding="utf-8")
+        br.bridge_render(self.conn, self.mem)
+        self.assertEqual(self.memory_md.read_text(encoding="utf-8"), first)
+        self.assertEqual(first.count(digest.PROJECTS_POINTER_LINE), 1)
+
+
 class TestNonAuthor(Base):
     def test_mirror_only_does_not_render(self):
         sentinel = "# Memory\n\n(original, untouched)\n"
