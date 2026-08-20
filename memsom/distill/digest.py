@@ -12,6 +12,8 @@ Selection (the forgetting layer decides what's "hot enough" to inject):
   - user-channel 'cold' / un-sectioned                        -> dropped (still in
                                                                  the store, just
                                                                  out of context).
+  - EXCEPT live state (sectioned under "## Live state" or `type: fact`): exempt
+    from tier, rendered whatever its RS; only the budget below can shed it.
 
 Budget: the rendered file must fit BOTH a byte cap (`memory_budget`, fallback
 16,384 — the harness loads it in full) AND a line cap (`memory_max_lines`,
@@ -293,8 +295,15 @@ def _select_hot(entries):
             out.append(e)                      # literals always render
         elif e.get("is_project"):
             continue                           # -> projects/INDEX.md, never here
-        elif e["section"] and (e["pinned"] or e["tier"] == "hot"):
-            out.append(e)                      # sectioned + (pinned or hot)
+        elif e["section"] and (e["pinned"] or e["tier"] == "hot"
+                               or e.get("is_live_state")):
+            # sectioned + (pinned or hot or live state). Live state (a
+            # "## Live state" line or `type: fact`) is exempt from TIER: a
+            # fact's value is only useful if it is always there, and its RS
+            # decays to ~0 precisely because nobody re-reads a number they can
+            # see in the index. It still obeys the byte/line budget below,
+            # where it is shed last.
+            out.append(e)
     return out
 
 

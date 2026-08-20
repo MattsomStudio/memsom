@@ -168,6 +168,13 @@ class TestChecks(Base):
             encoding="utf-8")
         self.assertIn("broken-wikilink", self.names(self.audit()))
 
+    def test_fact_type_not_flagged_bad_type(self):
+        (self.mem / "fact_tps.md").write_text(
+            "---\nname: tps\ndescription: d\ntype: fact\nvalue: 42\n---\nx\n",
+            encoding="utf-8")
+        bad = [f for f in self.audit() if f["name"] == "bad-type"]
+        self.assertEqual(bad, [])
+
     def test_personal_type_not_flagged_bad_type(self):
         (self.mem / "personal_note.md").write_text(
             "---\nname: Note\ndescription: d\ntype: personal\n---\nx\n", encoding="utf-8")

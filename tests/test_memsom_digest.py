@@ -309,6 +309,34 @@ class TestLiveStatePartition(Base):
                               (rs, f"memory:{stem}"))
         self.conn.commit()
 
+    def test_cold_fact_in_live_state_still_renders(self):
+        # BUG (2026-08-20): fact_* files are channel `user`, so a cold tier
+        # dropped them from "## Live state" as `cold` before the shed-last
+        # ordering ever ran. Live state is exempt from TIER, not from budget.
+        (self.mem / "fact_gpu_vram.md").write_text(
+            "---\nname: gpu vram\ndescription: vram\ntype: fact\nvalue: 12\n"
+            "unit: GB\nsection: Live state\n---\nx\n", encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.0 WHERE source_ref = ?",
+                          ("memory:fact_gpu_vram",))
+        self.conn.commit()
+        for stem in ("fact_gpu_vram", "fact_tps", "reference_gpu"):
+            self.demote(stem)
+        excluded = []
+        out = digest.render_digest(self.conn, excluded_out=excluded)
+        self.assertIn("fact_gpu_vram.md", out)      # cold fact, Live state section
+        self.assertIn("fact_tps.md", out)           # cold fact, other section
+        self.assertIn("reference_gpu.md", out)      # cold non-fact, Live state section
+        self.assertEqual([e for e in excluded if e["reason"] == "cold"], [])
+
+    def test_cold_non_fact_reference_outside_live_state_is_dropped(self):
+        self.demote("reference_vault")              # plain reference, ## References
+        excluded = []
+        out = digest.render_digest(self.conn, excluded_out=excluded)
+        self.assertNotIn("reference_vault.md", out)
+        self.assertIn({"stem": "reference_vault", "reason": "cold", "rs": 0.5}, excluded)
+
     def test_live_state_section_renders_after_hardware_slot(self):
         out = digest.render_digest(self.conn)
         self.assertIn("## Live state", out)

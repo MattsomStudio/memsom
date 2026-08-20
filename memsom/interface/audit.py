@@ -11,7 +11,7 @@ Checks (severity):
   pending-import      INFO   on disk but not yet imported (run `memsom bridge-render`).
   dead-index-link     ERROR  MEMORY.md links a file that isn't on disk.
   frontmatter-missing ERROR  name / description / type missing.
-  bad-type            WARN   type not in user/feedback/project/reference.
+  bad-type            WARN   type not in user/personal/feedback/project/reference/fact.
   budget-breach       WARN   MEMORY.md over the 16384-byte cap.
   needs-cluster       INFO   a new feedback file born unindexed (no why_own_line:).
   broken-wikilink     INFO   a [[link]] with no target (legal by design).
@@ -40,7 +40,7 @@ from memsom.distill.digest import resolve_budget
 
 BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
 #                 (`memory_budget` in the store's canonical.json params)
-VALID_TYPES = {"user", "personal", "feedback", "project", "reference"}
+VALID_TYPES = {"user", "personal", "feedback", "project", "reference", "fact"}
 # IGNORECASE so detection mirrors the case-folding resolver (_norm); otherwise an
 # uppercase target like [[ADHD]] with no match would silently never be flagged.
 WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9_-]*)\]\]", re.IGNORECASE)
