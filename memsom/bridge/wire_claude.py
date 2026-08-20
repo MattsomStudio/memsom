@@ -51,8 +51,49 @@ def default_skills_src():
     return Path(__file__).resolve().parents[2] / "claude" / "skills"
 
 
+def resolve_exe():
+    """An ABSOLUTE path to the memsom console script, or a `python -m` fallback.
+
+    A hook entry of bare ``"memsom"`` only works when the directory holding the
+    console script is on the PATH Claude Code itself was launched with.  With a
+    venv install that is rarely true (the venv's ``bin``/``Scripts`` is only on
+    PATH inside an activated shell; a GUI-launched Claude never sees it), so the
+    Stop/prompt hooks failed silently.  Resolution order:
+
+      1. the console script that is RUNNING us (``sys.argv[0]``, when it is an
+         absolute existing file named memsom) — the one path guaranteed to work;
+      2. the sibling of the running interpreter (``<venv>/bin/memsom`` or
+         ``<venv>\\Scripts\\memsom.exe``);
+      3. ``shutil.which("memsom")``;
+      4. ``"<sys.executable>" -m memsom.interface.cli`` — the interpreter we run
+         under can always import the package it was installed into.
+    """
+    argv0 = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if argv0 and argv0.is_absolute() and argv0.is_file() \
+            and argv0.stem.lower() == "memsom":
+        return str(argv0)
+    exe_dir = Path(sys.executable).resolve().parent
+    for name in ("memsom", "memsom.exe"):
+        cand = exe_dir / name
+        if cand.is_file():
+            return str(cand)
+    found = shutil.which("memsom")
+    if found:
+        return str(Path(found).resolve())
+    return f'"{sys.executable}" -m memsom.interface.cli'
+
+
 def _default_exe():
-    return shutil.which("memsom") or "memsom"
+    return resolve_exe()
+
+
+def is_bare_command(cmd) -> bool:
+    """True for a hook command whose executable token is an unqualified
+    ``memsom`` (``memsom ...`` or ``"memsom" ...``) — i.e. PATH-dependent."""
+    if not isinstance(cmd, str):
+        return False
+    head = cmd.strip().split(" ", 1)[0].strip('"').strip("'")
+    return head.lower() in ("memsom", "memsom.exe")
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +101,11 @@ def _default_exe():
 # ---------------------------------------------------------------------------
 
 def _cmd(abs_exe, sub):
-    # Quote the exe so a path with spaces survives the shell; bare names quote fine.
+    # Quote the exe so a path with spaces survives the shell; bare names quote
+    # fine.  A pre-composed `"<python>" -m memsom.interface.cli` fallback
+    # (resolve_exe step 4) is already quoted and must not be wrapped again.
+    if abs_exe.startswith('"') and " -m " in abs_exe:
+        return f"{abs_exe} {sub}"
     return f'"{abs_exe}" {sub}'
 
 
@@ -133,6 +178,24 @@ def _upsert_command(groups, substr, entry):
     return changed
 
 
+def _upgrade_bare(groups, substr, entry):
+    """Replace an existing PATH-dependent (bare ``memsom``) handler for *substr*
+    with *entry* in place, iff *entry* itself is not bare.  Returns True when
+    something changed.  A user's own absolute/custom command is left alone."""
+    if is_bare_command(entry.get("command")):
+        return False
+    changed = False
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        for hi, h in enumerate(g.get("hooks") or []):
+            if (isinstance(h, dict) and substr in (h.get("command") or "")
+                    and is_bare_command(h.get("command"))):
+                g["hooks"][hi] = dict(entry)
+                changed = True
+    return changed
+
+
 def merge_hooks(data, abs_exe, *, with_gate=False, with_prompt_hook=True):
     """Mutate *data* (a settings dict) to add our hooks. Returns the list of events
     actually changed (empty => already current). Raises ValueError if the existing
@@ -147,6 +210,8 @@ def merge_hooks(data, abs_exe, *, with_gate=False, with_prompt_hook=True):
         raise ValueError("settings 'hooks.Stop' is not a list")
     if not _has_command(stop, "bridge-render"):
         stop.append(stop_group(abs_exe))
+        changed.append("Stop")
+    elif _upgrade_bare(stop, "bridge-render", stop_group(abs_exe)["hooks"][0]):
         changed.append("Stop")
 
     if with_prompt_hook:
@@ -164,6 +229,8 @@ def merge_hooks(data, abs_exe, *, with_gate=False, with_prompt_hook=True):
                 raise ValueError(f"settings 'hooks.{event}' is not a list")
             if not _has_command(arr, probe):
                 arr.extend(groups)
+                changed.append(event)
+            elif _upgrade_bare(arr, probe, groups[0]["hooks"][0]):
                 changed.append(event)
     return changed
 
@@ -309,6 +376,7 @@ def wire_claude(*, home=None, abs_exe=None, skills_src=None, with_gate=False,
         except Exception as exc:  # noqa: BLE001
             out["claude_md"] = {"action": "error", "detail": repr(exc)}
     out["memory_dir"] = scaffold_memory(home, print_only=print_only)
+    out["exe"] = abs_exe
     return out
 
 
@@ -323,6 +391,10 @@ def cmd_wire_claude(args):
         print(f"[skill:{name}] {action}")
     s = res["settings"]
     print(f"[settings] {s['action']} -> {s.get('path', '')}")
+    if is_bare_command(res.get("exe", "")):
+        print("[settings] WARNING: memsom could not be resolved to an absolute path; "
+              "hooks will only fire if `memsom` is on the PATH Claude Code was "
+              "launched with. Re-run with --exe <abs path>.")
     if s.get("snippet") and s["action"] in ("print", "malformed"):
         print(s["snippet"])
     cm = res["claude_md"]
