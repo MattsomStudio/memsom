@@ -252,10 +252,31 @@ block in your `CLAUDE.md`. `bootstrap.py` wires all of it (step `[6/6]`); to (re
 it by hand:
 
 ```bash
-memsom wire-claude              # install skills + Stop hook + CLAUDE.md block
+memsom wire-claude              # install skills + Stop hook + prompt hook + CLAUDE.md block
 memsom wire-claude --print-only # show what it would do, write nothing
 memsom wire-claude --with-gate  # also wire the opt-in Gate #3 taint hooks
+memsom wire-claude --no-prompt-hook  # skip the UserPromptSubmit retrieval hook
 ```
+
+### Install as a Claude Code plugin
+
+The repo is also a Claude Code plugin + single-plugin marketplace
+(`.claude-plugin/plugin.json`, `hooks/hooks.json`, `.mcp.json`, skills from
+`claude/skills/`). The plugin registers the `memsom` MCP server, the Stop hook and
+the prompt hook, and ships the skills — it does NOT install the Python package, so
+`pip install memsom` comes first (the hooks call `memsom` and `memsom-mcp` by name
+on your PATH):
+
+```bash
+pip install memsom
+claude plugin marketplace add MattsomStudio/memsom
+claude plugin install memsom@memsom
+```
+
+Then run `memsom claude-sync` once for the managed `CLAUDE.md` block (the plugin
+format has no slot for it). `memsom wire-claude` remains the non-plugin route and
+wires the same hooks into `~/.claude/settings.json`; don't do both, or every hook
+fires twice.
 
 How the loop works:
 
@@ -269,6 +290,22 @@ How the loop works:
 - **Instruct** — `memsom claude-sync` keeps a delimited, memsom-managed block in
   `~/.claude/CLAUDE.md` (the memory protocol) current. It only ever rewrites the
   block between its markers; everything else in your `CLAUDE.md` is yours.
+- **Surface** — a `UserPromptSubmit` hook (`memsom hook-prompt`) retrieves the top
+  3 memories for each prompt and, when they clear a relevance floor, adds them as
+  a compact `Relevant memories:` context block (<= ~600 bytes). It skips prompts
+  under 12 characters and slash commands, never cold-loads an embedding model, and
+  has a hard deadline (default 800 ms): past it, it prints nothing and the prompt
+  goes through untouched. It asks the running MCP server's warm loopback endpoint
+  first and falls back to in-process BM25 when the server is not up.
+  Tunables live in `<memory_dir>/.weights/canonical.json` → `params`:
+  `prompt_hook_mode` (`off` | `log` | `inject`, default `inject`),
+  `prompt_hook_floor` (0–1, default 0.35), `prompt_hook_deadline_ms`,
+  `prompt_hook_log_max_mb`. Both `log` and `inject` append every query, its top-3
+  scores and the inject decision to `<memory_dir>/.weights/hook_log.jsonl`
+  (permanent; size-rotated, 3 generations kept); `off` runs nothing and logs
+  nothing. `memsom hook-stats` summarises that log (inject rate, top surfaced
+  stems, a top-1 score histogram and the would-inject rate at every floor) so the
+  floor is tuned from data, not taste.
 
 Safety: `wire-claude` mirrors the MCP wiring contract — it backs up before writing,
 merges (never overwrites your other hooks), is idempotent, and **refuses to
@@ -417,7 +454,10 @@ Measured on the standard workload; source cited here.
 | `obsidian-watch` | memsom_obsidian    | Watch a vault and live-sync on change |
 | `bridge-render`  | memsom_bridge_render | Regenerate MEMORY.md from the store (the Stop-hook command; fail-safe) |
 | `claude-sync`    | memsom_claude      | Seed/refresh the memsom-managed memory block in CLAUDE.md |
-| `wire-claude`    | memsom_wire_claude | Install the Claude Code memory loop (skills + Stop hook + CLAUDE.md) |
+| `wire-claude`    | memsom_wire_claude | Install the Claude Code memory loop (skills + Stop hook + prompt hook + CLAUDE.md) |
+| `hook-prompt`    | prompt_hook        | UserPromptSubmit hook: top-3 memories above the floor as added context (off/log/inject) |
+| `hook-query`     | prompt_hook        | Fast retrieval for hooks: warm MCP endpoint, BM25 fallback, hard deadline (silent on timeout) |
+| `hook-stats`     | prompt_hook        | Summarise the prompt-hook log: inject rate, top stems, score histogram, floor sweep |
 | `session-log`    | memsom_session     | Recent session taint-floor transitions (opt-in Gate #3 audit) |
 | `capability-log` | memsom_capgate     | Recent capability-gate decisions (opt-in Gate #3 audit) |
 | `broker-init`    | memsom_broker      | Write default Gate #3 broker config + policy |

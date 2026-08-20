@@ -1,0 +1,21 @@
+{
+  "name": "memsom",
+  "description": "memsom \u2014 provenance-aware memory for Claude Code.",
+  "owner": {
+    "name": "MattsomStudio",
+    "url": "https://github.com/MattsomStudio"
+  },
+  "plugins": [
+    {
+      "name": "memsom",
+      "source": "./",
+      "description": "Provenance-aware memory for Claude Code: generated MEMORY.md index, per-prompt retrieval hook, memsom MCP tools.",
+      "version": "0.2.0",
+      "author": {
+        "name": "MattsomStudio"
+      },
+      "repository": "https://github.com/MattsomStudio/memsom",
+      "license": "MIT"
+    }
+  ]
+}

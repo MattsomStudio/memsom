@@ -53,6 +53,11 @@ the digest sheds the lowest-RS entries to fit (live-state and fact entries last)
 that is a transient, recoverable drop, but it means your write can silently cost
 an unrelated memory its slot.
 
+**Un-loaded memory is still reachable**: `memsom retrieve "<query>"` (or the MCP
+`retrieve` tool) searches every live memory, not just MEMORY.md; the prompt hook
+surfaces the top hits automatically. `/recall`-style transcript search is a
+different corpus (past sessions), not this store.
+
 To capture a session's worth of facts, use **`/saveall`**. Before saving, check
 whether a file already covers the fact and update it instead of duplicating; delete
 (tombstone) memories that turn out to be wrong.

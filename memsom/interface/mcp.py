@@ -723,6 +723,24 @@ def handle(msg):
 # stdio server loop
 # ---------------------------------------------------------------------------
 
+def _start_warm_endpoint():
+    """Start the loopback retrieval endpoint the prompt hook queries (see
+    retrieval/warm.py). Best-effort: a failure to bind is logged to stderr
+    and the MCP server runs without it (the hook falls back to BM25).
+    MEMDAG_WARM_ENDPOINT=0 disables it."""
+    from memsom.retrieval import warm as memsom_warm
+    if memsom_warm.disabled_by_env():
+        return None
+    try:
+        srv = memsom_warm.WarmServer().start()
+        print(f"[memsom-mcp] warm endpoint on 127.0.0.1:{srv.port} ({srv.file})",
+              file=sys.stderr)
+        return srv
+    except Exception as exc:  # noqa: BLE001
+        print(f"[memsom-mcp] warm endpoint not started: {exc!r}", file=sys.stderr)
+        return None
+
+
 def serve_stdio():
     """Run the stdio server loop. Reads until EOF; writes one JSON line per response."""
     # Reconfigure streams to UTF-8 line-buffered
@@ -735,7 +753,16 @@ def serve_stdio():
     except AttributeError:
         pass
 
-    for raw_line in sys.stdin:
+    warm = _start_warm_endpoint()
+    try:
+        _serve_lines(sys.stdin)
+    finally:
+        if warm is not None:
+            warm.stop()
+
+
+def _serve_lines(stream):
+    for raw_line in stream:
         line = raw_line.rstrip("\n\r")
         if not line:
             continue

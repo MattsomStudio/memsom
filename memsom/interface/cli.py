@@ -72,6 +72,7 @@ from memsom.integrity import verify_stale as memsom_verify_stale
 from memsom.bridge import bridge_render as memsom_bridge_render
 from memsom.bridge import claude as memsom_claude
 from memsom.bridge import wire_claude as memsom_wire_claude
+from memsom.interface import prompt_hook as memsom_prompt_hook
 from memsom.interface import audit as memsom_audit
 from memsom.interface import dashboard as memsom_dashboard
 from memsom.integrity import tombstone as memsom_tombstone
@@ -693,6 +694,7 @@ def main(argv=None):
     memsom_bridge_render.register(sub)
     memsom_claude.register(sub)
     memsom_wire_claude.register(sub)
+    memsom_prompt_hook.register(sub)
     memsom_audit.register(sub)
     memsom_dashboard.register(sub)
     _register_plugin_commands(sub)

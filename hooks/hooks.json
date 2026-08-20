@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "memsom",
+            "args": ["bridge-render"],
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "memsom",
+            "args": ["hook-prompt"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

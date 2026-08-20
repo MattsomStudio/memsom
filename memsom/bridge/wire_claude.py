@@ -10,6 +10,9 @@ MERGE never overwrite, IDEMPOTENT, malformed config -> refuse + print. Three pie
   2. STOP HOOK— merge a Stop hook that runs `<memsom> bridge-render` into
                 ~/.claude/settings.json (regenerates MEMORY.md from the store on
                 session end). Deduped on re-run; everything else preserved.
+     + PROMPT HOOK — a UserPromptSubmit hook running `<memsom> hook-prompt`
+                (top memories as added context; see interface/prompt_hook.py).
+                Text-compare upgraded in place on re-run; --no-prompt-hook skips.
   3. CLAUDE.md— seed/refresh the memsom-managed memory block (via memsom_claude).
 
 Gate #3 (PreToolUse/PostToolUse taint hooks) is OPT-IN behind --with-gate — it can
@@ -65,6 +68,20 @@ def stop_group(abs_exe):
     return {"hooks": [{"type": "command", "command": _cmd(abs_exe, "bridge-render")}]}
 
 
+PROMPT_HOOK_TIMEOUT_S = 5   # Claude Code cancels past this; the hook's own
+                            # deadline (prompt_hook_deadline_ms) is far shorter.
+
+
+def prompt_hook_entry(abs_exe):
+    """The canonical UserPromptSubmit hook handler (retrieval -> added context)."""
+    return {"type": "command", "command": _cmd(abs_exe, "hook-prompt"),
+            "timeout": PROMPT_HOOK_TIMEOUT_S}
+
+
+def prompt_group(abs_exe):
+    return {"hooks": [prompt_hook_entry(abs_exe)]}
+
+
 def gate_event_groups(abs_exe):
     """The opt-in Gate #3 taint hooks (mirrors memsom_hook._CONFIG_SNIPPET)."""
     return {
@@ -87,7 +104,36 @@ def _has_command(groups, substr):
     return False
 
 
-def merge_hooks(data, abs_exe, *, with_gate=False):
+def _upsert_command(groups, substr, entry):
+    """Text-compare upgrade (same discipline as the managed CLAUDE.md block):
+    find every handler whose command contains *substr*; if the first one is
+    byte-identical to *entry* nothing changes, otherwise it is replaced in
+    place and any later duplicates are dropped. No match -> append a new group.
+    Returns True when *groups* was modified."""
+    found = []
+    for gi, g in enumerate(groups):
+        if not isinstance(g, dict):
+            continue
+        for hi, h in enumerate(g.get("hooks") or []):
+            if isinstance(h, dict) and substr in (h.get("command") or ""):
+                found.append((gi, hi))
+    if not found:
+        groups.append({"hooks": [dict(entry)]})
+        return True
+    gi, hi = found[0]
+    current = groups[gi]["hooks"][hi]
+    changed = current != entry
+    if changed:
+        groups[gi]["hooks"][hi] = dict(entry)
+    for gj, hj in reversed(found[1:]):
+        del groups[gj]["hooks"][hj]
+        if not groups[gj]["hooks"]:
+            del groups[gj]
+        changed = True
+    return changed
+
+
+def merge_hooks(data, abs_exe, *, with_gate=False, with_prompt_hook=True):
     """Mutate *data* (a settings dict) to add our hooks. Returns the list of events
     actually changed (empty => already current). Raises ValueError if the existing
     'hooks' shape is not a dict (caller treats as malformed)."""
@@ -102,6 +148,13 @@ def merge_hooks(data, abs_exe, *, with_gate=False):
     if not _has_command(stop, "bridge-render"):
         stop.append(stop_group(abs_exe))
         changed.append("Stop")
+
+    if with_prompt_hook:
+        ups = hooks.setdefault("UserPromptSubmit", [])
+        if not isinstance(ups, list):
+            raise ValueError("settings 'hooks.UserPromptSubmit' is not a list")
+        if _upsert_command(ups, "hook-prompt", prompt_hook_entry(abs_exe)):
+            changed.append("UserPromptSubmit")
 
     if with_gate:
         for event, groups in gate_event_groups(abs_exe).items():
@@ -125,9 +178,12 @@ def _backup(path):
     return bak
 
 
-def wire_settings(path, abs_exe, *, with_gate=False, print_only=False):
+def wire_settings(path, abs_exe, *, with_gate=False, print_only=False,
+                  with_prompt_hook=True):
     path = Path(path)
     fresh = {"hooks": {"Stop": [stop_group(abs_exe)]}}
+    if with_prompt_hook:
+        fresh["hooks"]["UserPromptSubmit"] = [prompt_group(abs_exe)]
     if with_gate:
         fresh["hooks"].update(gate_event_groups(abs_exe))
     snippet = json.dumps(fresh, indent=2)
@@ -148,7 +204,8 @@ def wire_settings(path, abs_exe, *, with_gate=False, print_only=False):
         return {"action": "malformed", "path": str(path), "snippet": snippet}
 
     try:
-        changed = merge_hooks(data, abs_exe, with_gate=with_gate)
+        changed = merge_hooks(data, abs_exe, with_gate=with_gate,
+                              with_prompt_hook=with_prompt_hook)
     except ValueError:
         return {"action": "malformed", "path": str(path), "snippet": snippet}
 
@@ -229,14 +286,15 @@ def scaffold_memory(home=None, *, print_only=False):
 
 
 def wire_claude(*, home=None, abs_exe=None, skills_src=None, with_gate=False,
-                force=False, print_only=False):
+                force=False, print_only=False, with_prompt_hook=True):
     abs_exe = abs_exe or _default_exe()
     skills_src = Path(skills_src) if skills_src else default_skills_src()
     out = {}
     out["skills"] = wire_skills(skills_src, skills_dst_dir(home),
                                 force=force, print_only=print_only)
     out["settings"] = wire_settings(settings_path(home), abs_exe,
-                                     with_gate=with_gate, print_only=print_only)
+                                     with_gate=with_gate, print_only=print_only,
+                                     with_prompt_hook=with_prompt_hook)
     # CLAUDE.md (managed block) — imported lazily so this module is independent.
     # When a home is given, target THAT home's CLAUDE.md (so the loop stays self-
     # consistent and a test/scratch home never touches the real file); otherwise let
@@ -257,7 +315,8 @@ def wire_claude(*, home=None, abs_exe=None, skills_src=None, with_gate=False,
 def cmd_wire_claude(args):
     res = wire_claude(abs_exe=args.exe, skills_src=args.skills_src,
                       with_gate=args.with_gate, force=args.force,
-                      print_only=args.print_only)
+                      print_only=args.print_only,
+                      with_prompt_hook=not args.no_prompt_hook)
     failed = False
 
     for name, action in res["skills"]:
@@ -292,6 +351,8 @@ def register(subparsers):
                    help="dir of bundled skills (default: <repo>/claude/skills)")
     p.add_argument("--with-gate", action="store_true",
                    help="also wire the opt-in Gate #3 taint hooks (can deny tools)")
+    p.add_argument("--no-prompt-hook", action="store_true",
+                   help="skip the UserPromptSubmit retrieval hook (memsom hook-prompt)")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing same-named skill (backs it up to *.bak)")
     p.add_argument("--print-only", action="store_true",
@@ -304,6 +365,7 @@ if __name__ == "__main__":
     ap.add_argument("--exe", default=None)
     ap.add_argument("--skills-src", default=None)
     ap.add_argument("--with-gate", action="store_true")
+    ap.add_argument("--no-prompt-hook", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--print-only", action="store_true")
     sys.exit(cmd_wire_claude(ap.parse_args()))

@@ -29,8 +29,15 @@ class TestHookMerge(unittest.TestCase):
     def test_merge_adds_stop_hook(self):
         data = {}
         changed = wc.merge_hooks(data, EXE)
-        self.assertEqual(changed, ["Stop"])
+        self.assertEqual(changed, ["Stop", "UserPromptSubmit"])
         self.assertTrue(wc._has_command(data["hooks"]["Stop"], "bridge-render"))
+        self.assertTrue(wc._has_command(data["hooks"]["UserPromptSubmit"], "hook-prompt"))
+
+    def test_merge_without_prompt_hook_is_stop_only(self):
+        data = {}
+        changed = wc.merge_hooks(data, EXE, with_prompt_hook=False)
+        self.assertEqual(changed, ["Stop"])
+        self.assertNotIn("UserPromptSubmit", data["hooks"])
 
     def test_merge_is_idempotent(self):
         data = {}

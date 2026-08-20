@@ -1,0 +1,16 @@
+{
+  "name": "memsom",
+  "displayName": "memsom",
+  "version": "0.2.0",
+  "description": "Provenance-aware memory for Claude Code: a generated MEMORY.md index, per-prompt retrieval of un-loaded memories, and the memsom MCP tools (retrieve, ask, blame, revoke...). Requires `pip install memsom` so the `memsom` / `memsom-mcp` executables are on PATH.",
+  "author": {
+    "name": "MattsomStudio",
+    "url": "https://github.com/MattsomStudio"
+  },
+  "repository": "https://github.com/MattsomStudio/memsom",
+  "license": "MIT",
+  "keywords": ["memory", "provenance", "retrieval", "mcp"],
+  "skills": "./claude/skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
