@@ -41,6 +41,10 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["MEMDAG_DB"] = str(self.root / "t.db")
+        # the bridge now indexes every imported node; keep the tests off the
+        # network (an Ollama embed is ~1s/node) -> BM25-only for the suite
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         # NEVER let claude-sync touch the real ~/.claude/CLAUDE.md during tests.
         os.environ["CLAUDE_MD_PATH"] = str(self.root / "CLAUDE.md")
         self.mem = self.root / "memory"
@@ -54,6 +58,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         os.environ.pop("MEMDAG_DIGEST_TITLE", None)
         os.environ.pop("CLAUDE_MD_PATH", None)
         self.tmp.cleanup()

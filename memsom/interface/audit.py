@@ -33,7 +33,8 @@ from pathlib import Path
 
 from memsom.bridge.bridge_import import (split_frontmatter, fm_top_level, parse_primary_index,
                                          default_memory_dir, iter_memory_files as _memory_files,
-                                         PROJECTS_SUBDIR, _LINK_IN_LINE)
+                                         PROJECTS_SUBDIR, _LINK_IN_LINE,
+                                         unsectioned_by_frontmatter)
 from memsom.distill.digest import resolve_budget
 
 BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
@@ -100,8 +101,22 @@ def _store_tiers(mem_dir):
     return live, cold, True
 
 
+def _shed_reasons(mem_dir):
+    """{stem: reason} from the last render's `.weights/shed.json` (the receipt
+    bridge_render writes for every index exclusion), or {} when absent or
+    unreadable — the receipt may only ever SUPPRESS an orphan, so failing to
+    read it makes the audit noisier, never quieter."""
+    try:
+        data = json.loads((Path(mem_dir) / ".weights" / "shed.json")
+                          .read_text(encoding="utf-8"))
+        return {e.get("stem"): e.get("reason") for e in data.get("excluded") or []}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def run_audit(mem_dir):
     mem_dir = Path(mem_dir)
+    shed = _shed_reasons(mem_dir)
     files = list(iter_memory_files(mem_dir))
     memory_md = mem_dir / "MEMORY.md"
     md_text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
@@ -120,10 +135,21 @@ def run_audit(mem_dir):
 
     findings = []
 
-    # orphan / pending-import
-    for fname, stem, _fm, _text in files:
+    # orphan / pending-import / withdrawn
+    for fname, stem, fm, _text in files:
         if fname in hot or stem in cold:
             continue
+        reason = shed.get(stem)
+        if reason == "unsectioned" or unsectioned_by_frontmatter(fm):
+            # withdrawn BY DESIGN (`section: none` / `index: false`, or the last
+            # render recorded it as unsectioned): out of the index on purpose,
+            # still in the store and searchable — informational, never an orphan.
+            findings.append(_F("withdrawn", "INFO", fname,
+                               "withdrawn from the index on purpose (section: none / "
+                               "index: false); still in the store"))
+            continue
+        if reason in ("budget", "lines", "projects"):
+            continue   # explained by the render receipt (shed.json), not an orphan
         if not db_ok:
             findings.append(_F("orphan-file", "WARN", fname,
                                "on disk, not in MEMORY.md; store DB unreachable to "

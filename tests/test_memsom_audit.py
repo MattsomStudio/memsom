@@ -41,6 +41,8 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["MEMDAG_DB"] = str(self.root / "t.db")
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"   # no network in tests
         self.mem = self.root / "memory"
         self.mem.mkdir()
         for n, t in FILES.items():
@@ -56,6 +58,10 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         self.tmp.cleanup()
 
     def names(self, findings):
@@ -87,6 +93,37 @@ class TestChecks(Base):
         orphans = [f for f in findings if f["name"] == "orphan-file"]
         self.assertTrue(any(f["target"] == "project_widget.md" for f in orphans))
         self.assertTrue(all(f["sev"] == "ERROR" for f in orphans))
+
+    def test_withdrawn_file_is_info_not_orphan(self):
+        # `section: none` in the file = withdrawn by design; the render records it
+        # as unsectioned in shed.json; neither must surface as an orphan ERROR
+        import json
+        (self.mem / "feedback_tests.md").write_text(
+            "---\nname: Run tests\ndescription: always run tests\ntype: feedback\n"
+            "section: none\n---\nr\n", encoding="utf-8")
+        idx = INDEX.replace("- [Run tests](feedback_tests.md) — always run tests\n", "")
+        (self.mem / "MEMORY.md").write_text(idx, encoding="utf-8")
+        conn = memsom.get_connection()
+        bi.import_all(conn, self.mem, dry_run=False)
+        conn.close()
+        findings = self.audit()
+        self.assertFalse([f for f in findings if f["name"] == "orphan-file"
+                          and f["target"] == "feedback_tests.md"])
+        w = [f for f in findings if f["name"] == "withdrawn"]
+        self.assertEqual([(f["sev"], f["target"]) for f in w], [("INFO", "feedback_tests.md")])
+        # the shed.json receipt alone (no frontmatter marker) is enough too
+        (self.mem / "feedback_tests.md").write_text(FILES["feedback_tests.md"], encoding="utf-8")
+        conn = memsom.get_connection()
+        bi.import_all(conn, self.mem, dry_run=False)
+        conn.close()
+        (self.mem / ".weights").mkdir(exist_ok=True)
+        (self.mem / ".weights" / "shed.json").write_text(json.dumps(
+            {"excluded": [{"stem": "feedback_tests", "reason": "unsectioned", "rs": 1.0}]}),
+            encoding="utf-8")
+        findings = self.audit()
+        self.assertEqual({f["target"] for f in findings if f["name"] == "withdrawn"},
+                         {"feedback_tests.md"})
+        self.assertFalse([f for f in findings if f["name"] == "orphan-file"])
 
     def test_pending_import_is_info_not_error(self):
         # a brand-new file not yet imported: INFO, never an error

@@ -405,9 +405,11 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
     """
     memory_dir = Path(memory_dir)
     index_path = memory_dir / "MEMORY.md"
-    stats = {"created": 0, "updated": 0, "tombstoned": 0, "skipped": 0, "total": 0}
+    stats = {"created": 0, "updated": 0, "tombstoned": 0, "skipped": 0, "total": 0,
+             "indexed": 0, "deindexed": 0}
     if not index_path.exists():
         return stats
+    new_ids, dead_ids = [], []
     desired = {}
     for section, kind, payload in parse_index_entries(index_path.read_text(encoding="utf-8")):
         if kind != "literal":
@@ -441,6 +443,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
                     "UPDATE nodes SET tombstoned = 1, tombstoned_at = ?, revoke_reason = ? "
                     "WHERE id = ?",
                     (memsom.now_iso(), "superseded by bridge reimport", nid))
+                dead_ids.append(nid)
             else:
                 stats["created"] += 1
                 if dry_run:
@@ -448,6 +451,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
             nid = memsom.insert_node(conn, content, "endorsed", source_ref=sref)
             conn.execute("UPDATE nodes SET content_hash = ? WHERE id = ?",
                          (memsom_ingest._content_hash(content), nid))
+            new_ids.append(nid)
         for sref, nid in existing.items():
             if sref not in desired:
                 stats["tombstoned"] += 1
@@ -456,6 +460,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
                         "UPDATE nodes SET tombstoned = 1, tombstoned_at = ?, revoke_reason = ? "
                         "WHERE id = ?",
                         (memsom.now_iso(), "literal removed from index", nid))
+                    dead_ids.append(nid)
 
     if dry_run:
         _do()
@@ -464,6 +469,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             _do()
+        sync_index(conn, new_ids, dead_ids, stats)   # after the commit (see helper)
     return stats
 
 
@@ -651,6 +657,40 @@ def import_all(conn, memory_dir, *, dry_run: bool = True) -> dict:
     return {"files": files, "literals": lits, "edges": edges, "fact_edges": fact_edges}
 
 
+# --- retrieval index upkeep ---------------------------------------------------
+
+def index_enabled() -> bool:
+    """The bridge keeps the retrieval index (postings/docstats/embeddings)
+    current by default; MEMDAG_BRIDGE_INDEX=0 restores the old write-only
+    behaviour (rebuild later with `memsom reindex`)."""
+    return os.environ.get("MEMDAG_BRIDGE_INDEX", "1") != "0"
+
+
+def sync_index(conn, created, tombstoned, stats) -> None:
+    """index_node every *created* id, deindex_node every *tombstoned* id.
+
+    MUST be called after the importer's own BEGIN IMMEDIATE block has
+    committed: both retrieve functions open their own `with conn:` and nesting
+    that inside the open transaction would end it early (same rule as the
+    stale cascade below).  Root cause this fixes: insert_node never indexes,
+    so bridge-imported nodes were invisible to `memsom retrieve` until a
+    manual `memsom reindex` (116/3065 nodes indexed on the live store).
+    index_node degrades to BM25-only when no embedding backend is reachable,
+    so this stays unconditional apart from the env kill-switch.
+    """
+    stats.setdefault("indexed", 0)
+    stats.setdefault("deindexed", 0)
+    if not index_enabled() or not (created or tombstoned):
+        return
+    from memsom.retrieval import retrieve as memsom_retrieve
+    for nid in tombstoned:
+        memsom_retrieve.deindex_node(conn, nid)
+        stats["deindexed"] += 1
+    for nid in created:
+        if memsom_retrieve.index_node(conn, nid):
+            stats["indexed"] += 1
+
+
 # --- DB helpers ---------------------------------------------------------------
 
 def _live_node_for_path(conn, rel: str):
@@ -712,7 +752,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     files = iter_memory_files(memory_dir)
     stats = {"total_files": len(files), "created": 0, "updated": 0,
              "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0,
-             "stale_cascaded": 0}
+             "stale_cascaded": 0, "indexed": 0, "deindexed": 0}
 
     # Mass-wipe guard: importing a directory with ZERO memory files while the
     # store holds live memory nodes would make the reconcile sweep below (and
@@ -737,6 +777,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     # sweep's own transaction commits — see the comment at the bottom of this
     # function for why it must not run nested inside it.
     swept_ids = []
+    new_ids, dead_ids = [], []   # retrieval-index upkeep, applied after commit
 
     def _do():
         for path in files:
@@ -814,6 +855,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                     "WHERE id = ?",
                     (memsom.now_iso(), "superseded by bridge reimport", existing[0]),
                 )
+                dead_ids.append(existing[0])
                 stats["tombstoned"] += 1
                 stats["updated"] += 1
             else:
@@ -825,6 +867,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                 "WHERE id = ?",
                 (rel, _mtime_sig(path), new_hash, nid),
             )
+            new_ids.append(nid)
             # Carry the forgetting-layer state (Bjork RS/SS model) from the
             # superseded predecessor: a reimport is an EDIT of the same memory,
             # not a new memory. Without this, every /saveall edit reseeded
@@ -864,6 +907,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
                     (memsom.now_iso(), "source file removed (bridge reconcile)", nid),
                 )
                 swept_ids.append((nid, opath))
+                dead_ids.append(nid)
 
     if dry_run:
         _do()
@@ -872,6 +916,9 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
             _do()
+        # Retrieval index upkeep — after the commit, for the same reason the
+        # stale cascade below waits (index/deindex open their own `with conn:`).
+        sync_index(conn, new_ids, dead_ids, stats)
 
         # Behavior 4 (docs/facts-design.md): a swept node may be a fact other
         # facts depends_on. Its dependents must go STALE, never revoked or

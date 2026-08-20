@@ -491,6 +491,7 @@ def cmd_add(args):
         with conn:
             nid = memsom.insert_node(conn, args.content, args.channel,
                                      label=label, source_ref=args.ref)
+        memsom_ingest._try_index(conn, nid)   # keep retrieve current (best-effort)
         node = memsom.get_node(conn, nid)
         print(f"[{nid}] {node['channel']:<13} integrity={memsom.NAME[node['label']]:<13}"
               f" {len(node['content']):>6} chars")

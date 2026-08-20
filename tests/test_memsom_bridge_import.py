@@ -51,6 +51,10 @@ class Base(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.db = self.root / "sub" / "test.db"
         os.environ["MEMDAG_DB"] = str(self.db)
+        # the bridge now indexes every imported node; keep the tests off the
+        # network (an Ollama embed is ~1s/node) -> BM25-only for the suite
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         self.mem = self.root / "memory"
         self.mem.mkdir()
         for name, text in SAMPLE.items():
@@ -62,6 +66,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         self.tmp.cleanup()
 
     def live_node(self, rel):
@@ -861,3 +869,77 @@ class TestExplicitUnsection(Base):
             encoding="utf-8")
         bi.import_memory_dir(self.conn, self.mem, dry_run=False)
         self.assertIsNone(self._section_of("reference_vault.md"))
+
+
+class TestRetrievalIndexUpkeep(Base):
+    """The bridge keeps postings/docstats current: insert_node never indexes,
+    so without this every bridge-imported node was invisible to retrieve."""
+
+    def _indexed(self, nid):
+        n_post = self.conn.execute(
+            "SELECT COUNT(*) FROM postings WHERE node_id = ?", (nid,)).fetchone()[0]
+        n_doc = self.conn.execute(
+            "SELECT COUNT(*) FROM docstats WHERE node_id = ?", (nid,)).fetchone()[0]
+        return n_post, n_doc
+
+    def test_import_indexes_new_nodes(self):
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["indexed"], len(SAMPLE))
+        self.assertEqual(st["deindexed"], 0)
+        nid = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        n_post, n_doc = self._indexed(nid)
+        self.assertGreater(n_post, 0)
+        self.assertEqual(n_doc, 1)
+
+    def test_bm25_finds_a_term_from_the_file(self):
+        from memsom.retrieval import retrieve as rt
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        hits = rt.bm25(self.conn, "debug loop rule")
+        target = bi._live_node_for_path(self.conn, "feedback_debug.md")[0]
+        self.assertIn(target, [h[0] if isinstance(h, (tuple, list)) else h["id"]
+                               for h in hits])
+
+    def test_reimport_deindexes_superseded_and_indexes_new(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        (self.mem / "user_adhd.md").write_text(
+            SAMPLE["user_adhd.md"] + "\nzebraquark\n", encoding="utf-8")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["indexed"], st["deindexed"]), (1, 1))
+        new = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        self.assertEqual(self._indexed(old), (0, 0))
+        self.assertGreater(self._indexed(new)[0], 0)
+        self.assertTrue(self.conn.execute(
+            "SELECT 1 FROM postings WHERE node_id = ? AND term LIKE 'zebraq%'",
+            (new,)).fetchone())
+
+    def test_sweep_deindexes_tombstoned_node(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        nid = bi._live_node_for_path(self.conn, "reference_vault.md")[0]
+        self.assertGreater(self._indexed(nid)[0], 0)
+        (self.mem / "reference_vault.md").unlink()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["swept"], 1)
+        self.assertEqual(st["deindexed"], 1)
+        self.assertEqual(self._indexed(nid), (0, 0))
+
+    def test_literals_are_indexed_too(self):
+        st = bi.import_literals(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["indexed"], st["created"])
+        self.assertGreater(st["indexed"], 0)
+
+    def test_kill_switch_restores_write_only_behaviour(self):
+        os.environ["MEMDAG_BRIDGE_INDEX"] = "0"
+        try:
+            st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        finally:
+            os.environ.pop("MEMDAG_BRIDGE_INDEX", None)
+        self.assertEqual((st["indexed"], st["deindexed"]), (0, 0))
+        from memsom.storage import schema as memsom_schema
+        if memsom_schema.table_exists(self.conn, "postings"):
+            self.assertEqual(self.conn.execute(
+                "SELECT COUNT(*) FROM postings").fetchone()[0], 0)
+
+    def test_dry_run_indexes_nothing(self):
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=True)
+        self.assertEqual((st["indexed"], st["deindexed"]), (0, 0))
