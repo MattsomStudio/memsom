@@ -108,16 +108,113 @@ INDEX_NAMES = frozenset({"MEMORY.md", "INDEX.md"})
 
 
 class DuplicateMemoryStem(ValueError):
-    """Two memory files share a filename anywhere in the memory tree.
+    """Two memory files share a filename anywhere in the memory tree AND the
+    importer could not heal it (the quarantine write failed).
 
     The bridge keys nodes on the BASENAME (bridge_path) and wikilinks resolve
-    by bare stem, so a stem must be globally unique across every level — a
-    duplicate would make one file silently shadow the other.
+    by bare stem, so a stem must be globally unique across every level.  An
+    additive sync layer (robocopy /E, rsync --update, Syncthing without
+    deletes) turns every MOVE into a duplicate on the other machine — the old
+    flat copy stays behind — so duplicates are a normal, recurring condition,
+    not a configuration error.  iter_memory_files therefore never raises on
+    one: it picks a canonical copy (see resolve_duplicates) and the importer
+    heals the loser on disk.  This error is reserved for the heal itself
+    failing, which would leave the two copies shadowing each other forever.
     """
+
+
+DUP_QUARANTINE_SUBDIR = Path(".weights") / "dup_quarantine"
 
 
 def _md_files(d):
     return [p for p in d.glob("*.md") if p.is_file() and p.name not in INDEX_NAMES]
+
+
+def _all_memory_files(memory_dir):
+    memory_dir = Path(memory_dir)
+    files = _md_files(memory_dir)
+    proj = memory_dir / PROJECTS_SUBDIR
+    if proj.is_dir():
+        files += _md_files(proj)
+        for d in sorted(x for x in proj.iterdir() if x.is_dir()):
+            files += _md_files(d)
+    return files
+
+
+def _depth(p):
+    return len(Path(p).parts)
+
+
+def resolve_duplicates(memory_dir):
+    """Group same-named memory files and pick the canonical copy of each.
+
+    Returns ``(canonical, dups)``: *canonical* is ``{name: Path}`` for every
+    stem; *dups* is a list of ``{"name", "keep", "drop", "action"}`` for every
+    stem that appeared more than once, where action is ``"delete"`` when the
+    copies are byte-identical (the deepest path wins — a MOVE into projects/
+    is the intended final state, the shallow copy is the sync leftover) or
+    ``"quarantine"`` when they differ (the newest mtime wins; ties go to the
+    deepest path).  Pure: touches nothing on disk.
+    """
+    by_name = {}
+    for p in _all_memory_files(memory_dir):
+        by_name.setdefault(p.name, []).append(p)
+    canonical, dups = {}, []
+    for name, paths in sorted(by_name.items()):
+        if len(paths) == 1:
+            canonical[name] = paths[0]
+            continue
+        blobs = {p: p.read_bytes() for p in paths}
+        identical = len(set(blobs.values())) == 1
+        if identical:
+            keep = max(paths, key=lambda p: (_depth(p), str(p)))
+            action = "delete"
+        else:
+            keep = max(paths, key=lambda p: (p.stat().st_mtime_ns, _depth(p), str(p)))
+            action = "quarantine"
+        canonical[name] = keep
+        dups.append({"name": name, "keep": keep,
+                     "drop": [p for p in paths if p != keep], "action": action})
+    return canonical, dups
+
+
+def heal_duplicates(memory_dir, *, dry_run=True) -> dict:
+    """Self-heal duplicate stems on disk (the additive-sync leftover).
+
+    Byte-identical copies: the shallower file(s) are deleted.  Differing
+    copies: the older file is MOVED to ``.weights/dup_quarantine/<stem>.<mtime_ns>.md``
+    (never deleted — a differing copy may hold an edit made on the other
+    machine).  Returns ``{"dedup": n_deleted, "quarantined": n_moved,
+    "duplicates": [...]}``; with *dry_run* nothing is touched and the counts
+    describe what WOULD happen.  Raises DuplicateMemoryStem only when a
+    quarantine write fails.
+    """
+    memory_dir = Path(memory_dir)
+    _canon, dups = resolve_duplicates(memory_dir)
+    stats = {"dedup": 0, "quarantined": 0, "duplicates": []}
+    for d in dups:
+        for loser in d["drop"]:
+            rec = {"name": d["name"], "kept": str(d["keep"]), "dropped": str(loser),
+                   "action": d["action"]}
+            if d["action"] == "delete":
+                stats["dedup"] += 1
+                if not dry_run:
+                    loser.unlink()
+            else:
+                stats["quarantined"] += 1
+                qdir = memory_dir / DUP_QUARANTINE_SUBDIR
+                dest = qdir / f"{loser.stem}.{loser.stat().st_mtime_ns}.md"
+                rec["quarantined_to"] = str(dest)
+                if not dry_run:
+                    try:
+                        qdir.mkdir(parents=True, exist_ok=True)
+                        loser.replace(dest)
+                    except OSError as exc:
+                        raise DuplicateMemoryStem(
+                            f"duplicate memory filename {d['name']!r}: could not "
+                            f"quarantine {loser} -> {dest}: {exc}") from exc
+            stats["duplicates"].append(rec)
+    return stats
 
 
 def iter_memory_files(memory_dir):
@@ -130,26 +227,13 @@ def iter_memory_files(memory_dir):
     under the memory dir is the floor — nothing deeper is walked.  Generated
     index files (``MEMORY.md``, any ``INDEX.md``) are excluded at every level.
 
-    Raises DuplicateMemoryStem when the same filename appears twice anywhere:
-    filenames are the node key and the wikilink target, so they must stay
-    globally unique.
+    Filenames are the node key and the wikilink target, so they must stay
+    globally unique: when the same filename appears twice, ONE canonical copy
+    is returned (resolve_duplicates picks it) and the other is left for the
+    importer's heal_duplicates pass.  Never raises for a duplicate.
     """
-    memory_dir = Path(memory_dir)
-    files = _md_files(memory_dir)
-    proj = memory_dir / PROJECTS_SUBDIR
-    if proj.is_dir():
-        files += _md_files(proj)
-        for d in sorted(x for x in proj.iterdir() if x.is_dir()):
-            files += _md_files(d)
-    seen = {}
-    for p in files:
-        if p.name in seen:
-            raise DuplicateMemoryStem(
-                f"duplicate memory filename {p.name!r}: {seen[p.name]} and {p} "
-                f"— memory filenames must be unique across {memory_dir} and "
-                f"the whole {memory_dir / PROJECTS_SUBDIR} tree")
-        seen[p.name] = p
-    return sorted(files, key=lambda p: (p.name, str(p)))
+    canonical, _dups = resolve_duplicates(memory_dir)
+    return sorted(canonical.values(), key=lambda p: (p.name, str(p)))
 
 
 PROJECTS_INDEX_SEED = "# Projects\n"
@@ -643,14 +727,14 @@ def relate_fact_deps(conn, memory_dir, *, dry_run: bool = True) -> dict:
     return stats
 
 
-def import_all(conn, memory_dir, *, dry_run: bool = True) -> dict:
+def import_all(conn, memory_dir, *, dry_run: bool = True, params=None) -> dict:
     """Import the per-file memories, the literal index lines, then wire edges.
 
     Order matters: relate_wikilinks / relate_fact_deps run LAST so every file
     already has a live node to point an edge at (Pass 2, exactly as
     memsom_obsidian sequences it).
     """
-    files = import_memory_dir(conn, memory_dir, dry_run=dry_run)
+    files = import_memory_dir(conn, memory_dir, dry_run=dry_run, params=params)
     lits = import_literals(conn, memory_dir, dry_run=dry_run)
     edges = relate_wikilinks(conn, memory_dir, dry_run=dry_run)
     fact_edges = relate_fact_deps(conn, memory_dir, dry_run=dry_run)
@@ -720,7 +804,51 @@ def _stored_index_meta(conn, rel: str) -> dict:
     if not row or not row[0]:
         return {}
     fm = fm_top_level(split_frontmatter(row[0])[0])
-    return {k: fm[k] for k in ("section", "index_title", "index_hook") if fm.get(k)}
+    return {k: fm[k] for k in ("section", "index_title", "index_hook", "index_pending")
+            if fm.get(k)}
+
+
+# --- anti-creep: born-unindexed feedback --------------------------------------
+# Every new feedback_* file used to be born with its own pinned index line and
+# nothing ever merged, so the Feedback section grew one line per lesson (141
+# lines before the 2026-08-20 collapse into feedback_cluster_* files).  A NEW
+# feedback file is now imported with its section cleared unless it says WHY it
+# deserves a standalone line; the lesson belongs in the matching cluster's body.
+FEEDBACK_SECTION = "Feedback"
+FEEDBACK_PREFIX = "feedback_"
+CLUSTER_PREFIX = "feedback_cluster_"
+OWN_LINE_KEY = "why_own_line"
+NEEDS_CLUSTER = "needs_cluster"
+
+
+def has_own_line_reason(fm: dict) -> bool:
+    return bool((fm.get(OWN_LINE_KEY) or "").strip())
+
+
+def born_unindexed(stem: str, fm: dict, section, *, curated: bool,
+                   existing, prev_meta: dict, enabled: bool = True) -> bool:
+    """True when this feedback file must be imported with its section cleared.
+
+    Applies to a file that resolves to the Feedback section, is NOT a cluster,
+    has no top-level `why_own_line:`, has no curated MEMORY.md line of its own,
+    and is either new to the store (*existing* is None) or was already held
+    back by this rule (``index_pending: needs_cluster`` on the stored node — so
+    the next unchanged re-import cannot quietly index it).  Already-stored
+    nodes that were indexed before the rule shipped are never unfiled.
+    """
+    if not enabled or not stem.startswith(FEEDBACK_PREFIX):
+        return False
+    if stem.startswith(CLUSTER_PREFIX) or curated or has_own_line_reason(fm):
+        return False
+    if (section or "").strip().lower() != FEEDBACK_SECTION.lower():
+        return False
+    return existing is None or prev_meta.get("index_pending") == NEEDS_CLUSTER
+
+
+def _load_import_params(memory_dir):
+    from memsom.lifecycle import forget as _forget
+    params, _w = _forget.load_params(Path(memory_dir) / ".weights" / "canonical.json")
+    return params
 
 
 def _mtime_sig(path: Path) -> str:
@@ -730,11 +858,16 @@ def _mtime_sig(path: Path) -> str:
 
 # --- the importer -------------------------------------------------------------
 
-def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
+def import_memory_dir(conn, memory_dir, *, dry_run: bool = True, params=None) -> dict:
     """Import every memory/*.md and memory/projects/*.md (excluding the
     generated MEMORY.md / INDEX.md) into memsom.
 
-    Returns stats: {total_files, created, updated, skipped, tombstoned}.
+    *params* is the store's runtime-param dict (forget.load_params); None
+    loads it from ``<memory_dir>/.weights/canonical.json``.  Only
+    ``feedback_born_unindexed`` is read here.
+
+    Returns stats: {total_files, created, updated, skipped, tombstoned, ...,
+    dedup, quarantined, born_unindexed}.
     Atomic: all writes happen in one transaction (or none, if dry_run) — with
     ONE exception: if the reconcile-deletion sweep tombstones a fact node this
     run, the Behavior-4 stale cascade for its dependents (docs/facts-design.md)
@@ -748,11 +881,22 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
     index_path = memory_dir / "MEMORY.md"
     primary = (parse_primary_index(index_path.read_text(encoding="utf-8"))
                if index_path.exists() else {})
+    if params is None:
+        params = _load_import_params(memory_dir)
+    born_rule = bool(params.get("feedback_born_unindexed", True))
+
+    # Self-heal duplicate stems FIRST (the additive-sync leftover — see
+    # DuplicateMemoryStem): identical shallow copies are deleted, differing
+    # older copies quarantined.  Dry-run only counts; iter_memory_files picks
+    # the same canonical copy either way, so the import never freezes on one.
+    heal = heal_duplicates(memory_dir, dry_run=dry_run)
 
     files = iter_memory_files(memory_dir)
     stats = {"total_files": len(files), "created": 0, "updated": 0,
              "skipped": 0, "tombstoned": 0, "swept": 0, "refused_resurrect": 0,
-             "stale_cascaded": 0, "indexed": 0, "deindexed": 0}
+             "stale_cascaded": 0, "indexed": 0, "deindexed": 0,
+             "dedup": heal["dedup"], "quarantined": heal["quarantined"],
+             "duplicates": heal["duplicates"], "born_unindexed": 0}
 
     # Mass-wipe guard: importing a directory with ZERO memory files while the
     # store holds live memory nodes would make the reconcile sweep below (and
@@ -811,16 +955,30 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True) -> dict:
             # way to unfile on purpose without deleting the file.
             if unsectioned_by_frontmatter(fm):
                 section = None
+            existing = _live_node_for_path(conn, rel)
+            # Anti-creep (born_unindexed docstring): a NEW feedback file with
+            # no `why_own_line:` and no curated line is held out of the index
+            # and marked `index_pending: needs_cluster` so the render can
+            # record WHY it is absent (shed.json) and the next unchanged
+            # re-import keeps holding it.
+            pending = None
+            if stem.startswith(FEEDBACK_PREFIX):
+                prev_meta = _stored_index_meta(conn, rel)
+                if born_unindexed(stem, fm, section, curated=rel in primary,
+                                  existing=existing, prev_meta=prev_meta,
+                                  enabled=born_rule):
+                    section = None
+                    pending = NEEDS_CLUSTER
+                    stats["born_unindexed"] += 1
             # memory_subdir: "projects" for files under projects/, absent for
             # flat files — the digest links each entry relative to the index
             # it renders into (projects/INDEX.md vs MEMORY.md) from this key.
             # Node identity (bridge_path) stays the BASENAME, so moving a file
             # between the two levels is an edit of the same memory, not a new one.
             stamped = stamp_fm(raw, section=section, index_title=title, index_hook=hook,
-                               memory_subdir=memory_subdir(memory_dir, path))
+                               memory_subdir=memory_subdir(memory_dir, path),
+                               index_pending=pending)
             new_hash = memsom_ingest._content_hash(stamped)
-
-            existing = _live_node_for_path(conn, rel)
 
             # Resurrection guard (checked BEFORE the hash-skip so an identical
             # resurfaced copy is caught too): the live predecessor for this path
@@ -987,6 +1145,13 @@ def _print_stats(stats, dry_run):
     print(f"  files updated  : {f['updated']} (old tombstoned: {f['tombstoned']})")
     print(f"  files skipped  : {f['skipped']} (unchanged)")
     print(f"  deleted swept  : {f['swept']} (source file gone -> node tombstoned)")
+    if f.get("dedup") or f.get("quarantined"):
+        verb = "would heal" if dry_run else "healed"
+        print(f"  dup stems      : {verb} {f['dedup']} identical copy(ies) deleted, "
+              f"{f['quarantined']} differing copy(ies) -> .weights/dup_quarantine/")
+    if f.get("born_unindexed"):
+        print(f"  born unindexed : {f['born_unindexed']} new feedback file(s) held out "
+              f"of MEMORY.md (no why_own_line:; merge into a feedback_cluster_*)")
     if f.get("refused_resurrect"):
         print(f"  RESURRECT BLK  : {f['refused_resurrect']} (redacted node's file "
               f"resurfaced -> refused + file unlinked)")

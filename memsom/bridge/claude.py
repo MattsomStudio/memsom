@@ -77,6 +77,8 @@ MEMORY.md line (falling back to the file's own `section:` frontmatter), and the
 digest only renders memories that have one. A new file with neither is written to
 disk, stays fully searchable — and never loads into context. So: add the line, or
 put `section:` / `index_title:` / `index_hook:` in the file's frontmatter. Do one.
+**Exception — feedback:** a new lesson goes INTO the matching `feedback_cluster_*`
+file's body; a standalone indexed `feedback_*` file needs a `why_own_line:` field.
 
 **If MEMORY.md is near either cap, reclaim BEFORE adding to it.** Over a cap,
 the digest sheds the lowest-RS entries to fit (live-state and fact entries last);

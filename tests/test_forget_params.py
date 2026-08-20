@@ -135,8 +135,9 @@ class ResolveBudget(unittest.TestCase):
         captured = {}
         orig = digest.render_digest
 
-        def spy(conn, *, title=None, budget=None, max_lines=None):
+        def spy(conn, *, title=None, budget=None, max_lines=None, section_budgets=None):
             captured["budget"] = budget
+            captured["section_budgets"] = section_budgets
             captured["max_lines"] = max_lines
             return "# Memory\n"
 

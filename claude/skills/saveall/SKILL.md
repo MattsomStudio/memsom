@@ -132,6 +132,13 @@ The forgetting layer drops unused `reference_` lines automatically; `user_` /
 `feedback_` / `personal_` are pinned and never auto-dropped; `## Live state` and
 `fact_` entries are shed last. A file with `section: none` is deliberately out.
 
+**Feedback is the exception to "one file, one line".** A new lesson goes INTO the
+body of the matching `feedback_cluster_*` file (one bullet: `- [[stem]] — rule`,
+or just the rule). A brand-new standalone `feedback_*` file is imported
+*unindexed* (shed reason `needs_cluster`) unless its frontmatter carries
+`why_own_line: <reason>`; the Feedback section also has its own byte budget
+(`section_budgets` in the same params file) that pinning does not exempt.
+
 ## Step 5 — Report back
 
 After all writes, give a tight, scannable summary:

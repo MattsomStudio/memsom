@@ -278,6 +278,20 @@ format has no slot for it). `memsom wire-claude` remains the non-plugin route an
 wires the same hooks into `~/.claude/settings.json`; don't do both, or every hook
 fires twice.
 
+**PATH constraint (plugin route only).** `hooks/hooks.json` calls `memsom` in
+exec form by bare name, so it must be on the PATH of the process that *launched*
+Claude Code — a venv's `bin/` only is while that venv is activated, and a
+GUI-launched Claude never sees it, so the hooks fail silently. A plugin's files
+must stay machine-agnostic (`${CLAUDE_PLUGIN_ROOT}` points at the cached plugin
+copy, not at your Python environment, and `python -m` would just move the same
+assumption onto `python`), so the fix is on the install side: use `pipx install
+memsom` (or `pip install --user`) so the console script lands on a PATH dir, or
+symlink `<venv>/bin/memsom` into `~/.local/bin`. If memsom lives in a venv and you
+would rather not, use `memsom wire-claude` instead — it writes the **absolute**
+path of the running console script into `settings.json` (falling back to
+`"<python>" -m memsom.interface.cli`) and upgrades a stale bare `"memsom"` entry in
+place.
+
 How the loop works:
 
 - **Capture** — the bundled `/saveall` skill sweeps a conversation and writes each
@@ -344,6 +358,35 @@ lines, so bytes alone were never enough). Over either, the lowest-RS non-pinned
 entries are shed first; `## Live state` and `fact_` entries last; pinned
 (`user_` / `feedback_` / `personal_`) never. `.weights/shed.json` records every
 drop and which cap forced it. A file with `section: none` is deliberately withdrawn.
+
+### Anti-creep (why the index cannot grow one line per lesson)
+
+Every new `feedback_*` file used to be born with its own pinned index line and
+nothing ever merged, so the Feedback section alone reached 141 lines. Four
+shipped defaults now make that structurally impossible:
+
+1. **Born unindexed** — a NEW `feedback_*` file with no `why_own_line:` field is
+   imported with its section cleared (shed reason `needs_cluster`); the lesson
+   belongs in the body of the matching `feedback_cluster_*` file. Files with a
+   curated `MEMORY.md` line, cluster files, and already-stored nodes are untouched.
+   Param `feedback_born_unindexed` (default `true`).
+2. **Per-section budget that pinning does not exempt** — `section_budgets`
+   (default `{"Feedback": 7168}` bytes): a section over its cap sheds newest first,
+   pinned or not (`why_own_line:` entries after plain ones, clusters never), reason
+   `section_budget` in `shed.json`. Runs before the global byte/line loop.
+3. **Merge proposer** — `memsom consolidate-feedback [--apply] [--min-age-days 14]`
+   proposes the nearest cluster (BM25 over the store) for every aged, indexed,
+   un-justified feedback file; `--apply` appends `- [[stem]] — description` under
+   `## Absorbed <date>` in the cluster and sets `section: none` on the file. Sibling
+   `memsom consolidate-projects [--apply]` folds closed/cold subprojects into the
+   parent overview's `## Threads` table (or `## Closed threads`) and withdraws them
+   with `index: false`. Both are dry-run by default and write
+   `.weights/consolidate_proposals.json`; nothing is ever deleted. Schedule the
+   dry-run weekly next to your sweep (Task Scheduler / cron / launchd:
+   `memsom consolidate-feedback`), review, then `--apply`.
+4. **Visible counts** — `bridge-render` prints `feedback: N lines / B bytes
+   (budget X)` every session end; `memsom index-stats` and `memsom audit` show
+   every section against its budget; `shed.json` carries the same table.
 
 > `/recall` ships too — it drives `memsom retrieve` (hybrid BM25 + local nomic
 > vectors) over the store, so it searches everything ingested, not just the loaded
@@ -470,7 +513,10 @@ Measured on the standard workload; source cited here.
 | `stale-status`   | memsom_stale       | Show staleness of a node |
 | `unstale`        | memsom_stale       | Clear the stale flag on one node |
 | `verify-stale`   | memsom_verify_stale| Flag state-bearing memory notes whose verification age has gone stale |
-| `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only) |
+| `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only; per-section counts vs budgets) |
+| `index-stats`    | memsom_index_stats | Per-section line/byte counts of MEMORY.md against `section_budgets` + last shed receipt |
+| `consolidate-feedback` | memsom_consolidate | Propose (`--apply`: perform) merging aged feedback files into `feedback_cluster_*` bodies (BM25; dry-run default) |
+| `consolidate-projects` | memsom_consolidate | Propose (`--apply`: perform) folding closed/cold subprojects into the parent overview, `index: false` |
 | `dashboard`      | memsom_dashboard   | Build + open the memory telemetry dashboard (HTML) |
 | `panel`          | memsom_panel       | Live tuning + telemetry panel: loopback-only web UI over runtime params (canonical.json), JSON/env-file knobs, scheduled-task cadences, and system telemetry — bounds-validated writes, JSONL audit log (`--profile <host-profile.json>`) |
 | `tombstone`      | memsom_tombstone   | Sanctioned delete path: revoke a memory's node + remove its file |

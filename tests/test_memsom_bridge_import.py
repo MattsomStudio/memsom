@@ -821,19 +821,75 @@ class TestProjectsSubdir(Base):
         fm = bi.fm_top_level(bi.split_frontmatter(new["content"])[0])
         self.assertEqual(fm.get("memory_subdir"), "projects/widget")
 
-    def test_duplicate_stem_in_project_dir_errors(self):
-        (self.mem / "projects" / "kali").mkdir(parents=True)
-        (self.mem / "projects" / "kali" / "project_kali.md").write_text("x", encoding="utf-8")
-        with self.assertRaises(bi.DuplicateMemoryStem):
-            bi.iter_memory_files(self.mem)
+    # --- duplicate stems: self-heal, never freeze (additive-sync leftover) ----
 
-    def test_duplicate_stem_across_levels_errors_clearly(self):
-        self._write_project(name="project_kali.md")     # also exists flat
-        with self.assertRaises(bi.DuplicateMemoryStem) as cm:
-            bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+    def test_identical_duplicate_keeps_deepest_and_deletes_shallow(self):
+        """robocopy /E / rsync --update leave the OLD flat copy behind after a
+        MOVE into projects/: byte-identical -> the deep copy is canonical, the
+        shallow one is deleted, the import continues and logs `dedup`."""
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        deep = deep_dir / "project_kali.md"
+        deep.write_bytes(flat.read_bytes())
+        canonical, dups = bi.resolve_duplicates(self.mem)
+        self.assertEqual(canonical["project_kali.md"], deep)
+        self.assertEqual(dups[0]["action"], "delete")
+        # iter never raises and returns exactly one copy
+        names = [p.name for p in bi.iter_memory_files(self.mem)]
+        self.assertEqual(names.count("project_kali.md"), 1)
+        # dry-run: counts only, disk untouched
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=True)
+        self.assertEqual(st["dedup"], 1)
+        self.assertTrue(flat.exists())
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["dedup"], st["quarantined"]), (1, 0))
+        self.assertFalse(flat.exists())
+        self.assertTrue(deep.exists())
+        node = self.live_node("project_kali.md")
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/kali")
+
+    def test_differing_duplicate_keeps_newer_and_quarantines_older(self):
+        import os as _os
+        import time as _time
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        deep = deep_dir / "project_kali.md"
+        deep.write_text(flat.read_text(encoding="utf-8") + "\nedited elsewhere\n",
+                        encoding="utf-8")
+        # make the FLAT copy the newer one so "newest wins" is what is tested,
+        # not "deepest wins"
+        old = _time.time() - 3600
+        _os.utime(deep, (old, old))
+        canonical, dups = bi.resolve_duplicates(self.mem)
+        self.assertEqual(canonical["project_kali.md"], flat)
+        self.assertEqual(dups[0]["action"], "quarantine")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["dedup"], st["quarantined"]), (0, 1))
+        self.assertTrue(flat.exists())
+        self.assertFalse(deep.exists())
+        qdir = self.mem / ".weights" / "dup_quarantine"
+        moved = list(qdir.glob("project_kali.*.md"))
+        self.assertEqual(len(moved), 1)
+        self.assertIn("edited elsewhere", moved[0].read_text(encoding="utf-8"))
+        self.assertEqual(st["duplicates"][0]["quarantined_to"], str(moved[0]))
+        # the quarantine dir is under .weights, so it is never walked as memory
+        self.assertEqual([p.name for p in bi.iter_memory_files(self.mem)].count(
+            "project_kali.md"), 1)
+
+    def test_duplicate_raises_only_when_quarantine_write_fails(self):
+        from unittest import mock
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        (deep_dir / "project_kali.md").write_text("different", encoding="utf-8")
+        with mock.patch.object(Path, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(bi.DuplicateMemoryStem) as cm:
+                bi.heal_duplicates(self.mem, dry_run=False)
         self.assertIn("project_kali.md", str(cm.exception))
-        with self.assertRaises(bi.DuplicateMemoryStem):
-            list(bi.iter_memory_files(self.mem))
+        self.assertTrue(flat.exists())
 
 
 class TestExplicitUnsection(Base):

@@ -45,7 +45,8 @@ def _is_author() -> bool:
 
 
 def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes,
-                         max_lines=None, rendered_lines=None) -> None:
+                         max_lines=None, rendered_lines=None, sections=None,
+                         section_budgets=None) -> None:
     """Record which memories this render left OUT of MEMORY.md, and why.
 
     `.weights/shed.json` is the receipt for every index exclusion memsom decides
@@ -74,6 +75,9 @@ def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes,
             "lines": rendered_lines,
             "count": len(excluded),
             "by_reason": by_reason,
+            # per-section line/byte counts next to their budgets (anti-creep
+            # mechanism 4: drift is visible every session end)
+            "sections": section_table(sections, section_budgets),
             "excluded": excluded,
         }
         tmp = weights / "shed.json.tmp"
@@ -81,6 +85,30 @@ def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes,
         tmp.replace(weights / "shed.json")
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] shed manifest skipped: {exc!r}")
+
+
+def section_table(sections, section_budgets) -> dict:
+    """{section: {"lines", "bytes", "budget" (or None)}} — the rendered counts
+    (digest.section_stats) joined with the `section_budgets` param."""
+    out = {}
+    for sec, st in (sections or {}).items():
+        out[sec] = {"lines": st.get("lines", 0), "bytes": st.get("bytes", 0),
+                    "budget": (section_budgets or {}).get(sec)}
+    for sec, cap in (section_budgets or {}).items():
+        out.setdefault(sec, {"lines": 0, "bytes": 0, "budget": cap})
+    return out
+
+
+def format_section_lines(table) -> list:
+    """One `name: N lines / B bytes (budget X)` string per budgeted section."""
+    out = []
+    for sec, st in (table or {}).items():
+        if st.get("budget") is None:
+            continue
+        over = " OVER" if st["bytes"] > st["budget"] else ""
+        out.append(f"{sec.lower()}: {st['lines']} lines / {st['bytes']} bytes "
+                   f"(budget {st['budget']}){over}")
+    return out
 
 
 def _write_projects_index(conn, memory_dir):
@@ -115,7 +143,6 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
         bi.scaffold_memory_dir(memory_dir)
     except Exception as exc:  # noqa: BLE001 — scaffold is advisory
         print(f"[bridge] scaffold skipped: {exc!r}")
-    bi.import_all(conn, memory_dir, dry_run=False)
     weights = Path(memory_dir) / ".weights"
     # Runtime tunables: the same canonical.json the original mem_weights.py
     # maintains.  This is what makes panel-written params live — the render pass
@@ -123,6 +150,14 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     params, param_warnings = forget.load_params(weights / "canonical.json")
     for w in param_warnings:
         print(f"[bridge] tunables: {w}")
+    imp = bi.import_all(conn, memory_dir, dry_run=False, params=params)
+    f = imp.get("files") or {}
+    if f.get("dedup") or f.get("quarantined"):
+        print(f"[bridge] duplicate stems healed: {f['dedup']} identical deleted, "
+              f"{f['quarantined']} differing -> .weights/dup_quarantine/")
+    if f.get("born_unindexed"):
+        print(f"[bridge] {f['born_unindexed']} new feedback file(s) born unindexed "
+              f"(no why_own_line:) — merge into a feedback_cluster_*")
     forget.recompute_forget(conn, usage_dir=str(weights / "usage"), params=params)
 
     if not render:
@@ -146,7 +181,8 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     # digest caps together, atomically.
     ok, info = digest.write_live(conn, str(memory_dir),
                                  budget=params["memory_budget"],
-                                 max_lines=params["memory_max_lines"])
+                                 max_lines=params["memory_max_lines"],
+                                 section_budgets=params["section_budgets"])
 
     # Budget eviction is a real removal from the always-loaded index, but it is
     # NOT the forgetting layer's hot->cold demote and it never reaches
@@ -158,7 +194,8 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     if ok:
         _write_shed_manifest(memory_dir, info.get("excluded") or [],
                              params["memory_budget"], info.get("bytes"),
-                             params["memory_max_lines"], info.get("lines"))
+                             params["memory_max_lines"], info.get("lines"),
+                             info.get("sections"), params["section_budgets"])
         # projects/INDEX.md: the project_ memories MEMORY.md no longer carries
         # (digest module docstring, "Projects split"). Written only after the
         # main index succeeded, so the pointer line and its target move together.
@@ -198,8 +235,13 @@ def _cmd_bridge_render(args):
     if not result.get("rendered"):
         print(f"[bridge] mirror updated; render skipped ({result.get('reason')})")
     elif result.get("ok"):
-        print(f"[bridge] MEMORY.md regenerated {result['info']} "
+        info = dict(result["info"])
+        sections = info.pop("sections", None)
+        budgets = info.pop("section_budgets", None)
+        print(f"[bridge] MEMORY.md regenerated {info} "
               f"stale_marked={result['stale_marked']}")
+        for line in format_section_lines(section_table(sections, budgets)):
+            print(f"[bridge] {line}")
     else:
         print(f"[bridge] MEMORY.md unchanged (render rejected): {result['info']}")
 

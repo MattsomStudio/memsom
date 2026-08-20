@@ -13,6 +13,7 @@ Checks (severity):
   frontmatter-missing ERROR  name / description / type missing.
   bad-type            WARN   type not in user/feedback/project/reference.
   budget-breach       WARN   MEMORY.md over the 16384-byte cap.
+  needs-cluster       INFO   a new feedback file born unindexed (no why_own_line:).
   broken-wikilink     INFO   a [[link]] with no target (legal by design).
 
 Reuses the bridge importer's parsers, so the audit and the importer agree on what a
@@ -148,7 +149,13 @@ def run_audit(mem_dir):
                                "withdrawn from the index on purpose (section: none / "
                                "index: false); still in the store"))
             continue
-        if reason in ("budget", "lines", "projects"):
+        if reason == "needs_cluster":
+            findings.append(_F("needs-cluster", "INFO", fname,
+                               "new feedback file born unindexed (no why_own_line:); "
+                               "merge it into a feedback_cluster_* body or run "
+                               "`memsom consolidate-feedback`"))
+            continue
+        if reason in ("budget", "lines", "projects", "section_budget"):
             continue   # explained by the render receipt (shed.json), not an orphan
         if not db_ok:
             findings.append(_F("orphan-file", "WARN", fname,
@@ -212,13 +219,29 @@ SEV_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 SEV_MARK = {"ERROR": "x ERROR", "WARN": "! WARN ", "INFO": ". INFO "}
 
 
+def section_counts(mem_dir, md_text=None) -> dict:
+    """Per-section {lines, bytes, budget} for the on-disk MEMORY.md (anti-creep
+    mechanism 4 — the same table bridge-render prints and shed.json carries)."""
+    from memsom.distill.digest import section_stats, resolve_section_budgets
+    from memsom.bridge.bridge_render import section_table
+    if md_text is None:
+        memory_md = Path(mem_dir) / "MEMORY.md"
+        md_text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
+    return section_table(section_stats(md_text), resolve_section_budgets(mem_dir))
+
+
 def print_report(findings, files, mem_dir, md_text):
     memory_md = Path(mem_dir) / "MEMORY.md"
     sz = memory_md.stat().st_size if memory_md.exists() else 0
     cap = resolve_budget(mem_dir)
     print(f"\n  memsom audit — {mem_dir}")
     print(f"  {len(files)} memories | MEMORY.md {sz}/{cap} bytes "
-          f"(headroom {cap - sz})\n")
+          f"(headroom {cap - sz})")
+    for sec, st in section_counts(mem_dir, md_text).items():
+        cap_s = f" (budget {st['budget']})" if st["budget"] is not None else ""
+        over = "  OVER" if st["budget"] is not None and st["bytes"] > st["budget"] else ""
+        print(f"    {sec}: {st['lines']} lines / {st['bytes']} bytes{cap_s}{over}")
+    print()
     if not findings:
         print("  clean — no structural issues.\n")
         return
@@ -249,6 +272,7 @@ def _cmd_audit(args):
             "memories": len(files),
             "memory_md_bytes": sz,
             "budget": resolve_budget(mem_dir),
+            "sections": section_counts(mem_dir, md_text),
             "findings": findings,
             "errors": sum(1 for f in findings if f["sev"] == "ERROR"),
         }, indent=2))
