@@ -30,12 +30,17 @@ current and loaded (current versions, measured values, what is running where);
 a stale reference note losing its slot costs less than a live number going dark.
 
 Projects split: file entries whose stem starts with `project_` are NOT rendered
-into MEMORY.md at all.  They live in the `projects/` subdir of the memory dir
-and are rendered by render_projects_index into `projects/INDEX.md`, grouped
-Active / Parked / Closed (frontmatter `status:` when present, else the forget
-tier: hot -> Active, warm -> Parked, cold -> Closed), with no byte cap.  The
-main digest carries one literal pointer line under "## Personal projects" so a
-session knows where to look when a task touches ongoing work.
+into MEMORY.md at all.  They live under `projects/` in the memory dir and are
+rendered by render_projects_index into `projects/INDEX.md`, with no byte cap.
+Projects are hierarchical: `projects/<slug>/project_<slug>.md` is a project's
+parent overview and `projects/<slug>/project_<slug>_<sub>.md` its subprojects;
+a loose `projects/project_<x>.md` is a standalone project.  The index renders
+one `### <Parent title>` group per project dir (parent line, then nested
+subproject lines, each tagged [Parked]/[Closed] — Active untagged), then the
+standalone files under `## Standalone`.  Status = frontmatter `status:`, else
+the parent's `status:` for a subproject, else the forget tier (hot -> Active,
+warm -> Parked, cold -> Closed).  The main digest carries one literal pointer
+line under "## Personal projects" so a session knows where to look.
 
 SHADOW mode (Phase 3): write_shadow writes MEMORY.memsom.md NEXT TO the real
 MEMORY.md (never overwrites it).  compare_index does the per-section file-set
@@ -79,10 +84,13 @@ MAX_LINES = 180  # hard-fallback line cap; live value = `memory_max_lines` (same
 # projects/INDEX.md, never into MEMORY.md.
 PROJECT_PREFIX = "project_"
 PROJECTS_INDEX_NAME = "INDEX.md"
+PROJECTS_SUBDIR_NAME = "projects"   # == bridge_import.PROJECTS_SUBDIR
 PROJECTS_POINTER_SECTION = "Personal projects"
 PROJECTS_POINTER_LINE = ("- Project memory lives in projects/ — read projects/INDEX.md "
-                         "(Active / Parked / Closed) when a task touches ongoing work.")
+                         "(one group per project, subprojects nested, Active/Parked/Closed) "
+                         "when a task touches ongoing work.")
 PROJECT_GROUPS = ("Active", "Parked", "Closed")
+_GROUP_RANK = {g: i for i, g in enumerate(PROJECT_GROUPS)}
 _TIER_TO_GROUP = {"hot": "Active", "warm": "Parked", "cold": "Closed"}
 _STATUS_TO_GROUP = {"active": "Active", "parked": "Parked", "closed": "Closed"}
 DEFAULT_PROJECTS_TITLE = "# Projects"
@@ -420,28 +428,60 @@ def project_entries(conn):
             if e["kind"] == "file" and e.get("is_project")]
 
 
-def _project_group(e):
+def _project_status(e, parent=None):
+    """Active / Parked / Closed: the file's own `status:`, else the parent
+    overview's `status:` (subprojects inherit), else the forget tier."""
     st = e.get("status")
     if st in _STATUS_TO_GROUP:
         return _STATUS_TO_GROUP[st]
+    if parent is not None and parent.get("status") in _STATUS_TO_GROUP:
+        return _STATUS_TO_GROUP[parent["status"]]
     return _TIER_TO_GROUP.get(e.get("tier") or "hot", "Active")
 
 
 def _project_link(e):
-    """Link relative to projects/: a file IN projects/ is `project_x.md`; a
-    legacy flat one is `../project_x.md`."""
+    """Link relative to projects/: `project_x.md` for a standalone file,
+    `<slug>/project_x.md` inside a project dir, `../project_x.md` for a
+    legacy flat file."""
     name = f"{e['stem']}.md"
-    return name if e.get("subdir") == "projects" else f"../{name}"
+    sub = e.get("subdir")
+    if not sub:
+        return f"../{name}"
+    if sub == PROJECTS_SUBDIR_NAME:
+        return name
+    return f"{sub[len(PROJECTS_SUBDIR_NAME) + 1:]}/{name}"
+
+
+def _project_slug(e):
+    """The project dir slug for an entry inside `projects/<slug>/`, else None."""
+    sub = e.get("subdir") or ""
+    prefix = PROJECTS_SUBDIR_NAME + "/"
+    return sub[len(prefix):] if sub.startswith(prefix) and "/" not in sub[len(prefix):] else None
+
+
+def _project_line(e, status, *, indent=""):
+    hook = f" — {e['desc']}" if e["desc"] else ""
+    mk = _marker() if e.get("stale") else ""
+    tag = "" if status == "Active" else f" [{status}]"
+    return f"{indent}- [{e['name']}]({_project_link(e)}){hook}{tag}{mk}"
+
+
+def _rs_desc(e):
+    return (-(e["rs"] if e["rs"] is not None else 0.0), e["stem"])
 
 
 def render_projects_index(entries, *, title=None, conn=None):
     """Render projects/INDEX.md from project entries (see project_entries).
 
-    Groups `## Active` / `## Parked` / `## Closed` by frontmatter `status:`
-    (case-insensitive) when present, else by tier (hot/warm/cold).  Lines use
-    the main index format, sorted by RS desc within a group, links relative to
-    projects/.  No byte cap: this file is read on demand, not always loaded.
-    Empty groups are omitted.  Pass `conn` to resolve [[fact_*]] refs in hooks.
+    One `### <Parent title>` group per `projects/<slug>/` dir: the parent
+    overview's own index line as the headline (or `### <slug> (no parent
+    overview)` when `project_<slug>.md` is missing — the gap stays visible),
+    then its subprojects as indented lines, each tagged ` [Parked]` /
+    ` [Closed]` (Active untagged), sorted Active first then RS desc.  Loose
+    `projects/project_<x>.md` files (and legacy flat ones) follow under
+    `## Standalone` with the same tagging.  Groups are sorted by the parent's
+    status (Active first) then RS.  No byte cap: this file is read on demand.
+    Pass `conn` to resolve [[fact_*]] refs in hooks.
     """
     title = title or os.environ.get("MEMDAG_PROJECTS_TITLE", DEFAULT_PROJECTS_TITLE)
     if conn is not None:
@@ -449,22 +489,45 @@ def render_projects_index(entries, *, title=None, conn=None):
         for e in entries:
             if e.get("desc"):
                 e["desc"] = memsom_facts.resolve_fact_refs(conn, e["desc"])
-    groups = {g: [] for g in PROJECT_GROUPS}
+    by_slug, standalone = {}, []
     for e in entries:
-        groups[_project_group(e)].append(e)
-    lines = [title, ""]
-    for g in PROJECT_GROUPS:
-        if not groups[g]:
-            continue
-        lines.append(f"## {g}")
-        for e in sorted(groups[g],
-                        key=lambda x: (-(x["rs"] if x["rs"] is not None else 0.0),
-                                       x["stem"])):
-            hook = f" — {e['desc']}" if e["desc"] else ""
-            mk = _marker() if e.get("stale") else ""
-            lines.append(f"- [{e['name']}]({_project_link(e)}){hook}{mk}")
+        slug = _project_slug(e)
+        if slug is None:
+            standalone.append(e)
+        else:
+            by_slug.setdefault(slug, []).append(e)
+
+    groups = []   # (sort_key, lines)
+    for slug, members in by_slug.items():
+        parent = next((m for m in members if m["stem"] == f"{PROJECT_PREFIX}{slug}"), None)
+        subs = [m for m in members if m is not parent]
+        lines = []
+        if parent is not None:
+            pst = _project_status(parent)
+            head = _project_line(parent, pst)
+            lines.append(f"### {head[2:]}")          # "### [Title](link) — hook"
+            key = (_GROUP_RANK[pst],) + _rs_desc(parent)
+        else:
+            lines.append(f"### {slug} (no parent overview)")
+            key = (0, 0.0, slug)
+        ranked = sorted(((_project_status(m, parent), m) for m in subs),
+                        key=lambda t: (_GROUP_RANK[t[0]],) + _rs_desc(t[1]))
+        for st, m in ranked:
+            lines.append(_project_line(m, st, indent="  "))
         lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+        groups.append((key, lines))
+
+    out = [title, ""]
+    for _key, lines in sorted(groups, key=lambda g: g[0]):
+        out.extend(lines)
+    if standalone:
+        out.append("## Standalone")
+        ranked = sorted(((_project_status(m), m) for m in standalone),
+                        key=lambda t: (_GROUP_RANK[t[0]],) + _rs_desc(t[1]))
+        for st, m in ranked:
+            out.append(_project_line(m, st))
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
 
 
 def _entry_counts(text):

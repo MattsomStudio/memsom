@@ -178,6 +178,14 @@ the one thing this layer exists to prevent.
 **Tell me:** did the block land in CLAUDE.md? Did `MEMORY.md` regenerate? Did a
 re-run touch anything it shouldn't have?
 
+### Step 5: Check the memory layout scaffold
+After `wire-claude` (or the first `bridge-render`) your memory dir should hold
+`projects/` with an `INDEX.md` in it and `.weights/canonical.json` with `params`
+including `memory_budget` and `memory_max_lines`. Project memories go in
+`projects/<slug>/project_<slug>.md` (+ `project_<slug>_<sub>.md` subprojects) and
+show up in `projects/INDEX.md`, never in `MEMORY.md`. **Tell me** if either file
+is missing, or if a `project_*` file ever appears in `MEMORY.md`.
+
 > **Bonus (optional): the fact layer.** Values that change over time (a version,
 > a benchmark) can live in one `fact_<name>.md` file and be *referenced* from
 > other memories as `[[fact_<name>]]` — the regenerated `MEMORY.md` substitutes

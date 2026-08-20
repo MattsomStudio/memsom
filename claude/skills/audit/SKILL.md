@@ -18,12 +18,14 @@ with no argument it auto-detects `~/.claude/projects/<project>/memory`.
 ## What it checks
 
 ERROR-class (exit 1): **orphan-file** (live in the store but absent from MEMORY.md
-and not a deliberate cold demote — the index and the store disagree),
+and `projects/INDEX.md`, and not a deliberate cold demote — the index and the store disagree),
 **dead-index-link** (MEMORY.md links a file that's missing),
 **frontmatter-missing** (no name / description / type).
 
 WARN-class: **bad-type** (type not in user/feedback/project/reference),
-**budget-breach** (MEMORY.md over the 16384-byte cap).
+**budget-breach** (MEMORY.md over `memory_budget` bytes — the cap is read from
+`memory/.weights/canonical.json`, not hardcoded; `memory_max_lines` is the
+companion line cap).
 
 INFO-class: **pending-import** (file on disk not yet imported — run
 `memsom bridge-render`), **broken-wikilink** (a `[[link]]` with no target — *legal
@@ -40,7 +42,7 @@ by design*, just a heads-up).
 - **pending-import** just means a freshly written file hasn't been imported yet —
   run `memsom bridge-render` and it clears.
 - INFO is noise-by-design; mention the count, don't enumerate unless asked.
-- Flag budget headroom when it's tight (near the 16384 cap).
+- Flag budget headroom when it's tight (near `memory_budget` / `memory_max_lines`).
 
 ## Why it's report-only
 

@@ -276,6 +276,38 @@ overwrite an existing same-named skill** without `--force`. Set
 `MEMDAG_DIGEST_TITLE` for the `MEMORY.md` H1 and `MEMDAG_BRIDGE_AUTHOR=0` on extra
 machines that should mirror without re-rendering.
 
+### Memory layout
+
+```
+~/.claude/projects/<project>/memory/
+├── MEMORY.md                              GENERATED always-loaded index
+├── <type>_<topic>.md                      every non-project memory, flat
+├── projects/
+│   ├── INDEX.md                           GENERATED project index
+│   ├── project_<x>.md                     a standalone project
+│   └── <slug>/
+│       ├── project_<slug>.md              the project's parent overview
+│       └── project_<slug>_<sub>.md        its subprojects (any number)
+└── .weights/canonical.json                runtime params (see below)
+```
+
+`project_*` memories never render into `MEMORY.md`; they render into
+`projects/INDEX.md` — one group per project (parent line, subprojects nested),
+each tagged Active / Parked / Closed from frontmatter `status:` (a subproject
+inherits its parent's; otherwise the forgetting tier decides). `MEMORY.md` carries
+a single pointer line to it. The rule for the agent: append to the existing
+parent/subproject file, never create a sibling of an existing project.
+`bootstrap` / `wire-claude` / the first `bridge-render` scaffold `projects/`, an
+empty `projects/INDEX.md`, and `canonical.json`.
+
+`MEMORY.md` must fit **two caps**, both user-tunable in `canonical.json` →
+`params` (panel defaults): `memory_budget` (bytes, default 16384) and
+`memory_max_lines` (lines, default 180 — the harness reads only the first ~200
+lines, so bytes alone were never enough). Over either, the lowest-RS non-pinned
+entries are shed first; `## Live state` and `fact_` entries last; pinned
+(`user_` / `feedback_` / `personal_`) never. `.weights/shed.json` records every
+drop and which cap forced it. A file with `section: none` is deliberately withdrawn.
+
 > `/recall` ships too — it drives `memsom retrieve` (hybrid BM25 + local nomic
 > vectors) over the store, so it searches everything ingested, not just the loaded
 > MEMORY.md. The author's GPU/vault-coupled BGE retrieval engine is intentionally

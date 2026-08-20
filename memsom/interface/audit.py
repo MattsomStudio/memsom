@@ -33,7 +33,7 @@ from pathlib import Path
 
 from memsom.bridge.bridge_import import (split_frontmatter, fm_top_level, parse_primary_index,
                                          default_memory_dir, iter_memory_files as _memory_files,
-                                         PROJECTS_SUBDIR)
+                                         PROJECTS_SUBDIR, _LINK_IN_LINE)
 from memsom.distill.digest import resolve_budget
 
 BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
@@ -109,10 +109,12 @@ def run_audit(mem_dir):
     # project memories are indexed in projects/INDEX.md (generated next to
     # MEMORY.md); a file listed there is indexed, not an orphan. Links there are
     # relative to projects/ ("project_x.md" or "../project_x.md") -> basename.
+    # INDEX.md links are "x.md", "../x.md" or "<slug>/x.md"; a project group's
+    # headline is a "### [..](..)" line, not a bullet, so take EVERY link.
     proj_index = mem_dir / PROJECTS_SUBDIR / "INDEX.md"
     if proj_index.exists():
         hot |= {Path(f).name for f in
-                parse_primary_index(proj_index.read_text(encoding="utf-8"))}
+                _LINK_IN_LINE.findall(proj_index.read_text(encoding="utf-8"))}
     on_disk = {f for f, *_ in files}
     live, cold, db_ok = _store_tiers(mem_dir)
 

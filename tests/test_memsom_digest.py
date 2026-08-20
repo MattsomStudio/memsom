@@ -388,19 +388,20 @@ class TestProjectsSplit(Base):
         out = digest.render_digest(self.conn)
         self.assertNotIn("projects/INDEX.md", out)
 
-    def test_projects_index_grouping_and_links(self):
+    def test_standalone_projects_tagged_and_ordered(self):
+        self.conn.execute("UPDATE nodes SET forget_rs = 0.2 WHERE source_ref = 'memory:project_legacy'")
+        self.conn.commit()
         text = digest.render_projects_index(digest.project_entries(self.conn))
         self.assertTrue(text.startswith("# Projects\n"))
-        active = text.index("## Active")
-        parked = text.index("## Parked")
-        closed = text.index("## Closed")
-        self.assertLess(active, parked)
-        self.assertLess(parked, closed)
-        # status wins over tier; tier decides otherwise; links relative to projects/
-        self.assertIn("- [Widget](project_widget.md) — building it", text[active:parked])
-        self.assertIn("- [Unsectioned](project_nosection.md) — still indexed", text[parked:closed])
-        self.assertIn("- [Old thing](project_old.md) — shipped", text[closed:])
-        self.assertIn("- [Legacy](../project_legacy.md) — flat file", text[closed:])
+        self.assertIn("## Standalone", text)
+        body = text[text.index("## Standalone"):].splitlines()[1:]
+        # Active first (untagged), then Parked, then Closed; links relative to projects/
+        self.assertEqual(body, [
+            "- [Widget](project_widget.md) — building it",
+            "- [Unsectioned](project_nosection.md) — still indexed [Parked]",
+            "- [Old thing](project_old.md) — shipped [Closed]",
+            "- [Legacy](../project_legacy.md) — flat file [Closed]",
+        ])
 
     def test_projects_index_sorted_by_rs_desc_within_group(self):
         (self.mem / "projects" / "project_second.md").write_text(
@@ -413,6 +414,78 @@ class TestProjectsSplit(Base):
         self.conn.commit()
         text = digest.render_projects_index(digest.project_entries(self.conn))
         self.assertLess(text.index("project_widget.md"), text.index("project_second.md"))
+
+
+class TestProjectsHierarchy(Base):
+    """projects/<slug>/ dirs render as one group: parent headline + nested subs."""
+
+    def _proj(self, slug, stem, name, desc, **fm):
+        d = self.mem / "projects" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        extra = "".join(f"{k}: {v}\n" for k, v in fm.items())
+        (d / f"{stem}.md").write_text(
+            f"---\nname: {name}\ndescription: {desc}\ntype: project\n{extra}---\nx\n",
+            encoding="utf-8")
+
+    def setUp(self):
+        super().setUp()
+        self._proj("acme", "project_acme", "Acme", "the parent")
+        self._proj("acme", "project_acme_api", "Acme API", "rest layer")
+        self._proj("acme", "project_acme_ui", "Acme UI", "frontend", status="closed")
+        self._proj("acme", "project_acme_db", "Acme DB", "schema", status="Parked")
+        # a parked parent whose subs inherit unless they say otherwise
+        self._proj("zed", "project_zed", "Zed", "shelved", status="parked")
+        self._proj("zed", "project_zed_one", "Zed one", "inherits parked")
+        self._proj("zed", "project_zed_two", "Zed two", "explicit wins", status="active")
+        # a dir with no parent overview
+        self._proj("orphan", "project_orphan_bit", "Orphan bit", "no parent here")
+        (self.mem / "projects" / "project_loose.md").write_text(
+            "---\nname: Loose\ndescription: standalone\ntype: project\n---\nx\n",
+            encoding="utf-8")
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+        for stem, rs in (("project_acme_api", 0.9), ("project_acme_db", 0.95),
+                         ("project_acme_ui", 0.99), ("project_acme", 0.8)):
+            self.conn.execute("UPDATE nodes SET forget_rs = ? WHERE source_ref = ?",
+                              (rs, f"memory:{stem}"))
+        self.conn.commit()
+        self.text = digest.render_projects_index(digest.project_entries(self.conn))
+
+    def test_group_headline_is_parent_line_with_nested_subs(self):
+        t = self.text
+        i = t.index("### [Acme](acme/project_acme.md) — the parent")
+        block = t[i:].split("\n\n", 1)[0].splitlines()
+        # Active sub first (untagged) even though it has the lowest RS of the three,
+        # then Parked, then Closed — links relative to projects/
+        self.assertEqual(block[1:], [
+            "  - [Acme API](acme/project_acme_api.md) — rest layer",
+            "  - [Acme DB](acme/project_acme_db.md) — schema [Parked]",
+            "  - [Acme UI](acme/project_acme_ui.md) — frontend [Closed]",
+        ])
+
+    def test_missing_parent_headline_visible(self):
+        self.assertIn("### orphan (no parent overview)\n"
+                      "  - [Orphan bit](orphan/project_orphan_bit.md) — no parent here",
+                      self.text)
+
+    def test_status_inherits_from_parent_unless_explicit(self):
+        t = self.text
+        self.assertIn("### [Zed](zed/project_zed.md) — shelved [Parked]", t)
+        self.assertIn("  - [Zed two](zed/project_zed_two.md) — explicit wins\n", t)   # active
+        self.assertIn("  - [Zed one](zed/project_zed_one.md) — inherits parked [Parked]", t)
+        self.assertLess(t.index("Zed two"), t.index("Zed one"))   # Active first
+
+    def test_standalone_after_groups_and_group_order(self):
+        t = self.text
+        self.assertLess(t.index("### [Acme]"), t.index("### [Zed]"))   # Active parent first
+        self.assertLess(t.rindex("###"), t.index("## Standalone"))
+        self.assertIn("## Standalone\n- [Loose](project_loose.md) — standalone", t)
+
+    def test_pointer_literal_text(self):
+        out = digest.render_digest(self.conn)
+        self.assertIn("- Project memory lives in projects/ — read projects/INDEX.md "
+                      "(one group per project, subprojects nested, Active/Parked/Closed) "
+                      "when a task touches ongoing work.", out)
 
 
 if __name__ == "__main__":

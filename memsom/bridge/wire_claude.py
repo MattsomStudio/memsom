@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -196,6 +197,37 @@ def wire_skills(src_dir, dst_dir, *, force=False, print_only=False):
 # Orchestration + CLI
 # ---------------------------------------------------------------------------
 
+def memory_dir_candidates(home=None):
+    """Existing ``<home>/.claude/projects/*/memory`` dirs (Claude Code creates
+    one per working directory).  $MEMDAG_BRIDGE_MEMORY_DIR wins when no
+    explicit home is given."""
+    if home is None and os.environ.get("MEMDAG_BRIDGE_MEMORY_DIR"):
+        p = Path(os.environ["MEMDAG_BRIDGE_MEMORY_DIR"])
+        return [p] if p.is_dir() else []
+    base = Path(home) if home else Path.home()
+    return sorted(d for d in (base / ".claude" / "projects").glob("*/memory")
+                  if d.is_dir())
+
+
+def scaffold_memory(home=None, *, print_only=False):
+    """Scaffold the memory layout (projects/, projects/INDEX.md, canonical.json)
+    in the largest existing memory dir.  A fresh machine may have none yet —
+    then this is skipped and ``bridge-render`` scaffolds on its first run."""
+    from memsom.bridge import bridge_import as bi
+    cands = memory_dir_candidates(home)
+    if not cands:
+        return {"action": "skipped",
+                "detail": "no memory dir yet (bridge-render scaffolds it on first run)"}
+    target = max(cands, key=lambda d: len(list(d.glob("*.md"))))
+    if print_only:
+        return {"action": "print", "path": str(target)}
+    try:
+        return {"action": "scaffolded", "path": str(target),
+                **bi.scaffold_memory_dir(target)}
+    except Exception as exc:  # noqa: BLE001
+        return {"action": "error", "path": str(target), "detail": repr(exc)}
+
+
 def wire_claude(*, home=None, abs_exe=None, skills_src=None, with_gate=False,
                 force=False, print_only=False):
     abs_exe = abs_exe or _default_exe()
@@ -218,6 +250,7 @@ def wire_claude(*, home=None, abs_exe=None, skills_src=None, with_gate=False,
             out["claude_md"] = memsom_claude.sync(path=claude_path)
         except Exception as exc:  # noqa: BLE001
             out["claude_md"] = {"action": "error", "detail": repr(exc)}
+    out["memory_dir"] = scaffold_memory(home, print_only=print_only)
     return out
 
 
@@ -235,6 +268,8 @@ def cmd_wire_claude(args):
         print(s["snippet"])
     cm = res["claude_md"]
     print(f"[claude.md] {cm['action']}: {cm.get('detail') or cm.get('path', '')}")
+    md = res.get("memory_dir") or {}
+    print(f"[memory-dir] {md.get('action')}: {md.get('detail') or md.get('path', '')}")
     if cm.get("snippet") and cm["action"] == "print":
         print(cm["snippet"])
 

@@ -724,17 +724,28 @@ class TestProjectsSubdir(Base):
             f"section: Personal projects\n---\n\n{body}", encoding="utf-8")
         return path
 
-    def test_iter_memory_files_walks_one_level_and_skips_indexes(self):
+    def test_iter_memory_files_walks_depth_two_and_skips_indexes(self):
         self._write_project()
         (self.mem / "projects" / "INDEX.md").write_text("# Projects\n", encoding="utf-8")
-        (self.mem / "projects" / "deeper").mkdir()
-        (self.mem / "projects" / "deeper" / "project_nested.md").write_text("x", encoding="utf-8")
-        names = [p.name for p in bi.iter_memory_files(self.mem)]
-        self.assertIn("project_widget.md", names)
+        (self.mem / "projects" / "acme").mkdir()
+        (self.mem / "projects" / "acme" / "project_acme.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "project_acme_api.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "INDEX.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "deeper").mkdir()
+        (self.mem / "projects" / "acme" / "deeper" / "project_nested.md").write_text("x", encoding="utf-8")
+        files = bi.iter_memory_files(self.mem)
+        names = [p.name for p in files]
+        self.assertIn("project_widget.md", names)          # projects/
+        self.assertIn("project_acme.md", names)            # projects/<slug>/
+        self.assertIn("project_acme_api.md", names)
         self.assertNotIn("MEMORY.md", names)
-        self.assertNotIn("INDEX.md", names)
-        self.assertNotIn("project_nested.md", names)     # one level only
-        self.assertEqual(len(names), len(SAMPLE) + 1)
+        self.assertEqual(names.count("INDEX.md"), 0)
+        self.assertNotIn("project_nested.md", names)       # depth 3 ignored
+        self.assertEqual(len(names), len(SAMPLE) + 3)
+        subdirs = {p.name: bi.memory_subdir(self.mem, p) for p in files}
+        self.assertIsNone(subdirs["user_adhd.md"])
+        self.assertEqual(subdirs["project_widget.md"], "projects")
+        self.assertEqual(subdirs["project_acme_api.md"], "projects/acme")
 
     def test_roundtrip_import_reimport_tombstone(self):
         path = self._write_project()
@@ -774,12 +785,39 @@ class TestProjectsSubdir(Base):
         self.assertEqual(fm.get("section"), "Current Setup & Learning")  # curated line kept
 
     def test_wikilink_resolves_across_levels_by_stem(self):
-        self._write_project(body="see [[user_adhd]]\n")
+        self._write_project(body="see [[user_adhd]] and [[project_acme_api]]\n")
+        (self.mem / "projects" / "acme").mkdir()
+        (self.mem / "projects" / "acme" / "project_acme_api.md").write_text(
+            "---\nname: API\ntype: project\n---\nsee [[reference_vault]]\n", encoding="utf-8")
         (self.mem / "reference_vault.md").write_text(
             SAMPLE["reference_vault.md"] + "\nsee [[project_widget]]\n", encoding="utf-8")
         st = bi.import_all(self.conn, self.mem, dry_run=False)
         self.assertEqual(st["edges"]["unresolved"], 0)
-        self.assertEqual(st["edges"]["resolved"], 2)
+        # flat->projects/, projects/->flat, projects/->projects/<slug>/, <slug>/->flat
+        self.assertEqual(st["edges"]["resolved"], 4)
+        fm = bi.fm_top_level(bi.split_frontmatter(
+            self.live_node("project_acme_api.md")["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/acme")
+
+    def test_move_into_project_dir_is_an_edit(self):
+        self._write_project()
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = self.live_node("project_widget.md")
+        (self.mem / "projects" / "widget").mkdir()
+        (self.mem / "projects" / "project_widget.md").rename(
+            self.mem / "projects" / "widget" / "project_widget.md")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["created"], st["updated"], st["swept"]), (0, 1, 0))
+        new = self.live_node("project_widget.md")
+        self.assertNotEqual(new["id"], old["id"])
+        fm = bi.fm_top_level(bi.split_frontmatter(new["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/widget")
+
+    def test_duplicate_stem_in_project_dir_errors(self):
+        (self.mem / "projects" / "kali").mkdir(parents=True)
+        (self.mem / "projects" / "kali" / "project_kali.md").write_text("x", encoding="utf-8")
+        with self.assertRaises(bi.DuplicateMemoryStem):
+            bi.iter_memory_files(self.mem)
 
     def test_duplicate_stem_across_levels_errors_clearly(self):
         self._write_project(name="project_kali.md")     # also exists flat

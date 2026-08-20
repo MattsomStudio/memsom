@@ -104,8 +104,8 @@ class TestProjectsIndex(Base):
         self.assertTrue(idx.exists())
         self.assertEqual(result["info"]["projects_index"], str(idx))
         text = idx.read_text(encoding="utf-8")
-        self.assertIn("## Active\n- [Widget](../project_widget.md) — status", text)   # legacy flat
-        self.assertIn("## Parked\n- [Gadget](project_gadget.md) — parked for now", text)
+        self.assertIn("## Standalone\n- [Widget](../project_widget.md) — status\n"
+                      "- [Gadget](project_gadget.md) — parked for now [Parked]", text)
         self.assertFalse((self.mem / "projects" / "INDEX.md.tmp").exists())
         # shed manifest carries the line accounting + the projects reason
         shed = json.loads((self.mem / ".weights" / "shed.json").read_text(encoding="utf-8"))
@@ -155,6 +155,29 @@ class TestFailSafe(Base):
             br._cmd_bridge_render_safe(Namespace(memory_dir=str(self.mem)))
         finally:
             br.bridge_render = orig
+
+
+class TestFirstRunScaffold(Base):
+    def test_render_scaffolds_canonical_and_projects_index(self):
+        import json
+        self.assertFalse((self.mem / ".weights" / "canonical.json").exists())
+        result = br.bridge_render(self.conn, self.mem)
+        self.assertTrue(result["ok"], result)
+        params = json.loads((self.mem / ".weights" / "canonical.json")
+                            .read_text(encoding="utf-8"))["params"]
+        self.assertEqual(params["memory_max_lines"], digest.MAX_LINES)
+        self.assertEqual(params["memory_budget"], digest.BUDGET)
+        self.assertTrue((self.mem / "projects" / "INDEX.md").exists())
+
+    def test_existing_canonical_is_never_overwritten(self):
+        import json
+        w = self.mem / ".weights"
+        w.mkdir()
+        (w / "canonical.json").write_text(
+            json.dumps({"version": 1, "params": {"memory_budget": 4096}}), encoding="utf-8")
+        br.bridge_render(self.conn, self.mem)
+        data = json.loads((w / "canonical.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["params"], {"memory_budget": 4096})
 
 
 if __name__ == "__main__":

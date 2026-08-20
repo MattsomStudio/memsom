@@ -211,5 +211,58 @@ class TestDefaultSkillsSrc(unittest.TestCase):
         self.assertTrue(any(src.iterdir()))
 
 
+class TestMemoryScaffold(unittest.TestCase):
+    def test_scaffolds_largest_existing_memory_dir(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            home = root / "home"
+            stub = home / ".claude" / "projects" / "-stub" / "memory"
+            real = home / ".claude" / "projects" / "-real" / "memory"
+            stub.mkdir(parents=True)
+            real.mkdir(parents=True)
+            (stub / "user_a.md").write_text("x", encoding="utf-8")
+            for n in ("user_a", "feedback_b", "reference_c"):
+                (real / f"{n}.md").write_text("x", encoding="utf-8")
+            out = wc.wire_claude(home=home, abs_exe=EXE, skills_src=_make_skills_src(root))
+            md = out["memory_dir"]
+            self.assertEqual(md["action"], "scaffolded")
+            self.assertEqual(Path(md["path"]), real)
+            self.assertEqual((md["projects_dir"], md["projects_index"], md["canonical"]),
+                             ("created", "created", "created"))
+            self.assertTrue((real / "projects").is_dir())
+            self.assertEqual((real / "projects" / "INDEX.md").read_text(encoding="utf-8"),
+                             "# Projects\n")
+            params = json.loads((real / ".weights" / "canonical.json")
+                                .read_text(encoding="utf-8"))["params"]
+            self.assertEqual(params["memory_budget"], 16384)
+            self.assertEqual(params["memory_max_lines"], 180)
+            self.assertIn("decay_base", params)           # forgetting defaults too
+            self.assertFalse((stub / "projects").exists())   # the stub is left alone
+            # idempotent: nothing is overwritten on a second run
+            (real / "projects" / "INDEX.md").write_text("# kept\n", encoding="utf-8")
+            again = wc.scaffold_memory(home)
+            self.assertEqual((again["projects_dir"], again["projects_index"], again["canonical"]),
+                             ("present", "present", "present"))
+            self.assertEqual((real / "projects" / "INDEX.md").read_text(encoding="utf-8"),
+                             "# kept\n")
+
+    def test_no_memory_dir_yet_is_skipped_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            out = wc.wire_claude(home=root / "home", abs_exe=EXE,
+                                 skills_src=_make_skills_src(root))
+            self.assertEqual(out["memory_dir"]["action"], "skipped")
+
+    def test_print_only_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            mem = root / "home" / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            res = wc.scaffold_memory(root / "home", print_only=True)
+            self.assertEqual(res["action"], "print")
+            self.assertFalse((mem / "projects").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

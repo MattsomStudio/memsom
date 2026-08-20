@@ -108,53 +108,107 @@ INDEX_NAMES = frozenset({"MEMORY.md", "INDEX.md"})
 
 
 class DuplicateMemoryStem(ValueError):
-    """Two memory files share a filename across the flat dir and projects/.
+    """Two memory files share a filename anywhere in the memory tree.
 
     The bridge keys nodes on the BASENAME (bridge_path) and wikilinks resolve
-    by bare stem, so a stem must be globally unique across both levels — a
+    by bare stem, so a stem must be globally unique across every level — a
     duplicate would make one file silently shadow the other.
     """
+
+
+def _md_files(d):
+    return [p for p in d.glob("*.md") if p.is_file() and p.name not in INDEX_NAMES]
 
 
 def iter_memory_files(memory_dir):
     """Yield every per-fact memory file under *memory_dir*, sorted.
 
-    Layout (one level only): the flat ``*.md`` files plus ``projects/*.md``
-    (project memories live there so the main MEMORY.md stays small and they
-    get their own generated ``projects/INDEX.md``).  Generated index files
-    (``MEMORY.md``, any ``INDEX.md``) are excluded at every level.
+    Layout: the flat ``*.md`` files, plus the project tree under ``projects/``:
+    ``projects/project_<x>.md`` (standalone projects) and one level deeper
+    ``projects/<slug>/*.md`` (a project directory: its ``project_<slug>.md``
+    parent overview plus ``project_<slug>_<sub>.md`` subprojects).  Depth 2
+    under the memory dir is the floor — nothing deeper is walked.  Generated
+    index files (``MEMORY.md``, any ``INDEX.md``) are excluded at every level.
 
-    Raises DuplicateMemoryStem when the same filename appears at both levels:
+    Raises DuplicateMemoryStem when the same filename appears twice anywhere:
     filenames are the node key and the wikilink target, so they must stay
     globally unique.
     """
     memory_dir = Path(memory_dir)
-    top = [p for p in memory_dir.glob("*.md")
-           if p.is_file() and p.name not in INDEX_NAMES]
-    sub_dir = memory_dir / PROJECTS_SUBDIR
-    sub = ([p for p in sub_dir.glob("*.md")
-            if p.is_file() and p.name not in INDEX_NAMES]
-           if sub_dir.is_dir() else [])
+    files = _md_files(memory_dir)
+    proj = memory_dir / PROJECTS_SUBDIR
+    if proj.is_dir():
+        files += _md_files(proj)
+        for d in sorted(x for x in proj.iterdir() if x.is_dir()):
+            files += _md_files(d)
     seen = {}
-    for p in top + sub:
+    for p in files:
         if p.name in seen:
             raise DuplicateMemoryStem(
                 f"duplicate memory filename {p.name!r}: {seen[p.name]} and {p} "
                 f"— memory filenames must be unique across {memory_dir} and "
-                f"{memory_dir / PROJECTS_SUBDIR}")
+                f"the whole {memory_dir / PROJECTS_SUBDIR} tree")
         seen[p.name] = p
-    return sorted(top + sub, key=lambda p: (p.name, str(p)))
+    return sorted(files, key=lambda p: (p.name, str(p)))
+
+
+PROJECTS_INDEX_SEED = "# Projects\n"
+
+
+def scaffold_memory_dir(memory_dir, *, params=None) -> dict:
+    """Create-if-absent scaffold for a memory dir so a fresh install is complete
+    from day one.  Returns {name: "created" | "present"} for each piece.
+
+      memory/projects/                 the project tree (hierarchical layout)
+      memory/projects/INDEX.md         seeded empty so MEMORY.md's pointer line
+                                       never dangles before the first render
+      memory/.weights/canonical.json   the runtime-params file with the panel
+                                       defaults (memory_budget, memory_max_lines,
+                                       + the forgetting-layer defaults)
+
+    Never overwrites: canonical.json is owned by whatever weights layer the
+    user runs (memsom only READS it after this), and INDEX.md is rewritten by
+    bridge-render.  Creating an absent file is not contention with either.
+    """
+    import json
+    from memsom.lifecycle import forget as _forget
+    memory_dir = Path(memory_dir)
+    out = {}
+    proj = memory_dir / PROJECTS_SUBDIR
+    out["projects_dir"] = "present" if proj.is_dir() else "created"
+    proj.mkdir(parents=True, exist_ok=True)
+    idx = proj / "INDEX.md"
+    if idx.exists():
+        out["projects_index"] = "present"
+    else:
+        idx.write_bytes(PROJECTS_INDEX_SEED.encode("utf-8"))
+        out["projects_index"] = "created"
+    canon = memory_dir / ".weights" / "canonical.json"
+    if canon.exists():
+        out["canonical"] = "present"
+    else:
+        canon.parent.mkdir(parents=True, exist_ok=True)
+        body = {"version": 1, "memories": {},
+                "params": dict(params or {**_forget.DEFAULTS,
+                                          **_forget.PANEL_PARAM_DEFAULTS})}
+        tmp = canon.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        tmp.replace(canon)
+        out["canonical"] = "created"
+    return out
 
 
 def memory_subdir(memory_dir, path) -> str | None:
-    """``"projects"`` when *path* lives in the projects/ subdir, else None.
+    """The memory-relative directory of *path* with forward slashes
+    (``"projects"`` or ``"projects/<slug>"``), or None for a flat file.
 
-    Paths come from iter_memory_files (memory_dir / [projects /] name), so the
-    parent's name is the whole answer — no filesystem resolution needed."""
-    path = Path(path)
-    if path.parent.name == PROJECTS_SUBDIR and path.parent.parent == Path(memory_dir):
-        return PROJECTS_SUBDIR
-    return None
+    Paths come from iter_memory_files, so this is pure path arithmetic — no
+    filesystem resolution."""
+    try:
+        rel = Path(path).parent.relative_to(Path(memory_dir))
+    except ValueError:
+        return None
+    return rel.as_posix() if rel.parts else None
 
 
 # --- frontmatter parsing (light, stdlib) -------------------------------------

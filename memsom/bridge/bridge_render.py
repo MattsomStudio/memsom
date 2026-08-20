@@ -108,6 +108,13 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
     """
     bi.migrate(conn)
     forget.migrate(conn)
+    # First-run scaffold (create-if-absent only): projects/, projects/INDEX.md,
+    # .weights/canonical.json with the panel defaults — so a fresh install is
+    # line-aware and the pointer line has a target before anything is saved.
+    try:
+        bi.scaffold_memory_dir(memory_dir)
+    except Exception as exc:  # noqa: BLE001 — scaffold is advisory
+        print(f"[bridge] scaffold skipped: {exc!r}")
     bi.import_all(conn, memory_dir, dry_run=False)
     weights = Path(memory_dir) / ".weights"
     # Runtime tunables: the same canonical.json the original mem_weights.py
