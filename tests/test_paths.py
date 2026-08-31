@@ -21,7 +21,11 @@ from __future__ import annotations
 import os
 import sys
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 from memsom.paths import UnsafePath, is_unc_or_device, safe_join
 

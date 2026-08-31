@@ -38,7 +38,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 import memsom
 from memsom.bridge import bridge_import as bi

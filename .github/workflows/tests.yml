@@ -53,6 +53,23 @@ jobs:
       - name: Gate 3 broker selfcheck
         run: python -m memsom.federation.broker --selfcheck
 
+      # Some test modules are pytest-style (fixtures/parametrize/xfail) and
+      # self-skip under the stdlib-only discover above — pytest is installed
+      # LAST so every earlier gate still runs in a stdlib-only interpreter.
+      # The module list is DERIVED (grep), so a new pytest-style file joins
+      # this step automatically instead of silently joining the skipped set.
+      - name: Pytest-style modules
+        shell: bash
+        run: |
+          python -m pip install --quiet pytest
+          files=$(grep -l "import pytest" tests/test_*.py)
+          if [ -z "$files" ]; then
+            echo "::error::grep found no pytest-style modules but this step exists — list derivation broke"
+            exit 1
+          fi
+          echo "$files"
+          python -W error::DeprecationWarning -m pytest -q $files
+
   # ---------------------------------------------------------------------
   # Architectural contracts. `.importlinter` documents itself as ENFORCED
   # ("a break is a bug") and was GREEN AND UNTRACKED until 2026-07-31 — which

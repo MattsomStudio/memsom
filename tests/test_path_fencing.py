@@ -24,7 +24,11 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 PKG = pathlib.Path(__file__).resolve().parents[1] / "memsom"
 

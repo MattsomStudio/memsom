@@ -20,7 +20,11 @@ and this test goes red on contact. Control: `mkdir memsom/providers` -> RED;
 
 import importlib
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 
 def test_memsom_providers_does_not_resolve():
