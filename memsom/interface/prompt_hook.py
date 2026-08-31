@@ -241,9 +241,17 @@ def _now_iso():
 # ---------------------------------------------------------------------------
 
 def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="topsecret",
-                    query_fn=query_hits, now=_now_iso) -> str | None:
+                    query_fn=None, now=_now_iso) -> str | None:
     """The whole hook as a function: returns the stdout text to emit (a JSON
-    document) or None for silence. Logging happens here in log/inject modes."""
+    document) or None for silence. Logging happens here in log/inject modes.
+
+    ``query_fn`` is late-bound to ``query_hits`` ON PURPOSE: a def-time default
+    freezes the original function object, so a test's patch of the module
+    attribute never reaches the CLI path — which made the CLI test silently
+    query the LIVE store (green only on a machine whose brain contains the
+    fixture stem, red on CI's empty one)."""
+    if query_fn is None:
+        query_fn = query_hits
     prompt = data.get("prompt") if isinstance(data, dict) else None
     if not isinstance(prompt, str) or should_skip(prompt):
         return None
