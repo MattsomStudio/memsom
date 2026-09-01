@@ -1,0 +1,239 @@
+name: ci-alert
+
+# Makes a red CI impossible to miss. Runs after every completed run of the
+# workflow(s) listed under `on.workflow_run.workflows` — INCLUDING nightly
+# `schedule` runs, which is the whole point: GitHub only emails the user who
+# TRIGGERED a run when it fails, and a cron run has no triggering user, so a
+# nightly failure emails nobody. That is how this repo's CI once sat red for
+# eleven days unnoticed. This workflow turns a red run into an assigned issue,
+# which the repo owner is subscribed to by default and which the GitHub app
+# surfaces on mobile/desktop.
+#
+# Behaviour (one durable signal per red streak, never one per run):
+#   failure / timed_out  -> no open `ci-red` issue for this workflow+branch:
+#                             open one, assign it to the repo owner (1 signal).
+#                           one already open: append the run to its body and
+#                             bump the "(xN)" counter in its title. Body/title
+#                             edits do NOT notify, so a 10-night streak is
+#                             still one notification, not ten.
+#   success              -> open `ci-red` issue exists: comment "green again"
+#                             and close it (the streak's second, final signal).
+#                           none open: nothing to do.
+#   cancelled / skipped  -> not a verdict; log why and exit 0.
+#   anything else        -> fail THIS workflow loudly by name (no silent skip).
+#   runs from a fork     -> log and exit 0 (the PR itself already tells the author).
+#
+# Self-test (leave in place; it is the permanent proof that the plumbing works):
+#   gh workflow run ci-alert.yml -f simulate=failure   # opens + assigns an issue
+#   gh issue list --label ci-red                       # -> "CI red: simulate on main"
+#   gh workflow run ci-alert.yml -f simulate=success   # comments + closes it
+# Simulated runs are keyed under the workflow name "simulate", so they never
+# touch an issue tracking a real workflow.
+#
+# Optional second leg: if a repository secret named CI_ALERT_WEBHOOK exists
+# (a Discord webhook URL), the open/close events are POSTed there too. With no
+# secret the step is skipped and the issue leg above is complete on its own.
+#
+# `workflows:` below must match each target workflow's `name:` field exactly
+# (NOT its file name). Also note workflow_run only fires from the DEFAULT
+# branch's copy of this file, so it must be merged to main to be live.
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      simulate:
+        description: "Self-test: run the issue logic against a fake run with this conclusion"
+        required: true
+        type: choice
+        options: [failure, success]
+
+# actions: read is required to list the failing JOB names of the completed run
+# on a private repo. Nothing here needs contents beyond the default read.
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+# Two runs finishing at the same moment (push + nightly) must not race each
+# other into opening two issues. Serialise; never cancel (a cancelled alert is
+# a lost signal).
+concurrency:
+  group: ci-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    env:
+      CI_ALERT_WEBHOOK: ${{ secrets.CI_ALERT_WEBHOOK }}
+    steps:
+      - name: Open / update / close the ci-red issue
+        id: issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LABEL = 'ci-red';
+            const { owner, repo } = context.repo;
+            const repoUrl = `${context.serverUrl}/${owner}/${repo}`;
+
+            // ---- 1. Resolve the run under judgement (real or simulated) ----
+            let run, simulated = false;
+            if (context.eventName === 'workflow_dispatch') {
+              const want = (context.payload.inputs || {}).simulate;
+              if (want !== 'failure' && want !== 'success') {
+                throw new Error(`ci-alert: simulate must be 'failure' or 'success', got '${want}'`);
+              }
+              simulated = true;
+              run = {
+                id: context.runId,
+                name: 'simulate',
+                run_number: context.runNumber,
+                conclusion: want,
+                event: 'workflow_dispatch (simulated)',
+                head_branch: context.ref.replace(/^refs\/heads\//, ''),
+                html_url: `${repoUrl}/actions/runs/${context.runId}`,
+                updated_at: new Date().toISOString(),
+                head_repository: { full_name: `${owner}/${repo}` },
+              };
+            } else if (context.eventName === 'workflow_run') {
+              run = context.payload.workflow_run;
+            } else {
+              throw new Error(`ci-alert: unexpected event '${context.eventName}'`);
+            }
+
+            const where = `${run.name} run #${run.run_number} (${run.html_url})`;
+            core.info(`ci-alert: judging ${where}: conclusion=${run.conclusion} event=${run.event} branch=${run.head_branch}`);
+
+            if (run.head_repository && run.head_repository.full_name !== `${owner}/${repo}`) {
+              core.info(`ci-alert: run is from fork ${run.head_repository.full_name}; not tracked here. Nothing to do.`);
+              return;
+            }
+
+            const RED  = new Set(['failure', 'timed_out']);
+            const NOOP = new Set(['cancelled', 'skipped', 'neutral', 'stale']);
+            if (NOOP.has(run.conclusion)) {
+              core.info(`ci-alert: conclusion '${run.conclusion}' is not a verdict. Nothing to do.`);
+              return;
+            }
+            if (!RED.has(run.conclusion) && run.conclusion !== 'success') {
+              throw new Error(`ci-alert: unknown conclusion '${run.conclusion}' for ${where}; refusing to guess`);
+            }
+
+            // ---- 2. Find the open issue for this workflow + branch ----
+            const branch = run.head_branch;
+            const base = `CI red: ${run.name} on ${branch}`;
+            const isOurs = (i) => i.title === base || i.title.startsWith(`${base} (x`);
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: LABEL, per_page: 100,
+            });
+            const ours = open.filter(isOurs).sort((a, b) => a.number - b.number);
+            if (ours.length > 1) {
+              core.warning(`ci-alert: ${ours.length} open '${LABEL}' issues match '${base}' (${ours.map(i => '#' + i.number).join(', ')}); using the oldest`);
+            }
+            const issue = ours[0];
+            const countOf = (i) => {
+              const m = /\(x(\d+)\)$/.exec(i.title);
+              return m ? Number(m[1]) : 1;
+            };
+            const when = (run.updated_at || new Date().toISOString()).replace('T', ' ').slice(0, 16) + ' UTC';
+
+            let signal = '';
+            let message = '';
+
+            // ---- 3a. RED ----
+            if (RED.has(run.conclusion)) {
+              let failing = [];
+              if (simulated) {
+                failing = ['(simulated run; no real jobs)'];
+              } else {
+                const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                  owner, repo, run_id: run.id, per_page: 100,
+                });
+                failing = jobs.filter(j => RED.has(j.conclusion)).map(j => `${j.name} (${j.conclusion})`);
+                if (failing.length === 0) failing = ['(no individual job reported failure; see the run)'];
+              }
+              const runLine = `[${run.name} #${run.run_number}](${run.html_url}) — \`${run.event}\` — ${when} — ${failing.join(', ')}`;
+
+              if (!issue) {
+                // the label must exist before it can be applied
+                try {
+                  await github.rest.issues.getLabel({ owner, repo, name: LABEL });
+                } catch (e) {
+                  if (e.status !== 404) throw e;
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: LABEL, color: 'b60205',
+                    description: 'CI is failing; opened and closed automatically by ci-alert.yml',
+                  });
+                  core.info(`ci-alert: created label '${LABEL}'`);
+                }
+                const why = run.event === 'schedule'
+                  ? 'This was a **scheduled (nightly) run**. GitHub emails nobody when those fail; this issue is the only signal you will get.'
+                  : `Trigger: \`${run.event}\`.`;
+                const body = [
+                  `**${run.name}** is failing on \`${branch}\`.`,
+                  '',
+                  why,
+                  '',
+                  `Failing jobs: ${failing.join(', ')}`,
+                  `Run: ${run.html_url}`,
+                  '',
+                  'This issue closes itself when the workflow is green again on this branch. Every further red run is appended below (silently, no new notification) and the counter in the title goes up.',
+                  '',
+                  '### Red runs in this streak',
+                  `1. ${runLine}`,
+                ].join('\n');
+                const created = await github.rest.issues.create({
+                  owner, repo, title: base, body, labels: [LABEL], assignees: [owner],
+                });
+                signal = 'opened';
+                message = `${owner}/${repo}: ${run.name} is RED on ${branch} (${run.event}) -> ${created.data.html_url}`;
+                core.info(`ci-alert: opened #${created.data.number} ${created.data.html_url}`);
+                core.setOutput('issue', String(created.data.number));
+              } else {
+                const n = countOf(issue) + 1;
+                const body = `${issue.body || ''}\n${n}. ${runLine}`;
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number, title: `${base} (x${n})`, body,
+                });
+                core.info(`ci-alert: #${issue.number} already open; appended run, streak now x${n}. No new notification by design.`);
+                core.setOutput('issue', String(issue.number));
+              }
+            }
+
+            // ---- 3b. GREEN ----
+            if (run.conclusion === 'success') {
+              if (!issue) {
+                core.info(`ci-alert: green and no open '${LABEL}' issue for '${base}'. Nothing to do.`);
+              } else {
+                const n = countOf(issue);
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: `Green again: ${run.html_url} (\`${run.event}\`, ${when}) after ${n} red run${n === 1 ? '' : 's'}. Closing.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed',
+                });
+                signal = 'closed';
+                message = `${owner}/${repo}: ${run.name} green again on ${branch} -> ${issue.html_url}`;
+                core.info(`ci-alert: closed #${issue.number}`);
+                core.setOutput('issue', String(issue.number));
+              }
+            }
+
+            core.setOutput('signal', signal);
+            core.setOutput('message', message);
+
+      # Optional Discord leg. Skipped entirely unless the CI_ALERT_WEBHOOK secret
+      # exists; fires only on the same two moments the issue leg notifies
+      # (opened / closed), never per run.
+      - name: Discord webhook (optional; needs CI_ALERT_WEBHOOK secret)
+        if: env.CI_ALERT_WEBHOOK != '' && steps.issue.outputs.signal != ''
+        env:
+          MESSAGE: ${{ steps.issue.outputs.message }}
+        run: |
+          payload="$(jq -cn --arg c "$MESSAGE" '{content: $c}')"
+          curl --fail-with-body -sS -H 'Content-Type: application/json' \
+            -d "$payload" "$CI_ALERT_WEBHOOK"
