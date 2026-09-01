@@ -233,6 +233,11 @@ _register("remote.tls_cert", default="", source="env:MEMSOM_REMOTE_TLS_CERT",
 _register("remote.tls_key", default="", source="env:MEMSOM_REMOTE_TLS_KEY",
            doc="Private key matching remote.tls_cert.", feature="remote.server")
 
+_register("telemetry.consolidation_dir", default="", source="env:MEMSOM_CONSOLIDATION_DIR",
+           doc="Override where the weekly consolidation sweep's dated reports "
+               "live (default ~/.claude/consolidation); telemetry.last_consolidation "
+               "reads the newest report's mtime from here.", feature="telemetry")
+
 
 # ---------------------------------------------------------------------------
 # CLI -- `memsom tuning list|get|set`

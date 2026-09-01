@@ -259,6 +259,39 @@ def _remote_client():
 
 
 # ---------------------------------------------------------------------------
+# telemetry -- the panel's contract surface (PROMOTE-Q11-PANEL.md B1)
+# ---------------------------------------------------------------------------
+
+_TELEMETRY_KEYS = frozenset((
+    "generated", "last_consolidation", "totals", "tier", "types", "hist",
+    "top_access", "scatter", "growth", "stale", "budget", "sessions",
+    "thresholds", "graph",
+))
+
+
+def _telemetry(conn):
+    from memsom.interface import telemetry as memsom_telemetry
+    if conn is None:
+        # No store to build a payload from yet -- the module itself is always
+        # present (it has no optional dependency), matching gate3.broker/
+        # federation.sync's "conn is None -> can't say more than present" shape.
+        return _status("telemetry", "active",
+                       "module present; full payload needs a DB connection",
+                       knobs=["telemetry.consolidation_dir"])
+    data = memsom_telemetry.build_telemetry(conn=conn)
+    if set(data.keys()) != _TELEMETRY_KEYS:
+        return _status("telemetry", "error",
+                       f"build_telemetry key set drifted: {sorted(data.keys())}")
+    sessions = data.get("sessions")
+    if isinstance(sessions, dict) and sessions.get("reason"):
+        return _status("telemetry", "degraded",
+                       f"sessions subreader degraded: {sessions['reason']}",
+                       knobs=["telemetry.consolidation_dir"])
+    return _status("telemetry", "active", "panel contract surface reachable",
+                   knobs=["telemetry.consolidation_dir"])
+
+
+# ---------------------------------------------------------------------------
 # panel -- external package, attaches via the memsom.commands entry-point group
 # ---------------------------------------------------------------------------
 
@@ -289,6 +322,7 @@ _REGISTRANTS = {
     "distill": lambda conn: _distill(),
     "remote.server": lambda conn: _remote_server(),
     "remote.client": lambda conn: _remote_client(),
+    "telemetry": lambda conn: _telemetry(conn),
     "panel": lambda conn: _panel(),
 }
 
