@@ -148,9 +148,12 @@ jobs:
   # MEASURED on the dev box (Windows 11, CPython 3.12, same commands, 1260
   # tests): discover pass under coverage 311 s vs plain 313 s and 378 s on two
   # plain runs — the overhead is below the suite's own run-to-run variance
-  # (it is I/O-bound, not CPU-bound); pytest pass 7 s vs 3 s. Baseline at that
-  # measurement: 76.7 % combined line+branch (78.4 % lines, 71.7 % branches),
-  # 59 files, floor set at 75.5.
+  # (it is I/O-bound, not CPU-bound); pytest pass 7 s vs 3 s. Baseline on the
+  # dev box: 76.7 % combined line+branch (78.4 % lines, 71.7 % branches, 59
+  # files). On THIS runner (first green run, 2026-09-01): 75.9 % combined
+  # (77.5 % lines, 71.0 % branches) — lower because 19 Windows-only pytest
+  # cases skip on ubuntu. The floor tracks the runner's number, not the dev
+  # box's: 75.0. Wall time of this job on that run: 79 s.
   #
   # Both passes — the stdlib `unittest discover` run AND the pytest-style
   # modules — feed ONE data file (`coverage run`, then `coverage run -a`), so
@@ -226,6 +229,11 @@ jobs:
           root = ET.parse("coverage.xml").getroot()
           lines = float(root.get("line-rate")) * 100
           branches = float(root.get("branch-rate")) * 100
+          # coverage.py's TOTAL with branch=true is (hit lines + hit branches)
+          # over (lines + branches) — THAT is the number fail_under applies to.
+          lv, lc = int(root.get("lines-valid")), int(root.get("lines-covered"))
+          bv, bc = int(root.get("branches-valid")), int(root.get("branches-covered"))
+          total = 100.0 * (lc + bc) / (lv + bv)
           with open("pyproject.toml", "rb") as f:
               floor = tomllib.load(f)["tool"]["coverage"]["report"]["fail_under"]
           rows = []
@@ -240,12 +248,13 @@ jobs:
               "",
               "| metric | value |",
               "|---|---|",
-              f"| lines | **{lines:.1f} %** |",
-              f"| branches | {branches:.1f} % |",
+              f"| total (line+branch — what fail_under applies to) | **{total:.1f} %** |",
+              f"| lines | {lines:.1f} % ({lc}/{lv}) |",
+              f"| branches | {branches:.1f} % ({bc}/{bv}) |",
               f"| floor (pyproject fail_under) | {floor} % |",
-              f"| verdict | {'GREEN' if lines >= floor else 'RED — below floor'} |",
+              f"| verdict | {'GREEN' if total >= floor else 'RED — below floor'} |",
               "",
-              f"Total `{lines:.1f} %` vs floor `{floor} %` (files measured: {len(rows)}).",
+              f"Total `{total:.1f} %` vs floor `{floor} %` (files measured: {len(rows)}).",
               "",
               "### 10 lowest-covered production modules",
               "",
