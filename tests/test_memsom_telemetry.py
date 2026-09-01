@@ -157,8 +157,15 @@ class TestDashboardShim(Base):
         self.assertTrue(any(issubclass(w.category, DeprecationWarning) for w in caught))
 
     def test_exposes_same_function_objects(self):
+        import warnings
         from memsom.interface import telemetry
-        from memsom.interface import dashboard
+        # dashboard is the deprecated shim under test elsewhere
+        # (test_import_warns_deprecation); this test only checks identity of
+        # the re-exported objects, so the deprecation warning its import
+        # fires is expected and must not fail the run under -W error.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            from memsom.interface import dashboard
         self.assertIs(dashboard.build_telemetry, telemetry.build_telemetry)
         self.assertIs(dashboard.load_weights, telemetry.load_weights)
         self.assertIs(dashboard.default_memory_dir, telemetry.default_memory_dir)
