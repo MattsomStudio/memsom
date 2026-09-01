@@ -134,6 +134,96 @@ def from_longmemeval(path: str | Path, max_items: int | None = None,
     return items, report
 
 
+def _session_date(raw_date: str) -> str:
+    """Extract the YYYY/MM/DD prefix from a LongMemEval date string.
+
+    LME dates look like '2023/04/10 (Mon) 17:50'. We keep only the calendar day
+    so the synth prompt can prefix each evidence turn with [YYYY/MM/DD] -- the
+    date-injection lever (June-25 teaching: temporal-reasoning 0.25 -> 0.68).
+    """
+    if not raw_date:
+        return ""
+    return str(raw_date).strip().split()[0]
+
+
+def from_longmemeval_all(path: str | Path, max_items: int | None = None,
+                         max_evidence: int = 6) -> tuple[list[dict], dict]:
+    """Adapt ALL LongMemEval question types into the normalized schema, with NO
+    poison record -- the full-500 judged-accuracy path.
+
+    This is ADDITIVE to from_longmemeval (which keeps only the 3 poisonable types
+    and builds poison scaffolding); that path is untouched. Here every question
+    type is ingested, evidence is bounded by the SAME convention (all
+    answer-bearing turns + a little context, capped at max_evidence), and each
+    evidence turn carries its SESSION DATE so the synth prompt can date-inject.
+
+    Returned item schema (superset of the normalized schema; no `poison` key, so
+    select_poisoned() will never pick these):
+      {
+        "id", "question", "question_type", "question_date",
+        "gold":       str,            # gold answer string (judge reference)
+        "gold_terms": [gold],         # kept for scorer compatibility
+        "evidence":   [{"text", "channel"="user", "answer_bearing", "date"}],
+      }
+
+    Returns (items, report) with the same honest coverage accounting.
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    items: list[dict] = []
+    skipped: dict[str, int] = {}
+    used_by_type: dict[str, int] = {}
+
+    for entry in raw:
+        qtype = entry.get("question_type", "unknown")
+        gold = str(entry.get("answer", "")).strip()
+        if not gold:
+            skipped["empty-answer"] = skipped.get("empty-answer", 0) + 1
+            continue
+
+        sessions = entry.get("haystack_sessions", []) or []
+        hdates = entry.get("haystack_dates", []) or []
+
+        answer_turns: list[tuple[str, str]] = []   # (text, date)
+        context_turns: list[tuple[str, str]] = []
+        for si, session in enumerate(sessions):
+            sdate = _session_date(hdates[si]) if si < len(hdates) else ""
+            for turn in session:
+                content = (turn.get("content") or "").strip()
+                if not content:
+                    continue
+                if turn.get("has_answer"):
+                    answer_turns.append((content, sdate))
+                else:
+                    context_turns.append((content, sdate))
+        if not answer_turns:
+            skipped["no-answer-turn"] = skipped.get("no-answer-turn", 0) + 1
+            continue
+
+        evidence = [{"text": t, "channel": "user", "answer_bearing": True, "date": d}
+                    for (t, d) in answer_turns]
+        for (t, d) in context_turns[: max(0, max_evidence - len(evidence))]:
+            evidence.append({"text": t, "channel": "user",
+                             "answer_bearing": False, "date": d})
+
+        qid = entry.get("question_id", f"lme-{len(items)}")
+        items.append({
+            "id": qid,
+            "question": entry["question"],
+            "question_type": qtype,
+            "question_date": _session_date(entry.get("question_date", "")),
+            "gold": gold,
+            "gold_terms": [gold],
+            "evidence": evidence,
+        })
+        used_by_type[qtype] = used_by_type.get(qtype, 0) + 1
+        if max_items and len(items) >= max_items:
+            break
+
+    report = {"used": len(items), "used_by_type": used_by_type,
+              "skipped": skipped, "skipped_total": sum(skipped.values())}
+    return items, report
+
+
 def _contradict(gold: str) -> str:
     """Produce a plausible wrong answer to seed as poison.
 

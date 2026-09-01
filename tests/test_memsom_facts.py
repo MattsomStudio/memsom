@@ -32,6 +32,10 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["MEMDAG_DB"] = str(self.root / "t.db")
+        # the bridge now indexes every imported node; keep the tests off the
+        # network (an Ollama embed is ~1s/node) -> BM25-only for the suite
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         self.mem = self.root / "memory"
         self.mem.mkdir()
         (self.mem / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
@@ -41,6 +45,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         self.tmp.cleanup()
 
     def _write_fact(self, value, **kw):
@@ -177,12 +185,26 @@ class TestDigestResolution(Base):
 
     def test_hook_resolves(self):
         self._write_fact(61)
+        (self.mem / "reference_llm.md").write_text(
+            "---\nname: llm\ndescription: local llm at [[fact_5070_toksps]]\n"
+            "type: reference\nsection: References\n---\nbody\n",
+            encoding="utf-8")
+        self._import()
+        text = digest.render_digest(conn=self.conn)
+        self.assertIn("local llm at 61 tok/s", text)
+
+    def test_project_hook_resolves_in_projects_index(self):
+        # project_ memories render in projects/INDEX.md, not MEMORY.md — the
+        # fact substitution must reach that surface too
+        self._write_fact(61)
         (self.mem / "project_llm.md").write_text(
             "---\nname: llm\ndescription: local llm at [[fact_5070_toksps]]\n"
             "type: project\nsection: Personal projects\n---\nbody\n",
             encoding="utf-8")
         self._import()
-        text = digest.render_digest(conn=self.conn)
+        self.assertNotIn("project_llm.md", digest.render_digest(conn=self.conn))
+        text = digest.render_projects_index(digest.project_entries(self.conn),
+                                            conn=self.conn)
         self.assertIn("local llm at 61 tok/s", text)
 
     def test_fact_entry_hook_is_its_value(self):

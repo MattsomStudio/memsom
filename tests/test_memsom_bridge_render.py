@@ -41,6 +41,10 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["MEMDAG_DB"] = str(self.root / "t.db")
+        # the bridge now indexes every imported node; keep the tests off the
+        # network (an Ollama embed is ~1s/node) -> BM25-only for the suite
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         # NEVER let claude-sync touch the real ~/.claude/CLAUDE.md during tests.
         os.environ["CLAUDE_MD_PATH"] = str(self.root / "CLAUDE.md")
         self.mem = self.root / "memory"
@@ -54,6 +58,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         os.environ.pop("MEMDAG_DIGEST_TITLE", None)
         os.environ.pop("CLAUDE_MD_PATH", None)
         self.tmp.cleanup()
@@ -84,6 +92,43 @@ class TestRender(Base):
             self.assertTrue(result["ok"])
         finally:
             os.environ.pop("MEMDAG_VERIFY_STALE_DAYS", None)
+
+
+class TestProjectsIndex(Base):
+    def test_writes_projects_index_and_pointer(self):
+        import json
+        (self.mem / "projects").mkdir()
+        (self.mem / "projects" / "project_gadget.md").write_text(
+            "---\nname: Gadget\ndescription: parked for now\ntype: project\n"
+            "status: parked\n---\nx\n", encoding="utf-8")
+        result = br.bridge_render(self.conn, self.mem)
+        self.assertTrue(result["ok"], result)
+        out = self.memory_md.read_text(encoding="utf-8")
+        # project_ memories leave MEMORY.md; the pointer line replaces them
+        self.assertNotIn("project_widget.md", out)
+        self.assertNotIn("project_gadget.md", out)
+        self.assertIn("## Personal projects\n" + digest.PROJECTS_POINTER_LINE, out)
+        idx = self.mem / "projects" / "INDEX.md"
+        self.assertTrue(idx.exists())
+        self.assertEqual(result["info"]["projects_index"], str(idx))
+        text = idx.read_text(encoding="utf-8")
+        self.assertIn("## Standalone\n- [Widget](../project_widget.md) — status\n"
+                      "- [Gadget](project_gadget.md) — parked for now [Parked]", text)
+        self.assertFalse((self.mem / "projects" / "INDEX.md.tmp").exists())
+        # shed manifest carries the line accounting + the projects reason
+        shed = json.loads((self.mem / ".weights" / "shed.json").read_text(encoding="utf-8"))
+        self.assertEqual(shed["max_lines"], digest.MAX_LINES)
+        self.assertEqual(shed["lines"], out.count("\n"))
+        self.assertEqual(shed["by_reason"].get("projects"), 2)
+
+    def test_second_render_is_stable(self):
+        # the rendered pointer is re-imported as a literal; the next render must
+        # be byte-identical (no duplicate pointer, no churn)
+        br.bridge_render(self.conn, self.mem)
+        first = self.memory_md.read_text(encoding="utf-8")
+        br.bridge_render(self.conn, self.mem)
+        self.assertEqual(self.memory_md.read_text(encoding="utf-8"), first)
+        self.assertEqual(first.count(digest.PROJECTS_POINTER_LINE), 1)
 
 
 class TestNonAuthor(Base):
@@ -118,6 +163,29 @@ class TestFailSafe(Base):
             br._cmd_bridge_render_safe(Namespace(memory_dir=str(self.mem)))
         finally:
             br.bridge_render = orig
+
+
+class TestFirstRunScaffold(Base):
+    def test_render_scaffolds_canonical_and_projects_index(self):
+        import json
+        self.assertFalse((self.mem / ".weights" / "canonical.json").exists())
+        result = br.bridge_render(self.conn, self.mem)
+        self.assertTrue(result["ok"], result)
+        params = json.loads((self.mem / ".weights" / "canonical.json")
+                            .read_text(encoding="utf-8"))["params"]
+        self.assertEqual(params["memory_max_lines"], digest.MAX_LINES)
+        self.assertEqual(params["memory_budget"], digest.BUDGET)
+        self.assertTrue((self.mem / "projects" / "INDEX.md").exists())
+
+    def test_existing_canonical_is_never_overwritten(self):
+        import json
+        w = self.mem / ".weights"
+        w.mkdir()
+        (w / "canonical.json").write_text(
+            json.dumps({"version": 1, "params": {"memory_budget": 4096}}), encoding="utf-8")
+        br.bridge_render(self.conn, self.mem)
+        data = json.loads((w / "canonical.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["params"], {"memory_budget": 4096})
 
 
 if __name__ == "__main__":

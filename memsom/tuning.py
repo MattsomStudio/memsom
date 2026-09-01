@@ -84,6 +84,14 @@ def override(key: str, value) -> None:
         _overrides[key] = value
 
 
+def clear_override(key: str) -> None:
+    """Undo override(key, ...): resolve() falls back to env/default again.
+    A no-op if the key was never overridden. Test-isolation escape hatch --
+    production call sites are one-shot CLI processes that never need it."""
+    with _lock:
+        _overrides.pop(key, None)
+
+
 def snapshot(conn=None) -> dict[str, object]:
     return {key: resolve(key, conn=conn) for key in REGISTRY}
 
@@ -125,6 +133,9 @@ _register("bridge.hook_shadow_log", default="", source="env:MEMDAG_HOOK_SHADOW_L
 _register("bridge.memory_dir", default="", source="env:MEMDAG_BRIDGE_MEMORY_DIR",
            doc="Override the discovered Claude memory dir (also read directly "
                "by kernel.paths.default_memory_dir -- see module docstring).")
+_register("bridge.index_enabled", default="1", source="env:MEMDAG_BRIDGE_INDEX",
+           doc="Keep the retrieval index current on bridge import unless '0' "
+               "(the kill-switch restores the old write-only behaviour).")
 _register("obsidian.vault", default="", source="env:MEMDAG_OBSIDIAN_VAULT",
            doc="The operator-configured Obsidian vault root.", feature="obsidian")
 
@@ -134,6 +145,8 @@ _register("distill.digest_sections", default="", source="env:MEMDAG_DIGEST_SECTI
            doc="Comma-separated digest section display order.", feature="distill")
 _register("distill.digest_title", default="# Memory", source="env:MEMDAG_DIGEST_TITLE",
            doc="Digest document title.", feature="distill")
+_register("distill.projects_title", default="# Projects", source="env:MEMDAG_PROJECTS_TITLE",
+           doc="projects/INDEX.md document title.", feature="distill")
 
 _register("llm.model", default="", source="env:MEMDAG_LLM_MODEL",
            doc="Ollama model name for distill/retrieval LLM calls.", feature="llm")
@@ -158,6 +171,10 @@ _register("mcp.channel_ceiling", default="", source="env:MEMSOM_MCP_CHANNEL_CEIL
            doc="MCP server's channel ceiling override.")
 _register("mcp.export_dir", default="", source="env:MEMSOM_MCP_EXPORT_DIR",
            doc="Directory a model-driven export may write into.")
+
+_register("retrieval.warm_disabled", default="", source="env:MEMDAG_WARM_ENDPOINT",
+           doc="'0'/'off'/'false'/'no' disables the loopback warm retrieval "
+               "endpoint the prompt hook queries.")
 
 _register("saveall.userprofile_fallback", default="", source="env:USERPROFILE",
            doc="Windows subprocess cwd fallback for the detached /saveall child.")

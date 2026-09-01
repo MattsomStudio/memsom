@@ -365,8 +365,7 @@ def _remote_server_features_block(statuses: dict) -> dict | None:
     server degrades to a small error dict, never an exception -- a features
     probe must never crash the whole command."""
     import json
-    import urllib.error
-    import urllib.request
+    from memsom.effects import net as memsom_net
 
     client = statuses.get("remote.client")
     if client is None or client["state"] != "active":
@@ -378,12 +377,11 @@ def _remote_server_features_block(statuses: dict) -> dict | None:
     if not url:
         return {"error": "remote.client active but remote_server_url is unset"}
     token = settings.get("remote_device_token", "")
-    req = urllib.request.Request(f"{url}/features",
-                                 headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, timeout=3) as resp:  # noqa: S310 -- operator-configured URL
-            return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+        body = memsom_net.fetch(f"{url}/features",
+                                headers={"Authorization": f"Bearer {token}"}, timeout=3)
+        return json.loads(body.decode("utf-8"))
+    except (memsom_net.NetworkError, ValueError) as exc:
         return {"error": f"unreachable: {exc}"}
 
 

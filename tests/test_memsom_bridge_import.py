@@ -51,6 +51,10 @@ class Base(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.db = self.root / "sub" / "test.db"
         os.environ["MEMDAG_DB"] = str(self.db)
+        # the bridge now indexes every imported node; keep the tests off the
+        # network (an Ollama embed is ~1s/node) -> BM25-only for the suite
+        self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
+        os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         self.mem = self.root / "memory"
         self.mem.mkdir()
         for name, text in SAMPLE.items():
@@ -62,6 +66,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
+        if self._embed_prev is None:
+            os.environ.pop("MEMDAG_EMBED_BACKEND", None)
+        else:
+            os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         self.tmp.cleanup()
 
     def live_node(self, rel):
@@ -710,3 +718,284 @@ class TestIndexMetaFallback(Base):
             "section: Wrong Section\n---\n\nbody\n", encoding="utf-8")
         bi.import_memory_dir(self.conn, self.mem, dry_run=False)
         self.assertEqual(self._section_of("user_adhd.md"), "About the User")
+
+
+class TestProjectsSubdir(Base):
+    """memory/projects/*.md imports exactly like a flat file (basename-keyed)."""
+
+    def _write_project(self, name="project_widget.md", body="state\n"):
+        sub = self.mem / "projects"
+        sub.mkdir(exist_ok=True)
+        path = sub / name
+        path.write_text(
+            f"---\nname: Widget\ndescription: d\ntype: project\n"
+            f"section: Personal projects\n---\n\n{body}", encoding="utf-8")
+        return path
+
+    def test_iter_memory_files_walks_depth_two_and_skips_indexes(self):
+        self._write_project()
+        (self.mem / "projects" / "INDEX.md").write_text("# Projects\n", encoding="utf-8")
+        (self.mem / "projects" / "acme").mkdir()
+        (self.mem / "projects" / "acme" / "project_acme.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "project_acme_api.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "INDEX.md").write_text("x", encoding="utf-8")
+        (self.mem / "projects" / "acme" / "deeper").mkdir()
+        (self.mem / "projects" / "acme" / "deeper" / "project_nested.md").write_text("x", encoding="utf-8")
+        files = bi.iter_memory_files(self.mem)
+        names = [p.name for p in files]
+        self.assertIn("project_widget.md", names)          # projects/
+        self.assertIn("project_acme.md", names)            # projects/<slug>/
+        self.assertIn("project_acme_api.md", names)
+        self.assertNotIn("MEMORY.md", names)
+        self.assertEqual(names.count("INDEX.md"), 0)
+        self.assertNotIn("project_nested.md", names)       # depth 3 ignored
+        self.assertEqual(len(names), len(SAMPLE) + 3)
+        subdirs = {p.name: bi.memory_subdir(self.mem, p) for p in files}
+        self.assertIsNone(subdirs["user_adhd.md"])
+        self.assertEqual(subdirs["project_widget.md"], "projects")
+        self.assertEqual(subdirs["project_acme_api.md"], "projects/acme")
+
+    def test_roundtrip_import_reimport_tombstone(self):
+        path = self._write_project()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["created"], len(SAMPLE) + 1)
+        node = self.live_node("project_widget.md")
+        self.assertIsNotNone(node)
+        self.assertEqual(node["source_ref"], "memory:project_widget")
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects")
+        self.assertEqual(fm.get("section"), "Personal projects")
+        # unchanged re-import: skipped, nothing created
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["created"], 0)
+        self.assertEqual(st["skipped"], len(SAMPLE) + 1)
+        # edit: supersede like a flat file
+        path.write_text(path.read_text(encoding="utf-8") + "more\n", encoding="utf-8")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["updated"], 1)
+        # delete: swept like a flat file
+        path.unlink()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["swept"], 1)
+        self.assertIsNone(self.live_node("project_widget.md"))
+
+    def test_move_between_levels_is_an_edit_not_a_new_memory(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = self.live_node("project_kali.md")
+        (self.mem / "projects").mkdir()
+        (self.mem / "project_kali.md").rename(self.mem / "projects" / "project_kali.md")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["created"], st["updated"], st["swept"]), (0, 1, 0))
+        new = self.live_node("project_kali.md")
+        self.assertNotEqual(new["id"], old["id"])
+        fm = bi.fm_top_level(bi.split_frontmatter(new["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects")
+        self.assertEqual(fm.get("section"), "Current Setup & Learning")  # curated line kept
+
+    def test_wikilink_resolves_across_levels_by_stem(self):
+        self._write_project(body="see [[user_adhd]] and [[project_acme_api]]\n")
+        (self.mem / "projects" / "acme").mkdir()
+        (self.mem / "projects" / "acme" / "project_acme_api.md").write_text(
+            "---\nname: API\ntype: project\n---\nsee [[reference_vault]]\n", encoding="utf-8")
+        (self.mem / "reference_vault.md").write_text(
+            SAMPLE["reference_vault.md"] + "\nsee [[project_widget]]\n", encoding="utf-8")
+        st = bi.import_all(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["edges"]["unresolved"], 0)
+        # flat->projects/, projects/->flat, projects/->projects/<slug>/, <slug>/->flat
+        self.assertEqual(st["edges"]["resolved"], 4)
+        fm = bi.fm_top_level(bi.split_frontmatter(
+            self.live_node("project_acme_api.md")["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/acme")
+
+    def test_move_into_project_dir_is_an_edit(self):
+        self._write_project()
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = self.live_node("project_widget.md")
+        (self.mem / "projects" / "widget").mkdir()
+        (self.mem / "projects" / "project_widget.md").rename(
+            self.mem / "projects" / "widget" / "project_widget.md")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["created"], st["updated"], st["swept"]), (0, 1, 0))
+        new = self.live_node("project_widget.md")
+        self.assertNotEqual(new["id"], old["id"])
+        fm = bi.fm_top_level(bi.split_frontmatter(new["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/widget")
+
+    # --- duplicate stems: self-heal, never freeze (additive-sync leftover) ----
+
+    def test_identical_duplicate_keeps_deepest_and_deletes_shallow(self):
+        """robocopy /E / rsync --update leave the OLD flat copy behind after a
+        MOVE into projects/: byte-identical -> the deep copy is canonical, the
+        shallow one is deleted, the import continues and logs `dedup`."""
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        deep = deep_dir / "project_kali.md"
+        deep.write_bytes(flat.read_bytes())
+        canonical, dups = bi.resolve_duplicates(self.mem)
+        self.assertEqual(canonical["project_kali.md"], deep)
+        self.assertEqual(dups[0]["action"], "delete")
+        # iter never raises and returns exactly one copy
+        names = [p.name for p in bi.iter_memory_files(self.mem)]
+        self.assertEqual(names.count("project_kali.md"), 1)
+        # dry-run: counts only, disk untouched
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=True)
+        self.assertEqual(st["dedup"], 1)
+        self.assertTrue(flat.exists())
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["dedup"], st["quarantined"]), (1, 0))
+        self.assertFalse(flat.exists())
+        self.assertTrue(deep.exists())
+        node = self.live_node("project_kali.md")
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        self.assertEqual(fm.get("memory_subdir"), "projects/kali")
+
+    def test_differing_duplicate_keeps_newer_and_quarantines_older(self):
+        import os as _os
+        import time as _time
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        deep = deep_dir / "project_kali.md"
+        deep.write_text(flat.read_text(encoding="utf-8") + "\nedited elsewhere\n",
+                        encoding="utf-8")
+        # make the FLAT copy the newer one so "newest wins" is what is tested,
+        # not "deepest wins"
+        old = _time.time() - 3600
+        _os.utime(deep, (old, old))
+        canonical, dups = bi.resolve_duplicates(self.mem)
+        self.assertEqual(canonical["project_kali.md"], flat)
+        self.assertEqual(dups[0]["action"], "quarantine")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["dedup"], st["quarantined"]), (0, 1))
+        self.assertTrue(flat.exists())
+        self.assertFalse(deep.exists())
+        qdir = self.mem / ".weights" / "dup_quarantine"
+        moved = list(qdir.glob("project_kali.*.md"))
+        self.assertEqual(len(moved), 1)
+        self.assertIn("edited elsewhere", moved[0].read_text(encoding="utf-8"))
+        self.assertEqual(st["duplicates"][0]["quarantined_to"], str(moved[0]))
+        # the quarantine dir is under .weights, so it is never walked as memory
+        self.assertEqual([p.name for p in bi.iter_memory_files(self.mem)].count(
+            "project_kali.md"), 1)
+
+    def test_duplicate_raises_only_when_quarantine_write_fails(self):
+        from unittest import mock
+        flat = self.mem / "project_kali.md"
+        deep_dir = self.mem / "projects" / "kali"
+        deep_dir.mkdir(parents=True)
+        (deep_dir / "project_kali.md").write_text("different", encoding="utf-8")
+        with mock.patch.object(Path, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(bi.DuplicateMemoryStem) as cm:
+                bi.heal_duplicates(self.mem, dry_run=False)
+        self.assertIn("project_kali.md", str(cm.exception))
+        self.assertTrue(flat.exists())
+
+
+class TestExplicitUnsection(Base):
+    """`section: none` / `index: false` in the file withdraws it from the index."""
+
+    def _section_of(self, rel):
+        node = self.live_node(rel)
+        fm = bi.fm_top_level(bi.split_frontmatter(node["content"])[0])
+        return fm.get("section")
+
+    def test_section_none_clears_stored_section_and_digest_excludes(self):
+        from memsom.lifecycle import forget
+        from memsom.distill import digest
+        forget.migrate(self.conn)
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(self._section_of("reference_vault.md"), "References")
+        # the file withdraws itself; the curated MEMORY.md line still exists
+        (self.mem / "reference_vault.md").write_text(
+            "---\nname: Vault path\ndescription: d\ntype: reference\n"
+            "section: None\n---\n\npath\n", encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertIsNone(self._section_of("reference_vault.md"))
+        forget.recompute_forget(self.conn)
+        excluded = []
+        out = digest.render_digest(self.conn, excluded_out=excluded)
+        self.assertNotIn("reference_vault.md", out)
+        self.assertIn({"stem": "reference_vault", "reason": "unsectioned"},
+                      [{k: e[k] for k in ("stem", "reason")} for e in excluded])
+
+    def test_index_false_also_withdraws(self):
+        (self.mem / "reference_vault.md").write_text(
+            "---\nname: Vault path\ntype: reference\nindex: false\n---\n\npath\n",
+            encoding="utf-8")
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertIsNone(self._section_of("reference_vault.md"))
+
+
+class TestRetrievalIndexUpkeep(Base):
+    """The bridge keeps postings/docstats current: insert_node never indexes,
+    so without this every bridge-imported node was invisible to retrieve."""
+
+    def _indexed(self, nid):
+        n_post = self.conn.execute(
+            "SELECT COUNT(*) FROM postings WHERE node_id = ?", (nid,)).fetchone()[0]
+        n_doc = self.conn.execute(
+            "SELECT COUNT(*) FROM docstats WHERE node_id = ?", (nid,)).fetchone()[0]
+        return n_post, n_doc
+
+    def test_import_indexes_new_nodes(self):
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["indexed"], len(SAMPLE))
+        self.assertEqual(st["deindexed"], 0)
+        nid = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        n_post, n_doc = self._indexed(nid)
+        self.assertGreater(n_post, 0)
+        self.assertEqual(n_doc, 1)
+
+    def test_bm25_finds_a_term_from_the_file(self):
+        from memsom.retrieval import retrieve as rt
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        hits = rt.bm25(self.conn, "debug loop rule")
+        target = bi._live_node_for_path(self.conn, "feedback_debug.md")[0]
+        self.assertIn(target, [h[0] if isinstance(h, (tuple, list)) else h["id"]
+                               for h in hits])
+
+    def test_reimport_deindexes_superseded_and_indexes_new(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        old = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        (self.mem / "user_adhd.md").write_text(
+            SAMPLE["user_adhd.md"] + "\nzebraquark\n", encoding="utf-8")
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual((st["indexed"], st["deindexed"]), (1, 1))
+        new = bi._live_node_for_path(self.conn, "user_adhd.md")[0]
+        self.assertEqual(self._indexed(old), (0, 0))
+        self.assertGreater(self._indexed(new)[0], 0)
+        self.assertTrue(self.conn.execute(
+            "SELECT 1 FROM postings WHERE node_id = ? AND term LIKE 'zebraq%'",
+            (new,)).fetchone())
+
+    def test_sweep_deindexes_tombstoned_node(self):
+        bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        nid = bi._live_node_for_path(self.conn, "reference_vault.md")[0]
+        self.assertGreater(self._indexed(nid)[0], 0)
+        (self.mem / "reference_vault.md").unlink()
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["swept"], 1)
+        self.assertEqual(st["deindexed"], 1)
+        self.assertEqual(self._indexed(nid), (0, 0))
+
+    def test_literals_are_indexed_too(self):
+        st = bi.import_literals(self.conn, self.mem, dry_run=False)
+        self.assertEqual(st["indexed"], st["created"])
+        self.assertGreater(st["indexed"], 0)
+
+    def test_kill_switch_restores_write_only_behaviour(self):
+        os.environ["MEMDAG_BRIDGE_INDEX"] = "0"
+        try:
+            st = bi.import_memory_dir(self.conn, self.mem, dry_run=False)
+        finally:
+            os.environ.pop("MEMDAG_BRIDGE_INDEX", None)
+        self.assertEqual((st["indexed"], st["deindexed"]), (0, 0))
+        from memsom.storage import schema as memsom_schema
+        if memsom_schema.table_exists(self.conn, "postings"):
+            self.assertEqual(self.conn.execute(
+                "SELECT COUNT(*) FROM postings").fetchone()[0], 0)
+
+    def test_dry_run_indexes_nothing(self):
+        st = bi.import_memory_dir(self.conn, self.mem, dry_run=True)
+        self.assertEqual((st["indexed"], st["deindexed"]), (0, 0))

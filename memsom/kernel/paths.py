@@ -31,5 +31,25 @@ def default_memory_dir():
             "set MEMDAG_BRIDGE_MEMORY_DIR explicitly")
     # the real brain is the memory dir with the MOST .md files; project-scoped
     # memory dirs (created by running Claude in another cwd) hold ~1 file and must
-    # not be mistaken for it just because they sort first.
-    return max(candidates, key=lambda d: len(list(d.glob("*.md"))))
+    # not be mistaken for it just because they sort first. Counts the flat files
+    # AND the projects/ tree (projects/*.md, projects/<slug>/*.md) so a real
+    # brain whose memories mostly live under projects/ still outcounts a
+    # scratch dir -- mirrors bridge_import._all_memory_files's walk, but kept
+    # local (stdlib only, no upward import: kernel may not import bridge).
+    return max(candidates, key=lambda d: _memory_file_count(d))
+
+
+_INDEX_NAMES = frozenset({"MEMORY.md", "INDEX.md"})
+
+
+def _memory_file_count(memory_dir) -> int:
+    def _md(d):
+        return sum(1 for p in d.glob("*.md") if p.is_file() and p.name not in _INDEX_NAMES)
+    n = _md(memory_dir)
+    proj = memory_dir / "projects"
+    if proj.is_dir():
+        n += _md(proj)
+        for d in proj.iterdir():
+            if d.is_dir():
+                n += _md(d)
+    return n

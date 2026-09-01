@@ -24,7 +24,11 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 PKG = pathlib.Path(__file__).resolve().parents[1] / "memsom"
 
@@ -46,6 +50,10 @@ ALLOWED: dict[str, str] = {
         "SELF - HOME = Path(__file__).resolve().parent, the packaged-resource dir.",
     "bridge/wire_claude.py::default_skills_src":
         "SELF - Path(__file__).resolve().parents[2], locates the bundled claude/ dir.",
+    "bridge/wire_claude.py::resolve_exe":
+        "SELF - sys.executable's own dir and shutil.which('memsom'), resolved to "
+        "write an absolute hook path into settings.json. Interpreter/PATH "
+        "locations, never model- or file-supplied strings.",
     "bridge/obsidian.py::_walk_markdown":
         "ROOT + walked path. `vroot` is the trusted vault root. `ap.resolve()` is a "
         "path built by os.walk of that same tree, re-checked with _within to drop "

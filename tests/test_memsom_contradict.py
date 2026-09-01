@@ -26,6 +26,16 @@ from memsom.lifecycle import stale as memsom_stale
 from memsom.lifecycle import contradict as memsom_contradict
 
 
+# The anchored adjudicator hard-requires numpy (production returns None without
+# it — _make_anchored_adjudicator's guarded import). Tests that expect a BUILT
+# adjudicator can only run where numpy exists; on stdlib-only CI they skip.
+try:
+    import numpy  # noqa: F401
+    _HAVE_NUMPY = True
+except ImportError:
+    _HAVE_NUMPY = False
+
+
 def flag_when(pred, score=0.99):
     """Adjudicator stub: verdict when pred(new_text, cand_text) is true, else None."""
     return lambda new, cand: ("nli", "stub", score) if pred(new, cand) else None
@@ -184,6 +194,7 @@ class TestAdjudicatorResolution(Base):
                                         return_value=False):
             self.assertIsNone(memsom_contradict._default_adjudicator())
 
+    @unittest.skipUnless(_HAVE_NUMPY, "anchored adjudicator requires numpy")
     def test_built_when_opted_in_and_available(self):
         os.environ["MEMDAG_CONTRADICT_NLI"] = "1"
         from memsom.retrieval import embed as memsom_embed
@@ -210,6 +221,7 @@ class TestSentenceSplit(Base):
         self.assertNotIn("name: x", joined)         # frontmatter dropped
 
 
+@unittest.skipUnless(_HAVE_NUMPY, "anchored adjudicator requires numpy")
 class TestAnchoredAdjudicator(Base):
     """Exercise the anchor gate with controlled sentence embeddings: sentences are
     mapped to orthogonal topic vectors, so same-topic pairs clear the anchor and

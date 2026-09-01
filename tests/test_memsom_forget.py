@@ -217,10 +217,16 @@ class Adapter(unittest.TestCase):
         # naturally outpaces 2 hits (decay-only floor is ~0.006), so the hits
         # land well above the floor but below the un-decayed seed. The right
         # question is "did hits lift RS vs no hits", and they do (0.006 -> 0.28).
+        # The event ts must be now-relative: RS decays from the event to `now`,
+        # so a hardcoded date turns into a time-bomb — as the calendar advances
+        # the event drifts BEFORE first_seen and the "reinforced" node decays
+        # over a longer window than the control, inverting the assertion
+        # (bombed in CI 2026-08: 0.0014 vs control 0.0057).
         usage = Path(self.tmp.name) / "usage"
         usage.mkdir()
+        event_ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         (usage / "pc.jsonl").write_text(
-            '{"ts": "2026-06-23T00:00:00Z", "stem": "project_e", "hits": 2}\n',
+            '{"ts": "%s", "stem": "project_e", "hits": 2}\n' % event_ts,
             encoding="utf-8")
         old = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
         for stem in ("project_e", "project_e_ctrl"):

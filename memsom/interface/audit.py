@@ -11,8 +11,9 @@ Checks (severity):
   pending-import      INFO   on disk but not yet imported (run `memsom bridge-render`).
   dead-index-link     ERROR  MEMORY.md links a file that isn't on disk.
   frontmatter-missing ERROR  name / description / type missing.
-  bad-type            WARN   type not in user/feedback/project/reference.
+  bad-type            WARN   type not in user/personal/feedback/project/reference/fact.
   budget-breach       WARN   MEMORY.md over the 16384-byte cap.
+  needs-cluster       INFO   a new feedback file born unindexed (no why_own_line:).
   broken-wikilink     INFO   a [[link]] with no target (legal by design).
 
 Reuses the bridge importer's parsers, so the audit and the importer agree on what a
@@ -33,12 +34,15 @@ from pathlib import Path
 
 from memsom.kernel.frontmatter import parse_primary_index
 from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom.kernel.frontmatter import _LINK_IN_LINE
 from memsom.kernel.paths import default_memory_dir
+from memsom.bridge.bridge_import import (iter_memory_files as _memory_files,
+                                         PROJECTS_SUBDIR, unsectioned_by_frontmatter)
 from memsom.distill.digest import resolve_budget
 
 BUDGET = 16384  # fallback only; the live cap is resolve_budget(mem_dir)
 #                 (`memory_budget` in the store's canonical.json params)
-VALID_TYPES = {"user", "personal", "feedback", "project", "reference"}
+VALID_TYPES = {"user", "personal", "feedback", "project", "reference", "fact"}
 # IGNORECASE so detection mirrors the case-folding resolver (_norm); otherwise an
 # uppercase target like [[ADHD]] with no match would silently never be flagged.
 WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9_-]*)\]\]", re.IGNORECASE)
@@ -55,8 +59,9 @@ def _norm(s):
 
 
 def iter_memory_files(mem_dir):
-    """(file, stem, frontmatter dict, text) for each per-fact file (excl. the index)."""
-    for p in sorted(Path(mem_dir).glob("*.md")):
+    """(file, stem, frontmatter dict, text) for each per-fact file (excl. the
+    indexes) — flat files plus projects/*.md, via the bridge's own walker."""
+    for p in _memory_files(mem_dir):
         if p.name in SKIP_FILES:
             continue
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -99,21 +104,62 @@ def _store_tiers(mem_dir):
     return live, cold, True
 
 
+def _shed_reasons(mem_dir):
+    """{stem: reason} from the last render's `.weights/shed.json` (the receipt
+    bridge_render writes for every index exclusion), or {} when absent or
+    unreadable — the receipt may only ever SUPPRESS an orphan, so failing to
+    read it makes the audit noisier, never quieter."""
+    try:
+        data = json.loads((Path(mem_dir) / ".weights" / "shed.json")
+                          .read_text(encoding="utf-8"))
+        return {e.get("stem"): e.get("reason") for e in data.get("excluded") or []}
+    # FAILOPEN: allowed, an absent/unreadable receipt makes the audit noisier, never quieter.
+    except Exception:
+        return {}
+
+
 def run_audit(mem_dir):
     mem_dir = Path(mem_dir)
+    shed = _shed_reasons(mem_dir)
     files = list(iter_memory_files(mem_dir))
     memory_md = mem_dir / "MEMORY.md"
     md_text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
     hot = set(parse_primary_index(md_text))           # filenames linked in MEMORY.md
+    # project memories are indexed in projects/INDEX.md (generated next to
+    # MEMORY.md); a file listed there is indexed, not an orphan. Links there are
+    # relative to projects/ ("project_x.md" or "../project_x.md") -> basename.
+    # INDEX.md links are "x.md", "../x.md" or "<slug>/x.md"; a project group's
+    # headline is a "### [..](..)" line, not a bullet, so take EVERY link.
+    proj_index = mem_dir / PROJECTS_SUBDIR / "INDEX.md"
+    if proj_index.exists():
+        hot |= {Path(f).name for f in
+                _LINK_IN_LINE.findall(proj_index.read_text(encoding="utf-8"))}
     on_disk = {f for f, *_ in files}
     live, cold, db_ok = _store_tiers(mem_dir)
 
     findings = []
 
-    # orphan / pending-import
-    for fname, stem, _fm, _text in files:
+    # orphan / pending-import / withdrawn
+    for fname, stem, fm, _text in files:
         if fname in hot or stem in cold:
             continue
+        reason = shed.get(stem)
+        if reason == "unsectioned" or unsectioned_by_frontmatter(fm):
+            # withdrawn BY DESIGN (`section: none` / `index: false`, or the last
+            # render recorded it as unsectioned): out of the index on purpose,
+            # still in the store and searchable — informational, never an orphan.
+            findings.append(_F("withdrawn", "INFO", fname,
+                               "withdrawn from the index on purpose (section: none / "
+                               "index: false); still in the store"))
+            continue
+        if reason == "needs_cluster":
+            findings.append(_F("needs-cluster", "INFO", fname,
+                               "new feedback file born unindexed (no why_own_line:); "
+                               "merge it into a feedback_cluster_* body or run "
+                               "`memsom consolidate-feedback`"))
+            continue
+        if reason in ("budget", "lines", "projects", "section_budget"):
+            continue   # explained by the render receipt (shed.json), not an orphan
         if not db_ok:
             findings.append(_F("orphan-file", "WARN", fname,
                                "on disk, not in MEMORY.md; store DB unreachable to "
@@ -176,13 +222,29 @@ SEV_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 SEV_MARK = {"ERROR": "x ERROR", "WARN": "! WARN ", "INFO": ". INFO "}
 
 
+def section_counts(mem_dir, md_text=None) -> dict:
+    """Per-section {lines, bytes, budget} for the on-disk MEMORY.md (anti-creep
+    mechanism 4 — the same table bridge-render prints and shed.json carries)."""
+    from memsom.distill.digest import section_stats, resolve_section_budgets
+    from memsom.bridge.bridge_render import section_table
+    if md_text is None:
+        memory_md = Path(mem_dir) / "MEMORY.md"
+        md_text = memory_md.read_text(encoding="utf-8") if memory_md.exists() else ""
+    return section_table(section_stats(md_text), resolve_section_budgets(mem_dir))
+
+
 def print_report(findings, files, mem_dir, md_text):
     memory_md = Path(mem_dir) / "MEMORY.md"
     sz = memory_md.stat().st_size if memory_md.exists() else 0
     cap = resolve_budget(mem_dir)
     print(f"\n  memsom audit — {mem_dir}")
     print(f"  {len(files)} memories | MEMORY.md {sz}/{cap} bytes "
-          f"(headroom {cap - sz})\n")
+          f"(headroom {cap - sz})")
+    for sec, st in section_counts(mem_dir, md_text).items():
+        cap_s = f" (budget {st['budget']})" if st["budget"] is not None else ""
+        over = "  OVER" if st["budget"] is not None and st["bytes"] > st["budget"] else ""
+        print(f"    {sec}: {st['lines']} lines / {st['bytes']} bytes{cap_s}{over}")
+    print()
     if not findings:
         print("  clean — no structural issues.\n")
         return
@@ -213,6 +275,7 @@ def _cmd_audit(args):
             "memories": len(files),
             "memory_md_bytes": sz,
             "budget": resolve_budget(mem_dir),
+            "sections": section_counts(mem_dir, md_text),
             "findings": findings,
             "errors": sum(1 for f in findings if f["sev"] == "ERROR"),
         }, indent=2))

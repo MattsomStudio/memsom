@@ -23,7 +23,11 @@ import os
 import subprocess
 import sys
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 from memsom.childenv import (CREDENTIAL_ENV_NAMES, child_env, minimal_env)
 

@@ -83,6 +83,23 @@ jobs:
       - name: Gate 3 broker selfcheck
         run: python -m memsom.federation.broker --selfcheck
 
+      # Some test modules are pytest-style (fixtures/parametrize/xfail) and
+      # self-skip under the stdlib-only discover above — pytest is installed
+      # LAST so every earlier gate still runs in a stdlib-only interpreter.
+      # The module list is DERIVED (grep), so a new pytest-style file joins
+      # this step automatically instead of silently joining the skipped set.
+      - name: Pytest-style modules
+        shell: bash
+        run: |
+          python -m pip install --quiet pytest
+          files=$(grep -l "import pytest" tests/test_*.py)
+          if [ -z "$files" ]; then
+            echo "::error::grep found no pytest-style modules but this step exists — list derivation broke"
+            exit 1
+          fi
+          echo "$files"
+          python -W error::DeprecationWarning -m pytest -q $files
+
   # ---------------------------------------------------------------------
   # PLAN.md Sec6 Phase 11 ("bootstrap and three-OS CI"): the bootstrap
   # contract -- a friend-beta tester's actual first five minutes -- proven
@@ -255,3 +272,147 @@ jobs:
 
       - name: Scan full git history for author-identifying leaks
         run: python scripts/history_scan.py --all
+
+  # ---------------------------------------------------------------------
+  # Coverage MEASUREMENT (2026-09-01). Until this job existed the
+  # "well-tested" claim had a test:source file ratio behind it (0.72:1) and
+  # no number — a ratio is breadth, not coverage. This job produces the number,
+  # renders it in the run's job summary, attaches the html/xml report as an
+  # artifact, and holds a FLOOR on it.
+  #
+  # ubuntu ONLY, deliberately. The windows matrix leg already costs ~24 min
+  # (I/O-bound temp-SQLite churn, see `config` above) and tracing is pure
+  # overhead on top; the coverage NUMBER does not depend on the OS the way the
+  # suite's pass/fail does, so one 1x runner measures and the matrix gates.
+  # MEASURED on the dev box (Windows 11, CPython 3.12, same commands, 1260
+  # tests): discover pass under coverage 311 s vs plain 313 s and 378 s on two
+  # plain runs — the overhead is below the suite's own run-to-run variance
+  # (it is I/O-bound, not CPU-bound); pytest pass 7 s vs 3 s. Baseline on the
+  # dev box: 76.7 % combined line+branch (78.4 % lines, 71.7 % branches, 59
+  # files). On THIS runner (first green run, 2026-09-01): 75.9 % combined
+  # (77.5 % lines, 71.0 % branches) — lower because 19 Windows-only pytest
+  # cases skip on ubuntu. The floor tracks the runner's number, not the dev
+  # box's: 75.0. Wall time of this job on that run: 79 s.
+  #
+  # Both passes — the stdlib `unittest discover` run AND the pytest-style
+  # modules — feed ONE data file (`coverage run`, then `coverage run -a`), so
+  # the total is the suite's total, not one half of it. What is measured
+  # (source = memsom/ only, branch = true, tests/_weights/_build omitted) is
+  # configured in pyproject.toml [tool.coverage.*], NOT here, so a local
+  # `python -m coverage run -m unittest discover -s . -p "test_*.py"` measures
+  # the same thing.
+  #
+  # The floor is [tool.coverage.report] fail_under in pyproject.toml: the
+  # MEASURED baseline minus ~1 point (ratchet — may rise, re-baseline in the
+  # same commit; may never fall). `coverage report` exits 2 and prints
+  # "Coverage failure: total of X is less than fail-under=Y" — the measured
+  # number and the floor, by name. No continue-on-error anywhere in this job;
+  # the summary and artifact steps run on `!cancelled()` so a red floor still
+  # leaves the numbers where they can be read.
+  #
+  # Known undercount, stated rather than hidden: tests that drive the CLI
+  # through `subprocess` exercise code this in-process tracer does not see, so
+  # the number is a floor on what the suite executes, not a ceiling.
+  # ---------------------------------------------------------------------
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # coverage ONLY at this point — pytest is installed after the discover
+      # pass, same order as the `unittest` job and for the same reason: the
+      # pytest-style modules raise SkipTest when `import pytest` fails, and
+      # with pytest importable their xfail-marked cases run as plain unittest
+      # cases and FAIL (measured on the dev box, where pytest is installed:
+      # 2 failures in test_seam_s4_*). Order is load-bearing.
+      - name: Install coverage
+        run: python -m pip install --quiet coverage
+
+      - name: Suite under coverage (stdlib discover pass)
+        run: python -W error::DeprecationWarning -m coverage run -m unittest discover -s . -p "test_*.py"
+
+      # Same DERIVED module list as the `unittest` job's pytest step, appended
+      # (-a) to the same data file.
+      - name: Suite under coverage (pytest-style modules, appended)
+        shell: bash
+        run: |
+          python -m pip install --quiet pytest
+          files=$(grep -l "import pytest" tests/test_*.py)
+          if [ -z "$files" ]; then
+            echo "::error::grep found no pytest-style modules but this step exists — list derivation broke"
+            exit 1
+          fi
+          python -W error::DeprecationWarning -m coverage run -a -m pytest -q $files
+
+      # xml + html first so the artifact exists even when `report` trips the
+      # floor; `report` last because it is the step that fails.
+      - name: Coverage report (applies pyproject fail_under — the floor)
+        run: |
+          python -m coverage xml
+          python -m coverage html
+          python -m coverage report
+
+      - name: Write totals to the job summary
+        if: ${{ !cancelled() }}
+        shell: python
+        run: |
+          import os, re, sys, tomllib, xml.etree.ElementTree as ET
+          if not os.path.exists("coverage.xml"):
+              print("::error::coverage.xml missing — the suite did not get as far as producing a report")
+              sys.exit(1)
+          root = ET.parse("coverage.xml").getroot()
+          lines = float(root.get("line-rate")) * 100
+          branches = float(root.get("branch-rate")) * 100
+          # coverage.py's TOTAL with branch=true is (hit lines + hit branches)
+          # over (lines + branches) — THAT is the number fail_under applies to.
+          lv, lc = int(root.get("lines-valid")), int(root.get("lines-covered"))
+          bv, bc = int(root.get("branches-valid")), int(root.get("branches-covered"))
+          total = 100.0 * (lc + bc) / (lv + bv)
+          with open("pyproject.toml", "rb") as f:
+              floor = tomllib.load(f)["tool"]["coverage"]["report"]["fail_under"]
+          rows = []
+          for cls in root.iter("class"):
+              fn = cls.get("filename")
+              n = len(cls.findall("./lines/line"))
+              if n:
+                  rows.append((float(cls.get("line-rate")) * 100, n, fn))
+          rows.sort(key=lambda r: (r[0], -r[1]))
+          out = [
+              "## Coverage — memsom/ (line + branch, both test passes)",
+              "",
+              "| metric | value |",
+              "|---|---|",
+              f"| total (line+branch — what fail_under applies to) | **{total:.1f} %** |",
+              f"| lines | {lines:.1f} % ({lc}/{lv}) |",
+              f"| branches | {branches:.1f} % ({bc}/{bv}) |",
+              f"| floor (pyproject fail_under) | {floor} % |",
+              f"| verdict | {'GREEN' if total >= floor else 'RED — below floor'} |",
+              "",
+              f"Total `{total:.1f} %` vs floor `{floor} %` (files measured: {len(rows)}).",
+              "",
+              "### 10 lowest-covered production modules",
+              "",
+              "| lines % | statements | module |",
+              "|---:|---:|---|",
+          ]
+          out += [f"| {r[0]:.1f} | {r[1]} | `{r[2]}` |" for r in rows[:10]]
+          text = "\n".join(out) + "\n"
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write(text)
+
+      - name: Upload the html + xml report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-memsom
+          path: |
+            htmlcov/
+            coverage.xml
+          retention-days: 14
+          if-no-files-found: error

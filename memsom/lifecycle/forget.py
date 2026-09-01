@@ -280,15 +280,50 @@ def _stem_of(source_ref):
 # 13 compute params but are NOT part of the golden compute contract.  Kept out of
 # DEFAULTS: test_memsom_forget.TestParity asserts DEFAULTS == mem_weights.DEFAULTS
 # byte-for-byte, and the original knows nothing about the digest budget.
-PANEL_PARAM_DEFAULTS = {"memory_budget": 16384}
+PANEL_PARAM_DEFAULTS = {
+    "memory_budget": 16384,      # MEMORY.md byte cap
+    "memory_max_lines": 180,     # MEMORY.md line cap (the consumer reads ~200 lines)
+    # UserPromptSubmit retrieval hook (interface/prompt_hook.py):
+    "prompt_hook_mode": "inject",      # off | log | inject (log AND inject)
+    "prompt_hook_floor": 0.35,         # min BM25 coverage [0,1] for a hit to surface
+    "prompt_hook_deadline_ms": 800,    # hard wall for the whole hook-query
+    "prompt_hook_log_max_mb": 20,      # rotate hook_log.jsonl past this (keeps 3)
+    # Anti-creep (distill/digest.py + bridge_import.py). A NEW feedback_* file
+    # with no `why_own_line:` is imported with its section cleared (it belongs
+    # in a feedback_cluster_* body, not on its own pinned line) ...
+    "feedback_born_unindexed": True,
+    # ... and a section that renders past its byte budget sheds entries — pinned
+    # or not — newest first, never a feedback_cluster_* file.
+    "section_budgets": {"Feedback": 7168},
+}
+
+SECTION_BUDGET_MIN = 256   # a per-section cap below this cannot hold one line
+
+PROMPT_HOOK_MODES = ("off", "log", "inject")
 
 
 def _param_ok(key, v):
     """True if *v* is sane for *key*.  Only degenerate, compute-breaking values
     are rejected here (fall back to the key's default); richer bounds belong to
     the panel's write-side validation."""
+    if key == "prompt_hook_mode":
+        return isinstance(v, str) and v in PROMPT_HOOK_MODES
+    if key == "feedback_born_unindexed":
+        return isinstance(v, bool)
+    if key == "section_budgets":
+        return (isinstance(v, dict)
+                and all(isinstance(k, str) and k.strip()
+                        and isinstance(b, int) and not isinstance(b, bool)
+                        and b >= SECTION_BUDGET_MIN
+                        for k, b in v.items()))
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return False
+    if key == "prompt_hook_floor":
+        return 0 <= v <= 1
+    if key == "prompt_hook_deadline_ms":
+        return 50 <= v <= 30000
+    if key == "prompt_hook_log_max_mb":
+        return 1 <= v <= 1024
     if key == "decay_base":
         return 0 < v <= 1
     if key in ("rs_cap", "ss_cap", "rs_seed"):
@@ -297,6 +332,8 @@ def _param_ok(key, v):
         return 0 <= v <= 1
     if key == "memory_budget":
         return v >= 1024
+    if key == "memory_max_lines":
+        return v >= 20
     return v >= 0  # gains, floors, thresholds, grace_days, decay_k, mig_k
 
 

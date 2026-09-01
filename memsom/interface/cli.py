@@ -73,6 +73,7 @@ from memsom.lifecycle import verify_stale as memsom_verify_stale
 from memsom.bridge import bridge_render as memsom_bridge_render
 from memsom.bridge import claude as memsom_claude
 from memsom.bridge import wire_claude as memsom_wire_claude
+from memsom.interface import prompt_hook as memsom_prompt_hook
 from memsom.interface import audit as memsom_audit
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.lifecycle import contradict as memsom_contradict
@@ -82,6 +83,8 @@ from memsom.interface import features as memsom_features
 from memsom.interface import remote as memsom_remote
 from memsom.interface import serve as memsom_serve
 from memsom.interface import setup as memsom_setup
+from memsom.bridge import consolidate as memsom_consolidate
+from memsom.interface import index_stats as memsom_index_stats
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +506,7 @@ def cmd_add(args):
         with conn:
             nid = memsom.insert_node(conn, args.content, args.channel,
                                      label=label, source_ref=args.ref)
+        memsom_ingest._try_index(conn, nid)   # keep retrieve current (best-effort)
         node = memsom.get_node(conn, nid)
         print(f"[{nid}] {node['channel']:<13} integrity={memsom.NAME[node['label']]:<13}"
               f" {len(node['content']):>6} chars")
@@ -956,6 +960,7 @@ def main(argv=None):
     memsom_bridge_render.register(sub)
     memsom_claude.register(sub)
     memsom_wire_claude.register(sub)
+    memsom_prompt_hook.register(sub)
     memsom_audit.register(sub)
     _register_plugin_commands(sub)
     memsom_tombstone.register(sub)
@@ -964,6 +969,8 @@ def main(argv=None):
     memsom_setup.register(sub)
     memsom_serve.register(sub)
     memsom_remote.register(sub)
+    memsom_consolidate.register(sub)
+    memsom_index_stats.register(sub)
 
     args = p.parse_args(argv)
     # Propagate a handler's NONZERO return as the process exit code so soft failures

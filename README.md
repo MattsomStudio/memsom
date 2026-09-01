@@ -252,10 +252,45 @@ block in your `CLAUDE.md`. `bootstrap.py` wires all of it (step `[6/6]`); to (re
 it by hand:
 
 ```bash
-memsom wire-claude              # install skills + Stop hook + CLAUDE.md block
+memsom wire-claude              # install skills + Stop hook + prompt hook + CLAUDE.md block
 memsom wire-claude --print-only # show what it would do, write nothing
 memsom wire-claude --with-gate  # also wire the opt-in Gate #3 taint hooks
+memsom wire-claude --no-prompt-hook  # skip the UserPromptSubmit retrieval hook
 ```
+
+### Install as a Claude Code plugin
+
+The repo is also a Claude Code plugin + single-plugin marketplace
+(`.claude-plugin/plugin.json`, `hooks/hooks.json`, `.mcp.json`, skills from
+`claude/skills/`). The plugin registers the `memsom` MCP server, the Stop hook and
+the prompt hook, and ships the skills — it does NOT install the Python package, so
+`pip install memsom` comes first (the hooks call `memsom` and `memsom-mcp` by name
+on your PATH):
+
+```bash
+pip install memsom
+claude plugin marketplace add MattsomStudio/memsom
+claude plugin install memsom@memsom
+```
+
+Then run `memsom claude-sync` once for the managed `CLAUDE.md` block (the plugin
+format has no slot for it). `memsom wire-claude` remains the non-plugin route and
+wires the same hooks into `~/.claude/settings.json`; don't do both, or every hook
+fires twice.
+
+**PATH constraint (plugin route only).** `hooks/hooks.json` calls `memsom` in
+exec form by bare name, so it must be on the PATH of the process that *launched*
+Claude Code — a venv's `bin/` only is while that venv is activated, and a
+GUI-launched Claude never sees it, so the hooks fail silently. A plugin's files
+must stay machine-agnostic (`${CLAUDE_PLUGIN_ROOT}` points at the cached plugin
+copy, not at your Python environment, and `python -m` would just move the same
+assumption onto `python`), so the fix is on the install side: use `pipx install
+memsom` (or `pip install --user`) so the console script lands on a PATH dir, or
+symlink `<venv>/bin/memsom` into `~/.local/bin`. If memsom lives in a venv and you
+would rather not, use `memsom wire-claude` instead — it writes the **absolute**
+path of the running console script into `settings.json` (falling back to
+`"<python>" -m memsom.interface.cli`) and upgrades a stale bare `"memsom"` entry in
+place.
 
 How the loop works:
 
@@ -269,12 +304,89 @@ How the loop works:
 - **Instruct** — `memsom claude-sync` keeps a delimited, memsom-managed block in
   `~/.claude/CLAUDE.md` (the memory protocol) current. It only ever rewrites the
   block between its markers; everything else in your `CLAUDE.md` is yours.
+- **Surface** — a `UserPromptSubmit` hook (`memsom hook-prompt`) retrieves the top
+  3 memories for each prompt and, when they clear a relevance floor, adds them as
+  a compact `Relevant memories:` context block (<= ~600 bytes). It skips prompts
+  under 12 characters and slash commands, never cold-loads an embedding model, and
+  has a hard deadline (default 800 ms): past it, it prints nothing and the prompt
+  goes through untouched. It asks the running MCP server's warm loopback endpoint
+  first and falls back to in-process BM25 when the server is not up.
+  Tunables live in `<memory_dir>/.weights/canonical.json` → `params`:
+  `prompt_hook_mode` (`off` | `log` | `inject`, default `inject`),
+  `prompt_hook_floor` (0–1, default 0.35), `prompt_hook_deadline_ms`,
+  `prompt_hook_log_max_mb`. Both `log` and `inject` append every query, its top-3
+  scores and the inject decision to `<memory_dir>/.weights/hook_log.jsonl`
+  (permanent; size-rotated, 3 generations kept); `off` runs nothing and logs
+  nothing. `memsom hook-stats` summarises that log (inject rate, top surfaced
+  stems, a top-1 score histogram and the would-inject rate at every floor) so the
+  floor is tuned from data, not taste.
 
 Safety: `wire-claude` mirrors the MCP wiring contract — it backs up before writing,
 merges (never overwrites your other hooks), is idempotent, and **refuses to
 overwrite an existing same-named skill** without `--force`. Set
 `MEMDAG_DIGEST_TITLE` for the `MEMORY.md` H1 and `MEMDAG_BRIDGE_AUTHOR=0` on extra
 machines that should mirror without re-rendering.
+
+### Memory layout
+
+```
+~/.claude/projects/<project>/memory/
+├── MEMORY.md                              GENERATED always-loaded index
+├── <type>_<topic>.md                      every non-project memory, flat
+├── projects/
+│   ├── INDEX.md                           GENERATED project index
+│   ├── project_<x>.md                     a standalone project
+│   └── <slug>/
+│       ├── project_<slug>.md              the project's parent overview
+│       └── project_<slug>_<sub>.md        its subprojects (any number)
+└── .weights/canonical.json                runtime params (see below)
+```
+
+`project_*` memories never render into `MEMORY.md`; they render into
+`projects/INDEX.md` — one group per project (parent line, subprojects nested),
+each tagged Active / Parked / Closed from frontmatter `status:` (a subproject
+inherits its parent's; otherwise the forgetting tier decides). `MEMORY.md` carries
+a single pointer line to it. The rule for the agent: append to the existing
+parent/subproject file, never create a sibling of an existing project.
+`bootstrap` / `wire-claude` / the first `bridge-render` scaffold `projects/`, an
+empty `projects/INDEX.md`, and `canonical.json`.
+
+`MEMORY.md` must fit **two caps**, both user-tunable in `canonical.json` →
+`params` (panel defaults): `memory_budget` (bytes, default 16384) and
+`memory_max_lines` (lines, default 180 — the harness reads only the first ~200
+lines, so bytes alone were never enough). Over either, the lowest-RS non-pinned
+entries are shed first; `## Live state` and `fact_` entries last; pinned
+(`user_` / `feedback_` / `personal_`) never. `.weights/shed.json` records every
+drop and which cap forced it. A file with `section: none` is deliberately withdrawn.
+
+### Anti-creep (why the index cannot grow one line per lesson)
+
+Every new `feedback_*` file used to be born with its own pinned index line and
+nothing ever merged, so the Feedback section alone reached 141 lines. Four
+shipped defaults now make that structurally impossible:
+
+1. **Born unindexed** — a NEW `feedback_*` file with no `why_own_line:` field is
+   imported with its section cleared (shed reason `needs_cluster`); the lesson
+   belongs in the body of the matching `feedback_cluster_*` file. Files with a
+   curated `MEMORY.md` line, cluster files, and already-stored nodes are untouched.
+   Param `feedback_born_unindexed` (default `true`).
+2. **Per-section budget that pinning does not exempt** — `section_budgets`
+   (default `{"Feedback": 7168}` bytes): a section over its cap sheds newest first,
+   pinned or not (`why_own_line:` entries after plain ones, clusters never), reason
+   `section_budget` in `shed.json`. Runs before the global byte/line loop.
+3. **Merge proposer** — `memsom consolidate-feedback [--apply] [--min-age-days 14]`
+   proposes the nearest cluster (BM25 over the store) for every aged, indexed,
+   un-justified feedback file; `--apply` appends `- [[stem]] — description` under
+   `## Absorbed <date>` in the cluster and sets `section: none` on the file. Sibling
+   `memsom consolidate-projects [--apply]` folds closed/cold subprojects into the
+   parent overview's `## Threads` table (or `## Closed threads`) and withdraws them
+   with `index: false`. Both are dry-run by default and write
+   `.weights/consolidate_proposals.json`; nothing is ever deleted. Schedule the
+   dry-run weekly next to your sweep (Task Scheduler / cron / launchd:
+   `memsom consolidate-feedback`), review, then `--apply`.
+4. **Visible counts** — `bridge-render` prints `feedback: N lines / B bytes
+   (budget X)` every session end; `memsom index-stats` and `memsom audit` show
+   every section against its budget; `shed.json` carries the same table.
 
 > `/recall` ships too — it drives `memsom retrieve` (hybrid BM25 + local nomic
 > vectors) over the store, so it searches everything ingested, not just the loaded
@@ -385,7 +497,10 @@ Measured on the standard workload; source cited here.
 | `obsidian-watch` | memsom_obsidian    | Watch a vault and live-sync on change |
 | `bridge-render`  | memsom_bridge_render | Regenerate MEMORY.md from the store (the Stop-hook command; fail-safe) |
 | `claude-sync`    | memsom_claude      | Seed/refresh the memsom-managed memory block in CLAUDE.md |
-| `wire-claude`    | memsom_wire_claude | Install the Claude Code memory loop (skills + Stop hook + CLAUDE.md) |
+| `wire-claude`    | memsom_wire_claude | Install the Claude Code memory loop (skills + Stop hook + prompt hook + CLAUDE.md) |
+| `hook-prompt`    | prompt_hook        | UserPromptSubmit hook: top-3 memories above the floor as added context (off/log/inject) |
+| `hook-query`     | prompt_hook        | Fast retrieval for hooks: warm MCP endpoint, BM25 fallback, hard deadline (silent on timeout) |
+| `hook-stats`     | prompt_hook        | Summarise the prompt-hook log: inject rate, top stems, score histogram, floor sweep |
 | `session-log`    | memsom_session     | Recent session taint-floor transitions (opt-in Gate #3 audit) |
 | `capability-log` | memsom_capgate     | Recent capability-gate decisions (opt-in Gate #3 audit) |
 | `broker-init`    | memsom_broker      | Write default Gate #3 broker config + policy |
@@ -398,9 +513,11 @@ Measured on the standard workload; source cited here.
 | `stale-status`   | memsom_stale       | Show staleness of a node |
 | `unstale`        | memsom_stale       | Clear the stale flag on one node |
 | `verify-stale`   | memsom_verify_stale| Flag state-bearing memory notes whose verification age has gone stale |
-| `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only) |
-| `dashboard`      | memsom_dashboard   | Build + open the memory telemetry dashboard (HTML) |
-| `panel`          | memsom_panel       | Live tuning + telemetry panel: loopback-only web UI over runtime params (canonical.json), JSON/env-file knobs, scheduled-task cadences, and system telemetry — bounds-validated writes, JSONL audit log (`--profile <host-profile.json>`) |
+| `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only; per-section counts vs budgets) |
+| `index-stats`    | memsom_index_stats | Per-section line/byte counts of MEMORY.md against `section_budgets` + last shed receipt |
+| `consolidate-feedback` | memsom_consolidate | Propose (`--apply`: perform) merging aged feedback files into `feedback_cluster_*` bodies (BM25; dry-run default) |
+| `consolidate-projects` | memsom_consolidate | Propose (`--apply`: perform) folding closed/cold subprojects into the parent overview, `index: false` |
+| `panel`          | memsom_panel       | Live tuning + telemetry panel (external `memsom_panel` plugin package): loopback-only web UI over runtime params (canonical.json), JSON/env-file knobs, scheduled-task cadences, and system telemetry — bounds-validated writes, JSONL audit log (`--profile <host-profile.json>`) |
 | `tombstone`      | memsom_tombstone   | Sanctioned delete path: revoke a memory's node + remove its file |
 | `tombstone-list` | memsom_tombstone   | List tombstoned memory nodes |
 | `fact-set`       | memsom_facts       | Update a fact file's value + last-verified (the file is the store-of-record) |

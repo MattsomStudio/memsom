@@ -72,7 +72,11 @@ import ast
 import pathlib
 import unittest
 
-import pytest
+try:
+    import pytest
+except ImportError:  # stdlib-only unittest discover (CI runs these under pytest)
+    import unittest
+    raise unittest.SkipTest("pytest-style module; run under the CI pytest step")
 
 #: The namespace fence. Anything asking a question about this prefix in SQL is
 #: re-deriving a rule that `digest.py` gets right and the other sites do not.

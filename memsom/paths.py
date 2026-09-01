@@ -163,10 +163,22 @@ def safe_join(root, *parts: str, allow_absolute: bool = False,
         if is_abs:
             if scrubbed:
                 _reject("an absolute component may only appear first")
-            key = os.path.normcase(os.path.normpath(comp))
+            norm = os.path.normpath(comp)
+            key = os.path.normcase(norm)
             if not (key == root_key or key.startswith(root_key + os.sep)):
-                _reject(f"absolute path is outside the root: {comp!r}")
-            comp = os.path.relpath(os.path.normpath(comp), root_s)
+                # A different-but-equivalent SPELLING of an inside-the-root path
+                # (Windows 8.3 short names like RUNNER~1, macOS /var ->
+                # /private/var) fails the lexical compare because only the root
+                # was canonicalized. Canonicalize the candidate and re-check
+                # before refusing; still fail-closed if it truly lies outside.
+                # comp was scrubbed above (no UNC/device), so realpath cannot
+                # touch a network namespace, and the post-join resolve re-check
+                # below still guards the symlink case.
+                norm = os.path.realpath(norm)
+                key = os.path.normcase(norm)
+                if not (key == root_key or key.startswith(root_key + os.sep)):
+                    _reject(f"absolute path is outside the root: {comp!r}")
+            comp = os.path.relpath(norm, root_s)
             if comp == ".":
                 comp = ""
         if comp:

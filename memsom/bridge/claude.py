@@ -60,19 +60,36 @@ Link related memories with [[their-name]].>
 
 **MEMORY.md is the always-loaded index, and it is GENERATED** from the store on
 session end by the `memsom bridge-render` Stop hook. Don't rewrite its hooks or
-content by hand — edit the per-fact files and let it regenerate. Keep it under ~16 KB.
+content by hand — edit the per-fact files and let it regenerate. It must fit BOTH
+caps in `memory/.weights/canonical.json` → `params`: `memory_budget` bytes and
+`memory_max_lines` lines (read them; never assume a number).
 
-**But DO add the index line when you create a NEW memory** — one
+**Layout (protocol v2).** Every non-project memory is a flat file in the memory
+dir. Project memory lives in `memory/projects/<slug>/project_<slug>.md` (parent
+overview) + `project_<slug>_<sub>.md` subproject files; a standalone project may
+sit at `memory/projects/project_<x>.md`. Append to the existing parent/subproject
+file — never create a sibling of an existing project. `projects/INDEX.md` is
+GENERATED (project_ files get no MEMORY.md line); `section: none` withdraws a file.
+
+**But DO add the index line when you create a NEW non-project memory** — one
 `- [Title](file.md) — hook` bullet under the right `##` section. This is the one
 hand-edit that IS required: the importer reads a memory's `section` from the
 MEMORY.md line (falling back to the file's own `section:` frontmatter), and the
 digest only renders memories that have one. A new file with neither is written to
 disk, stays fully searchable — and never loads into context. So: add the line, or
 put `section:` / `index_title:` / `index_hook:` in the file's frontmatter. Do one.
+**Exception — feedback:** a new lesson goes INTO the matching `feedback_cluster_*`
+file's body; a standalone indexed `feedback_*` file needs a `why_own_line:` field.
 
-**If MEMORY.md is near the 16 KB cap, reclaim BEFORE adding to it.** Over budget,
-the digest sheds the lowest-RS entries to fit; that is a transient, recoverable
-drop, but it means your write can silently cost an unrelated memory its slot.
+**If MEMORY.md is near either cap, reclaim BEFORE adding to it.** Over a cap,
+the digest sheds the lowest-RS entries to fit (live-state and fact entries last);
+that is a transient, recoverable drop, but it means your write can silently cost
+an unrelated memory its slot.
+
+**Un-loaded memory is still reachable**: `memsom retrieve "<query>"` (or the MCP
+`retrieve` tool) searches every live memory, not just MEMORY.md; the prompt hook
+surfaces the top hits automatically. `/recall`-style transcript search is a
+different corpus (past sessions), not this store.
 
 To capture a session's worth of facts, use **`/saveall`**. Before saving, check
 whether a file already covers the fact and update it instead of duplicating; delete

@@ -93,3 +93,49 @@ only-include = [
     "memsom",
     "claude",
 ]
+
+# ---------------------------------------------------------------------------
+# Coverage (coverage.py). The `coverage` job in .github/workflows/tests.yml
+# runs the stdlib `unittest discover` pass and the pytest-style pass into ONE
+# data file (`coverage run` then `coverage run -a`) and applies `fail_under`
+# with `coverage report`. Everything that decides WHAT is measured lives here,
+# not on the CI command line, so a local
+#     python -m coverage run -m unittest discover -s . -p "test_*.py"
+#     python -m coverage report
+# measures exactly what CI measures.
+#
+# Only the production package counts. tests/, _weights/ (vendored llama.cpp),
+# _build/, bench/, demo/, scripts/ are outside `source` by construction and
+# omitted again explicitly so a stray import path cannot pull them in.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["memsom"]
+branch = true
+omit = [
+    "tests/*",
+    "_weights/*",
+    "_build/*",
+    "_pkgtest_venv/*",
+    "bench/*",
+    "demo/*",
+    "scripts/*",
+]
+
+[tool.coverage.report]
+precision = 1
+skip_empty = true
+# FLOOR, not a target. Ratchet semantics, same argument as the panel repo's
+# test-count floor and arch/dup ratchets: the number may RISE (re-baseline in
+# the same commit) and may never FALL. Set at the MEASURED baseline minus ~1
+# point (see the coverage job's comment in tests.yml for the measurement —
+# the baseline is the UBUNTU runner's 75.9 %, not the dev box's 76.7 %, because
+# the runner is where the floor applies) so CI is green today and cannot
+# silently regress. `coverage report` exits 2 and
+# prints "Coverage failure: total of X is less than fail-under=Y" — by name.
+fail_under = 75.0
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.coverage.xml]
+output = "coverage.xml"

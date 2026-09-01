@@ -112,5 +112,46 @@ class TestShippedTemplateInSync(unittest.TestCase):
         self.assertEqual(shipped, mc.render_template())
 
 
+class TestManagedBlockProtocolV2(unittest.TestCase):
+    """The block every install receives must carry the layout + both caps."""
+
+    def test_block_documents_hierarchical_projects_layout(self):
+        b = mc.render_block()
+        for needle in (
+            "memory/projects/<slug>/project_<slug>.md",
+            "project_<slug>_<sub>.md",
+            "memory/projects/project_<x>.md",          # standalone allowed
+            "never create a sibling of an existing project",
+            "`projects/INDEX.md` is\nGENERATED",
+            "`section: none` withdraws a file",
+        ):
+            self.assertIn(needle, b, needle)
+
+    def test_block_names_both_caps_and_no_hardcoded_size(self):
+        b = mc.render_block()
+        self.assertIn("`memory_budget`", b)
+        self.assertIn("`memory_max_lines`", b)
+        self.assertNotIn("16 KB", b)
+        self.assertNotIn("16,384", b)
+
+    def test_layout_paragraph_is_at_most_six_lines(self):
+        b = mc.render_block()
+        para = b.split("**Layout (protocol v2).**", 1)[1].split("\n\n", 1)[0]
+        self.assertLessEqual(len(("**Layout (protocol v2).**" + para).splitlines()), 6)
+
+    def test_existing_install_with_old_block_is_upgraded(self):
+        # an install carrying the pre-v2 block text gets the new text on sync
+        old = mc.render_block().replace("**Layout (protocol v2).**", "**Layout (old).**")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "CLAUDE.md"
+            p.write_text(f"# mine\n\n{old}\n\nmine too\n", encoding="utf-8")
+            res = mc.sync(path=p)
+            self.assertTrue(res["changed"])
+            text = p.read_text(encoding="utf-8")
+            self.assertIn("**Layout (protocol v2).**", text)
+            self.assertTrue(text.startswith("# mine\n"))
+            self.assertTrue(text.rstrip().endswith("mine too"))
+
+
 if __name__ == "__main__":
     unittest.main()

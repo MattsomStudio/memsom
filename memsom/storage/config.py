@@ -184,8 +184,9 @@ def wire_claude_code(abs_exe, db_path, print_only=False, home=None):
             if r.returncode == 0:
                 return {"action": "claude-cli", "path": "(claude mcp add --scope user)"}
             # CLI failed -> fall back to hand-editing the JSON config
+        # FAILOPEN: allowed, a failed subprocess (missing CLI, timeout) takes the same fallback.
         except Exception:
-            pass  # subprocess itself failed (missing CLI, timeout) — same fallback
+            pass
     return wire_json(client_config_path("claude-code", home=home), abs_exe, db_path)
 
 

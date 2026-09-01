@@ -10,7 +10,7 @@ keeping for future sessions, write each piece to the memory store as its own fil
 and report back. The goal: nothing valuable is lost to a future `/clear`, and
 nothing ephemeral pollutes long-term memory.
 
-The flat per-fact files are the **live input**. memsom re-imports them and
+The per-fact files are the **live input**. memsom re-imports them and
 regenerates `MEMORY.md` (the always-loaded index) on session end via the
 `memsom bridge-render` Stop hook — so you never hand-edit `MEMORY.md`; you write
 the per-fact files and let it regenerate.
@@ -19,8 +19,22 @@ the per-fact files and let it regenerate.
 
 The memory directory is `~/.claude/projects/<project>/memory/` (the `<project>`
 segment is machine-specific; it's the dir that holds `MEMORY.md` plus the per-fact
-`*.md` files). If `$MEMDAG_BRIDGE_MEMORY_DIR` is set, use that. Each memory is a
-**flat file in this directory** — never create a `memory/` subdirectory.
+`*.md` files). If `$MEMDAG_BRIDGE_MEMORY_DIR` is set, use that.
+
+Layout — **flat, with one exception**:
+
+```
+memory/<type>_<topic>.md                         every non-project memory (flat)
+memory/projects/<slug>/project_<slug>.md         a project's parent overview
+memory/projects/<slug>/project_<slug>_<sub>.md   its subprojects (any number)
+memory/projects/project_<x>.md                   a standalone project (no subprojects)
+memory/projects/INDEX.md                         GENERATED — never write it
+```
+
+Project rule: **append to or update the existing parent/subproject file when one
+exists; create a new subproject file only for a genuinely new thread; never create
+a sibling of an existing project at the top level.** Filenames must be unique
+across all levels. Create no other subdirectory.
 
 Read the current `MEMORY.md` first so you don't duplicate something already saved.
 
@@ -109,9 +123,21 @@ run it yourself to see the result immediately:
 memsom bridge-render
 ```
 
-Keep the rendered index lean — the budget is **16,384 bytes** (it loads in full
-every session). The forgetting layer drops unused `project_`/`reference_` lines
-automatically; `user_`/`feedback_`/`personal_` are pinned and never auto-dropped.
+Keep the rendered index lean — it must fit **both** `memory_budget` bytes and
+`memory_max_lines` lines (`memory/.weights/canonical.json` → `params`; defaults
+16384 / 180 — read the file, don't assume). `project_` files never render into
+MEMORY.md; they render into the generated `projects/INDEX.md` (one group per
+project, subprojects nested, tagged Active / Parked / Closed from `status:`).
+The forgetting layer drops unused `reference_` lines automatically; `user_` /
+`feedback_` / `personal_` are pinned and never auto-dropped; `## Live state` and
+`fact_` entries are shed last. A file with `section: none` is deliberately out.
+
+**Feedback is the exception to "one file, one line".** A new lesson goes INTO the
+body of the matching `feedback_cluster_*` file (one bullet: `- [[stem]] — rule`,
+or just the rule). A brand-new standalone `feedback_*` file is imported
+*unindexed* (shed reason `needs_cluster`) unless its frontmatter carries
+`why_own_line: <reason>`; the Feedback section also has its own byte budget
+(`section_budgets` in the same params file) that pinning does not exempt.
 
 ## Step 5 — Report back
 
