@@ -4,6 +4,8 @@ Run:  python -m unittest discover -s . -p test_memsom_bridge_render.py
 """
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -186,6 +188,62 @@ class TestFirstRunScaffold(Base):
         br.bridge_render(self.conn, self.mem)
         data = json.loads((w / "canonical.json").read_text(encoding="utf-8"))
         self.assertEqual(data["params"], {"memory_budget": 4096})
+
+
+# R1 regression: importing bridge_render must, as a side effect, register the
+# "resolve_fact_refs" kernel.events subscriber that digest.render_digest relies
+# on -- so a direct library caller of digest.write_live (never going through
+# cli.py, which imports memsom.bridge.facts itself for CLI-command reasons)
+# still gets [[fact_*]] refs resolved. Runs in a SUBPROCESS: the in-process
+# `import ... as br` earlier in this module would already have pulled in
+# memsom.bridge.facts via br's own import, making an in-process check pass
+# regardless of whether bridge_render.py itself imports facts.
+_SUBPROCESS_SCRIPT = """
+import os, sys
+import memsom
+from memsom.bridge import bridge_import as bi
+from memsom.bridge import bridge_render as br  # noqa: F401 -- side effect under test
+from memsom.distill import digest
+
+assert "memsom.interface.cli" not in sys.modules
+
+mem = os.environ["_TEST_MEM_DIR"]
+conn = memsom.get_connection()
+bi.migrate(conn)
+bi.import_memory_dir(conn, mem, dry_run=False)
+digest.write_live(conn, mem)
+sys.stdout.write(open(os.path.join(mem, "MEMORY.md"), encoding="utf-8").read())
+"""
+
+
+class TestFactResolutionImportSideEffect(unittest.TestCase):
+    def test_write_live_resolves_facts_without_cli_import(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            mem = root / "memory"
+            mem.mkdir()
+            (mem / "fact_x.md").write_text(
+                "---\nname: fact-x\ndescription: box RAM\ntype: fact\n"
+                "value: 42\nunit: GB\nlast-verified: 2026-09-01\n"
+                "section: Facts\n---\n\nmeasured\n", encoding="utf-8")
+            (mem / "user_a.md").write_text(
+                "---\nname: User A\ndescription: has [[fact_x]] of RAM\ntype: user\n"
+                "section: About the User\n---\nbody\n", encoding="utf-8")
+
+            env = dict(os.environ)
+            env["MEMDAG_HOME"] = str(root)
+            env["MEMDAG_DB"] = str(root / "t.db")
+            env["MEMDAG_EMBED_BACKEND"] = "bm25"
+            env["CLAUDE_MD_PATH"] = str(root / "CLAUDE.md")
+            env["_TEST_MEM_DIR"] = str(mem)
+
+            result = subprocess.run(
+                [sys.executable, "-c", _SUBPROCESS_SCRIPT],
+                env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = result.stdout
+            self.assertNotIn("[[fact_", out)
+            self.assertIn("42 GB", out)
 
 
 if __name__ == "__main__":

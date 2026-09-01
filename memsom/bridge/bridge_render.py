@@ -35,6 +35,7 @@ from pathlib import Path
 
 import memsom
 from memsom.bridge import bridge_import as bi
+from memsom.bridge import facts as _facts  # noqa: F401 -- import side effect: registers the "resolve_fact_refs" kernel.events subscriber that digest.render_digest/render_projects_index rely on
 from memsom.distill import digest as digest
 from memsom.lifecycle import forget as forget
 from memsom import tuning as memsom_tuning
