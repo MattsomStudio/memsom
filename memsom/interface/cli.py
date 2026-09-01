@@ -78,7 +78,7 @@ from memsom.interface import dashboard as memsom_dashboard
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.integrity import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
-from memsom.lifecycle import consolidate as memsom_consolidate
+from memsom.bridge import consolidate as memsom_consolidate
 from memsom.interface import index_stats as memsom_index_stats
 
 

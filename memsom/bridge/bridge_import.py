@@ -295,37 +295,11 @@ def memory_subdir(memory_dir, path) -> str | None:
     return rel.as_posix() if rel.parts else None
 
 
-# --- frontmatter parsing (light, stdlib) -------------------------------------
-
-def split_frontmatter(text: str):
-    """Return (fm_lines, body, had_fm).
-
-    fm_lines is the raw list of lines between the opening and closing '---'
-    fences (exclusive).  If there is no frontmatter, returns ([], text, False).
-    """
-    if not text.startswith("---"):
-        return [], text, False
-    lines = text.split("\n")
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            return lines[1:i], "\n".join(lines[i + 1:]), True
-    return [], text, False  # unterminated fence -> treat as no frontmatter
-
-
-def fm_top_level(fm_lines) -> dict:
-    """Parse top-level (non-indented) `key: value` pairs from frontmatter lines.
-
-    Nested blocks (e.g. an indented `metadata:` child) are ignored — we only
-    need the flat keys (type, salience, pin, name, description).
-    """
-    out = {}
-    for ln in fm_lines:
-        if not ln or ln[0] in " \t#":  # skip indented children + comments
-            continue
-        m = re.match(r"^([A-Za-z0-9_-]+):\s?(.*)$", ln)
-        if m:
-            out[m.group(1)] = m.group(2).strip()
-    return out
+# --- frontmatter parsing — moved DOWN to the leaf memsom/frontmatter.py so
+# lower layers (retrieval.warm) can parse frontmatter without reaching up into
+# the bridge. Re-exported here: every existing `bi.split_frontmatter` /
+# `bi.fm_top_level` caller keeps working unchanged.
+from memsom.frontmatter import split_frontmatter, fm_top_level  # noqa: E402,F401
 
 
 def unsectioned_by_frontmatter(fm: dict) -> bool:

@@ -77,9 +77,9 @@ def _stem_of(source_ref):
 def _hook_line(content: str) -> str:
     """A one-line hook for a hit: the curated index hook, else the
     frontmatter description, else the first prose line."""
-    from memsom.bridge import bridge_import as bi
-    fm_lines, _body, _had = bi.split_frontmatter(content or "")
-    fm = bi.fm_top_level(fm_lines)
+    from memsom.frontmatter import split_frontmatter, fm_top_level
+    fm_lines, _body, _had = split_frontmatter(content or "")
+    fm = fm_top_level(fm_lines)
     for key in ("index_hook", "description"):
         v = (fm.get(key) or "").strip().strip('"').strip("'")
         if v:

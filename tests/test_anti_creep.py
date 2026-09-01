@@ -21,7 +21,7 @@ from memsom.bridge import wire_claude as wc
 from memsom.distill import digest
 from memsom.interface import audit as memsom_audit
 from memsom.interface import index_stats
-from memsom.lifecycle import consolidate
+from memsom.bridge import consolidate
 from memsom.lifecycle import forget
 
 # Generic fixtures — no author-identifying content (the scrub gate scans tests).
