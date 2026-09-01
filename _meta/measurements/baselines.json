@@ -113,6 +113,6 @@
     "note": "MEASURED in 00-chat-findings.md A4: 26 modules issue INSERT/UPDATE/DELETE, 11 use BEGIN IMMEDIATE -- this script is the walk that was missing for the rest, per Phase 6's writer-census item.",
     "source": "python scripts/writer_census.py",
     "target": 0,
-    "value": 7
+    "value": 6
   }
 }
