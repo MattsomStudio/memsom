@@ -49,3 +49,9 @@ mcp-bge.bat
 # local tooling
 .serena/
 AI_DIGEST.md
+
+# coverage output (tests.yml `coverage` job; local `coverage run`)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
