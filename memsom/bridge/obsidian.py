@@ -720,11 +720,12 @@ def export_note(conn, vault, *, node_id=None, query=None, folder="memsom",
     # no obsidian_path yet -- a node that already came FROM the vault keeps
     # its original identity; sync_vault owns that column's import meaning.
     if node_id is not None and memsom_schema.column_exists(conn, "nodes", "obsidian_path"):
-        existing = conn.execute(
-            "SELECT obsidian_path FROM nodes WHERE id = ?", (node_id,)).fetchone()
-        if existing and not existing[0]:
-            rel = out_path.resolve().relative_to(vault).as_posix()
-            with conn:
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT obsidian_path FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if existing and not existing[0]:
+                rel = out_path.resolve().relative_to(vault).as_posix()
                 conn.execute(
                     "UPDATE nodes SET obsidian_path = ?, obsidian_mtime = ? WHERE id = ?",
                     (rel, out_path.stat().st_mtime_ns, node_id))

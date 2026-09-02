@@ -219,6 +219,33 @@ jobs:
       - name: One write owner for nodes/edges outside the write path
         run: python scripts/gate_writeowner.py --check
 
+      - name: No env reads outside tuning.py
+        run: python scripts/env_ratchet.py --check
+
+      - name: Every broad except is adjudicated
+        run: python scripts/failopen_annotations.py --check
+
+      - name: RMW writers are guarded or adjudicated
+        run: python scripts/writer_census.py --check
+
+      - name: Effects boxed -- sqlite3.connect sites
+        run: python scripts/effects_ratchet.py --check
+
+      - name: Effects boxed -- subprocess connect sites
+        run: python scripts/effects_ratchet.py --connect --check
+
+      - name: Effects boxed -- spawns without timeout
+        run: python scripts/effects_ratchet.py --timeouts --check
+
+      - name: No upward imports
+        run: python scripts/upward_imports.py --check
+
+      - name: Baselines only improve or hold
+        run: python scripts/clean_baselines.py --check
+
+      - name: No mutual subpackage import pairs
+        run: python scripts/mutual_pairs.py | grep -q 'TOTAL PAIRS 0'
+
   # ---------------------------------------------------------------------
   # PLAN.md Sec6 Phase 11's perf requirement: "Windows full-suite wall time
   # <= 3x Linux, or a written residual with a number in it." A single-OS

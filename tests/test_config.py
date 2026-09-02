@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from memsom.storage import config as memsom_config
+from memsom.interface import config as memsom_config
 
 
 class TestPaths(unittest.TestCase):
@@ -170,7 +170,7 @@ class TestEntryPointExitCodes(unittest.TestCase):
 
     def test_standalone_main_real_run_exits_1(self):
         # CFG-MAIN-EXITDROP-1: direct `python memsom_config.py` must not drop the code.
-        r = self._run([sys.executable, "-m", "memsom.storage.config", "--client", "codex",
+        r = self._run([sys.executable, "-m", "memsom.interface.config", "--client", "codex",
                        "--exe", APOS_EXE, "--db", self.db])
         self.assertEqual(r.returncode, 1, r.stderr)
 

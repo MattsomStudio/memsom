@@ -324,7 +324,8 @@ def _session_count():
     failure against a file that IS there comes back as `{"count": None,
     "reason": ...}` so the 'telemetry' feature probe can report 'degraded'
     instead of silently losing the signal."""
-    sdb = Path.home() / ".claude" / "episodic" / "sessions.db"
+    override = memsom_tuning.resolve("telemetry.episodic_db")
+    sdb = Path(override) if override else Path.home() / ".claude" / "episodic" / "sessions.db"
     try:
         conn = memsom_db.get_connection(path=sdb, read_only=True)
     except FileNotFoundError:

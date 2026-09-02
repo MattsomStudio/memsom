@@ -42,6 +42,10 @@ INDEX = """# Memory
 - [Widget](project_widget.md) — status
 """
 
+# G-3: the wikilink-graph-edge fixture (ported from the deleted
+# test_memsom_dashboard.py::test_wikilink_becomes_graph_link).
+LINKED_PROJECT = "---\nname: Widget\ndescription: status\ntype: project\n---\nsee [[user_editor]]\n"
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -60,6 +64,11 @@ class Base(unittest.TestCase):
         self.mem = self.root / "memory"
         self.mem.mkdir()
         os.environ["MEMDAG_BRIDGE_MEMORY_DIR"] = str(self.mem)
+        # G-4: build_telemetry() otherwise reads the operator's LIVE
+        # ~/.claude/episodic/sessions.db and globs ~/.claude/consolidation --
+        # pin both away from this machine's real brain for the whole suite.
+        os.environ["MEMSOM_CONSOLIDATION_DIR"] = str(self.root / "consolidation")
+        os.environ["MEMSOM_EPISODIC_DB"] = str(self.root / "no_sessions.db")
         for name, text in MEMORY_FILES.items():
             (self.mem / name).write_text(text, encoding="utf-8")
         (self.mem / "MEMORY.md").write_text(INDEX, encoding="utf-8")
@@ -81,7 +90,8 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         for key in ("MEMDAG_HOME", "MEMDAG_DB", "MEMDAG_EMBED_BACKEND",
-                    "CLAUDE_MD_PATH", "MEMDAG_BRIDGE_MEMORY_DIR"):
+                    "CLAUDE_MD_PATH", "MEMDAG_BRIDGE_MEMORY_DIR",
+                    "MEMSOM_CONSOLIDATION_DIR", "MEMSOM_EPISODIC_DB"):
             os.environ.pop(key, None)
         self.tmp.cleanup()
 
@@ -97,6 +107,10 @@ class TestBuildTelemetry(Base):
         from memsom.interface import telemetry
         data = telemetry.build_telemetry(memory_dir=self.mem, conn=self.conn)
         self.assertEqual(set(data.keys()), FROZEN_TELEMETRY_KEYS)
+        # G-4: pinned away from the operator's real ~/.claude by setUp -- this
+        # is the fixture that goes RED on a dev box if that pin is removed.
+        self.assertIsNone(data["sessions"])
+        self.assertIsNone(data["last_consolidation"])
 
     def test_totals_count_matches_memory_dir_only(self):
         from memsom.interface import telemetry
@@ -113,6 +127,15 @@ class TestBuildTelemetry(Base):
         from memsom.interface import telemetry
         data = telemetry.build_telemetry()
         self.assertEqual(data["totals"]["total"], 2)
+
+
+class TestGraph(Base):
+    def test_wikilink_becomes_graph_link(self):
+        from memsom.interface import telemetry
+        (self.mem / "project_widget.md").write_text(LINKED_PROJECT, encoding="utf-8")
+        self.assertTrue(br.bridge_render(self.conn, self.mem)["ok"])
+        data = telemetry.build_telemetry(memory_dir=self.mem, conn=self.conn)
+        self.assertIn("link", {l["kind"] for l in data["graph"]["links"]})
 
 
 class TestLoadWeights(Base):
@@ -133,6 +156,15 @@ class TestLoadWeights(Base):
         from memsom.interface import telemetry
         rows = telemetry.load_weights()
         self.assertEqual(len(rows), 2)
+
+    def test_body_pin_line_does_not_mark_pinned(self):
+        from memsom.interface import telemetry
+        (self.mem / "project_pinbody.md").write_text(
+            "---\nname: P\ndescription: d\ntype: project\n---\n"
+            "notes:\npin: yes please\n", encoding="utf-8")
+        self.assertTrue(br.bridge_render(self.conn, self.mem)["ok"])
+        rows = {r["stem"]: r for r in telemetry.load_weights(conn=self.conn)}
+        self.assertEqual(rows["project_pinbody"]["pinned"], 0)
 
 
 class TestDefaultMemoryDir(Base):
@@ -203,6 +235,39 @@ class TestTelemetryFeature(Base):
             raise RuntimeError("synthetic failure")
         status = memsom_features._safe("telemetry", _boom)
         self.assertEqual(status["state"], "error")
+
+
+class TestMissingDB(unittest.TestCase):
+    def test_load_weights_raises_when_db_absent(self):
+        from memsom.interface import telemetry
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["MEMDAG_HOME"] = d
+            os.environ["MEMDAG_DB"] = str(Path(d) / "nope.db")
+            try:
+                with self.assertRaises(FileNotFoundError):
+                    telemetry.load_weights()
+            finally:
+                os.environ.pop("MEMDAG_HOME", None)
+                os.environ.pop("MEMDAG_DB", None)
+
+
+class TestPreBridgeRenderStore(unittest.TestCase):
+    def test_load_weights_errors_cleanly_without_forget_columns(self):
+        from memsom.interface import telemetry
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["MEMDAG_HOME"] = d
+            os.environ["MEMDAG_DB"] = str(Path(d) / "fresh.db")
+            try:
+                conn = memsom.get_connection()
+                memsom_cli.migrate_all(conn)
+                conn.commit()
+                conn.close()
+                with self.assertRaises(RuntimeError) as ctx:
+                    telemetry.load_weights()
+                self.assertIn("bridge-render", str(ctx.exception))
+            finally:
+                os.environ.pop("MEMDAG_HOME", None)
+                os.environ.pop("MEMDAG_DB", None)
 
 
 if __name__ == "__main__":

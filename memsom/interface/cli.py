@@ -61,7 +61,7 @@ from memsom.lifecycle import compact as memsom_compact
 from memsom.lifecycle import reflex as memsom_reflex
 from memsom.bridge import chats as memsom_chats
 from memsom.lifecycle import doctor as memsom_doctor
-from memsom.storage import config as memsom_config
+from memsom.interface import config as memsom_config
 from memsom.bridge import obsidian as memsom_obsidian
 from memsom.lifecycle import rederive as memsom_rederive
 from memsom.storage import session as memsom_session
@@ -499,13 +499,11 @@ def cmd_add(args):
         # can never be stamped through the `add` path.
         try:
             memsom_ingest.enforce_channel_ceiling(args.channel)
-            label = memsom_ingest.authoritative_label(args.channel)
         except ValueError as exc:
             print(f"[memsom] {exc}", file=sys.stderr)
             sys.exit(1)
         with conn:
-            nid = memsom.insert_node(conn, args.content, args.channel,
-                                     label=label, source_ref=args.ref)
+            nid = memsom_ingest.mint_node(conn, args.content, args.channel, source_ref=args.ref)
         memsom_ingest._try_index(conn, nid)   # keep retrieve current (best-effort)
         node = memsom.get_node(conn, nid)
         print(f"[{nid}] {node['channel']:<13} integrity={memsom.NAME[node['label']]:<13}"
@@ -590,6 +588,7 @@ def frozen_cmd_seed(args):
         except OSError as err:
             print(f"[memsom] seed source unavailable: {err}", file=sys.stderr)
             sys.exit(1)
+        # frozen demo seed: PLAN Sec1.7 byte-identical surface; the one remaining direct insert_node caller
         with conn:  # fixed insert order -> stable demo ids 1/2/3
             u = memsom.insert_node(conn, USER_FACT, "user")
             v = memsom.insert_node(conn, ENDORSED_FACT, "endorsed", source_ref="(bundled demo note)")

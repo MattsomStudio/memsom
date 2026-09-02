@@ -63,3 +63,13 @@ def test_mcp_selfcheck_tool_listing_does_not_claim_only_gate():
         cwd=ROOT, capture_output=True, text=True, timeout=30,
     )
     _assert_no_false_claim(out.stdout + out.stderr, "mcp --selfcheck tool listing")
+
+
+def test_no_deleted_providers_package():
+    text = ARCHITECTURE_MD.read_text(encoding="utf-8")
+    assert "memsom.providers" not in text
+
+
+def test_telemetry_not_documented_as_moved_out():
+    text = ARCHITECTURE_MD.read_text(encoding="utf-8")
+    assert "moved to `memsom_panel/telemetry.py`" not in text

@@ -116,6 +116,13 @@ def enforce_channel_ceiling(channel: str) -> str:
     return channel
 
 
+def mint_node(conn, content, channel, *, label=None, source_ref=None):
+    """The ONE direct insert_node caller outside dag.py (rule 6)."""
+    enforce_channel_ceiling(channel)
+    lab = authoritative_label(channel) if label is None else label
+    return memsom.insert_node(conn, content, channel, label=lab, source_ref=source_ref)
+
+
 #: `source_ref` prefix the bridge importer owns exclusively.
 BRIDGE_NAMESPACE = "memory:"
 

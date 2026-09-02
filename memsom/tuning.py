@@ -237,6 +237,10 @@ _register("telemetry.consolidation_dir", default="", source="env:MEMSOM_CONSOLID
            doc="Override where the weekly consolidation sweep's dated reports "
                "live (default ~/.claude/consolidation); telemetry.last_consolidation "
                "reads the newest report's mtime from here.", feature="telemetry")
+_register("telemetry.episodic_db", default="", source="env:MEMSOM_EPISODIC_DB",
+           doc="Override the episodic sessions archive path (default "
+               "~/.claude/episodic/sessions.db) telemetry.sessions counts from.",
+           feature="telemetry")
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,7 @@ from memsom.storage import schema as memsom_schema
 from memsom.lifecycle import rederive as memsom_rederive
 from memsom.integrity import trust as memsom_trust
 from memsom.integrity import recompute as memsom_recompute
+from memsom.integrity import ingest as memsom_ingest
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -338,8 +339,8 @@ def corroborate(conn, claim_id, k=2):
         )
 
         # THE CAP: label=RANK["agent-derived"]=1, never min(parents), never user/endorsed
-        lift = memsom.insert_node(conn, content, "agent-derived",
-                                  label=memsom.RANK["agent-derived"])
+        lift = memsom_ingest.mint_node(conn, content, "agent-derived",
+                                       label=memsom.RANK["agent-derived"])
         assert lift is not None
         # Verify the cap is holding (belt-and-braces; catches refactoring accidents)
         assert memsom.RANK["agent-derived"] == 1, "cap constant drift — fix before proceeding"

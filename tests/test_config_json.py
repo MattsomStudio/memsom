@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from memsom.storage import config as memsom_config
+from memsom.interface import config as memsom_config
 
 EXE = "/home/u/.memdag/venv/bin/memsom-mcp"
 DB = "/home/u/.memdag/memdag.db"

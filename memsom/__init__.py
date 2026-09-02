@@ -33,20 +33,33 @@ resolve_facade_attr, PEP 562, importlib underneath) rather than imported at
 module level: this package sits at the root of every `import memsom`, so a
 static import of integrity or (worse) the top interface layer here would put
 that layer on every other layer's transitive closure and break the layers
-goal for the whole package, not just this file. kernel/storage/effects stay
-eager imports -- they are the untracked/bottom layers, so no caller inherits
-a cross-layer edge by reaching them through the facade.
+goal for the whole package, not just this file. kernel/storage/effects are
+ALSO lazy (review fix MF-3, 2026-09-01): a bare `import memsom` -- e.g. the
+panel's `from memsom.childenv import child_env` spawn primitive -- must not
+drag in a single feature module, so `__init__.py` imports nothing but stdlib
+at module level; every public symbol resolves through `__getattr__` below.
 """
 
-from memsom.kernel.lattice import RANK, NAME
+import importlib as _importlib
 
-from memsom.kernel.text import (
-    STOP, STEM_WIDTH, stems, prose_lines, strip_furniture, snippet,
-    candidate_sentences, now_iso, local_date, fmt_node,
-)
-from memsom.kernel.compose import compose
+_FACADE = {
+    "RANK": "memsom.kernel.lattice", "NAME": "memsom.kernel.lattice",
+    "STOP": "memsom.kernel.text", "STEM_WIDTH": "memsom.kernel.text",
+    "stems": "memsom.kernel.text", "prose_lines": "memsom.kernel.text",
+    "strip_furniture": "memsom.kernel.text", "snippet": "memsom.kernel.text",
+    "candidate_sentences": "memsom.kernel.text", "now_iso": "memsom.kernel.text",
+    "local_date": "memsom.kernel.text", "fmt_node": "memsom.kernel.text",
+    "compose": "memsom.kernel.compose",
+    "db_path": "memsom.storage.db", "get_connection": "memsom.storage.db",
+    "SCHEMA": "memsom.storage.db",
+    "fetch_external": "memsom.effects.net", "EXT_URL": "memsom.effects.net",
+    "FALLBACK": "memsom.effects.net", "HOME": "memsom.effects.net",
+}
 
-from memsom.storage.db import db_path, get_connection, SCHEMA
-from memsom.storage.db import resolve_facade_attr as __getattr__
 
-from memsom.effects.net import fetch_external, EXT_URL, FALLBACK, HOME
+def __getattr__(name):
+    mod = _FACADE.get(name)
+    if mod is not None:
+        return getattr(_importlib.import_module(mod), name)
+    from memsom.storage.db import resolve_facade_attr
+    return resolve_facade_attr(name)

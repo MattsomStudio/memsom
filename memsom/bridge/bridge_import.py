@@ -338,6 +338,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
         "SELECT source_ref, id FROM nodes "
         "WHERE source_ref LIKE 'memory:literal:%' AND tombstoned = 0")}
 
+    # RMW-OK: runs inside import_literals' BEGIN IMMEDIATE (opened at the call site below)
     def _do():
         for sref, (section, payload) in desired.items():
             content = _literal_content(section, payload)
@@ -368,10 +369,7 @@ def import_literals(conn, memory_dir, *, dry_run: bool = True) -> dict:
             # MS-20: route the channel through the F-13 ceiling guard even
             # though it is hardcoded here -- consistent with import_memory_dir
             # below, and defends this mint point if that ever changes.
-            memsom_ingest.enforce_channel_ceiling("endorsed")
-            nid = memsom.insert_node(conn, content, "endorsed",
-                                     label=memsom_ingest.authoritative_label("endorsed"),
-                                     source_ref=sref)
+            nid = memsom_ingest.mint_node(conn, content, "endorsed", source_ref=sref)
             conn.execute("UPDATE nodes SET content_hash = ? WHERE id = ?",
                          (memsom_chunking.content_hash(content), nid))
             new_ids.append(nid)
@@ -772,6 +770,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True, params=None) ->
     swept_ids = []
     new_ids, dead_ids = [], []   # retrieval-index upkeep, applied after commit
 
+    # RMW-OK: runs inside import_memory_dir's BEGIN IMMEDIATE (opened at the call site below)
     def _do():
         for path in files:
             rel = path.name                      # bridge_path key, e.g. user_adhd.md
@@ -874,10 +873,7 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True, params=None) ->
             # the F-13/F-14 guards the way every other stamping entry point
             # does, so MEMDAG_CHANNEL_CEILING actually bounds what a memory
             # file can claim, and the label always matches RANK[channel].
-            memsom_ingest.enforce_channel_ceiling(channel)
-            nid = memsom.insert_node(conn, stamped, channel,
-                                     label=memsom_ingest.authoritative_label(channel),
-                                     source_ref=f"memory:{stem}")
+            nid = memsom_ingest.mint_node(conn, stamped, channel, source_ref=f"memory:{stem}")
             conn.execute(
                 "UPDATE nodes SET bridge_path = ?, bridge_mtime = ?, content_hash = ? "
                 "WHERE id = ?",

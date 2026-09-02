@@ -158,6 +158,7 @@ def list_origins(conn):
     ).fetchall()
 
 
+# RMW-OK: the UPDATE re-checks uuid IS NULL, so a concurrent backfill is idempotent
 def backfill_uuids(conn, origin):
     """Assign uuid=f'{origin}:{id}' and origin=origin to all rows where uuid IS NULL.
 
@@ -475,6 +476,7 @@ def import_changeset(conn, changeset):
     }
 
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         # ----- Pass 0: merge redaction RECORDS (priority propagation) -----
         # A redaction event is a first-class record. Merge incoming records from
         # TRUSTED origins (consistent with the default-deny boundary — prevents an

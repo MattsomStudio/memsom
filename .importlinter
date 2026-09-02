@@ -39,11 +39,14 @@ include_external_packages = True
 # The strict 9-rank total order (PLAN.md Sec1.1). Listed top (most permissive,
 # may import everything below) to bottom (most foundational, stdlib only).
 # `effects` and `storage` are tied at rank 1 -- both sit directly on top of
-# kernel and neither may import the other (no measured edge either way).
-# Allowed downward skip: anything -> kernel. Forbidden skip: anything above
-# integrity reaching effects directly (an effects boundary with a back door
-# is not a boundary) -- a `layers` contract already refuses ANY skip, so this
-# is enforced for free, not by a separate rule.
+# kernel; no import either way, ENFORCED by the `|` independence form (`:`
+# would allow sibling imports).
+# Allowed downward skips: anything -> kernel, tuning, effects. A layers
+# contract permits any downward import (skips included) and forbids only
+# upward edges -- control-tested 2026-09-01: an interface->effects import
+# stays KEPT, a storage->interface import goes BROKEN. effects is a rank-1
+# leaf every layer may call (effects_ratchet.py keeps the raw
+# subprocess/urllib importers at exactly one module each).
 #
 # memsom.tuning (Phase 8, PLAN.md Sec2.2, new in this phase) sits directly
 # above kernel: low enough that integrity/retrieval/lifecycle/distill/
@@ -65,7 +68,7 @@ layers =
     memsom.lifecycle
     memsom.retrieval
     memsom.integrity
-    memsom.effects : memsom.storage
+    memsom.effects | memsom.storage
     memsom.tuning
     memsom.kernel
 

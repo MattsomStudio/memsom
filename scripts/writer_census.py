@@ -68,7 +68,7 @@ def find_unadjudicated() -> list[str]:
             seen_read = False
             is_rmw = False
             has_begin_immediate = False
-            for node in ast.walk(fn):
+            for node in sorted(ast.walk(fn), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str) \
                         and "BEGIN IMMEDIATE" in node.value.upper():
                     has_begin_immediate = True

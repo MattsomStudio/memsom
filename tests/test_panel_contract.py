@@ -14,7 +14,9 @@ pass even if a parameter got renamed or reordered under the panel's feet.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import inspect
+import os
 import re
 import subprocess
 import sys
@@ -61,6 +63,39 @@ class TelemetryContract(unittest.TestCase):
     def test_default_memory_dir_callable_zero_arg(self):
         from memsom.interface import telemetry
         self.assertTrue(callable(telemetry.default_memory_dir))
+
+    def test_load_weights_error_types_are_frozen(self):
+        """G-2: the panel's /api/memory handler catches (SystemExit,
+        FileNotFoundError, RuntimeError) -- these are the two failure shapes
+        load_weights() must actually raise (dashboard's SystemExit is gone)."""
+        import tempfile
+        from memsom.interface import telemetry
+        from memsom.interface import cli as memsom_cli
+        import memsom
+        saved = {k: os.environ.get(k) for k in ("MEMDAG_HOME", "MEMDAG_DB")}
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                os.environ["MEMDAG_HOME"] = d
+                os.environ["MEMDAG_DB"] = str(Path(d) / "nope.db")
+                with self.assertRaises(FileNotFoundError):
+                    telemetry.load_weights()
+
+                os.environ["MEMDAG_DB"] = str(Path(d) / "fresh.db")
+                conn = memsom.get_connection()
+                try:
+                    memsom_cli.migrate_all(conn)
+                    conn.commit()
+                finally:
+                    conn.close()
+                with self.assertRaises(RuntimeError) as ctx:
+                    telemetry.load_weights()
+                self.assertIn("bridge-render", str(ctx.exception))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
         sig = inspect.signature(telemetry.default_memory_dir)
         # every parameter (if any) must have a default -- a bare call must work
         for p in sig.parameters.values():
@@ -131,6 +166,37 @@ class SaveallContract(unittest.TestCase):
         from memsom.interface import saveall
         self.assertTrue(inspect.isclass(saveall.AlreadyRunning))
         self.assertTrue(issubclass(saveall.AlreadyRunning, BaseException))
+
+    def test_status_return_keys(self):
+        import json
+        import tempfile
+        from memsom.interface import saveall
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(saveall.status(d), {"exists": False})
+            runs = Path(d) / "episodic" / "saveall"
+            runs.mkdir(parents=True)
+            (runs / "latest.json").write_text(json.dumps({
+                "run_id": "r1", "pid": 0, "session_id": "s1",
+                "log": str(runs / "r1.log"), "started": "2026-09-01T00:00:00Z",
+            }), encoding="utf-8")
+            st = saveall.status(d)
+            self.assertEqual(set(st), {"exists", "running", "session_id", "started", "run_id", "log"})
+            self.assertIs(st["exists"], True)
+
+    def test_start_return_keys(self):
+        import tempfile
+        from unittest import mock
+        from memsom.interface import saveall
+        with tempfile.TemporaryDirectory() as d:
+            proj = Path(d) / "projects" / "p"
+            proj.mkdir(parents=True)
+            (proj / "sess-aaaaaaaa.jsonl").write_text("{}\n", encoding="utf-8")
+            fake = mock.Mock(pid=4242)
+            with mock.patch.object(saveall.memsom_proc, "popen", return_value=fake), \
+                 mock.patch.object(saveall, "_pid_alive", return_value=False):
+                out = saveall.start(d, cli_path="claude")
+            self.assertEqual(set(out), {"ok", "run_id", "session_id", "pid"})
+            self.assertIs(out["ok"], True)
 
 
 class ForgetContract(unittest.TestCase):
@@ -278,16 +344,18 @@ class PluginSeamContract(unittest.TestCase):
     panel plugin in this venv means the venv is wrong, not that the seam is
     untested."""
 
-    def test_panel_plugin_wired_or_fail_loudly(self):
-        try:
-            import memsom_panel  # noqa: F401
-        except ImportError as exc:
-            self.fail(
-                "memsom_panel is NOT importable in this interpreter "
-                f"({exc!r}) -- this venv is wrong for the panel contract test; "
-                "it must have memsom_panel installed editable. Refusing to "
-                "skip silently."
-            )
+    def test_plugin_entry_point_scan_exists(self):
+        from memsom.interface import cli
+        self.assertTrue(callable(getattr(cli, "_register_plugin_commands", None)),
+                         "cli._register_plugin_commands (memsom.commands entry-point "
+                         "scan) went missing")
+        src = inspect.getsource(cli._register_plugin_commands)
+        self.assertIn('group="memsom.commands"', src)
+
+    def test_panel_help_when_panel_installed(self):
+        if importlib.util.find_spec("memsom_panel") is None:
+            return  # panel-free machine: the 4-flag check is owned by
+                     # aos/backend/tests/test_memsom_contract.py::test_cli_surface
         out = subprocess.run(
             [sys.executable, "-m", "memsom.interface.cli", "panel", "--help"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,

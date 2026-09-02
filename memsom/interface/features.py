@@ -54,8 +54,11 @@ def _degraded_count(conn) -> int:
     evidence retrieval.dense/retrieval.bge were missing."""
     if conn is None:
         return 0
-    from memsom.retrieval import retrieve as memsom_retrieve
-    return len(memsom_retrieve.degraded_nodes(conn))
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retrieval_degraded'"
+    ).fetchone():
+        return 0
+    return conn.execute("SELECT COUNT(*) FROM retrieval_degraded").fetchone()[0]
 
 
 def _retrieval_dense(conn):
@@ -195,8 +198,12 @@ def _federation_sync(conn):
     if conn is None:
         return _status("federation.sync", "active",
                        "core present; trusted-origin count needs a DB connection")
-    memsom_federation.migrate(conn)
-    origins = memsom_federation.list_origins(conn)
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trusted_origins'"
+    ).fetchone():
+        return _status("federation.sync", "disabled",
+                       "no trusted origins registered (table absent)")
+    origins = conn.execute("SELECT origin FROM trusted_origins").fetchall()
     if not origins:
         return _status("federation.sync", "disabled", "no trusted origins registered")
     return _status("federation.sync", "active", f"{len(origins)} trusted origin(s)")
@@ -270,24 +277,17 @@ _TELEMETRY_KEYS = frozenset((
 
 
 def _telemetry(conn):
-    from memsom.interface import telemetry as memsom_telemetry
+    from memsom.interface import telemetry as memsom_telemetry  # noqa: F401 -- presence
     if conn is None:
-        # No store to build a payload from yet -- the module itself is always
-        # present (it has no optional dependency), matching gate3.broker/
-        # federation.sync's "conn is None -> can't say more than present" shape.
         return _status("telemetry", "active",
                        "module present; full payload needs a DB connection",
                        knobs=["telemetry.consolidation_dir"])
-    data = memsom_telemetry.build_telemetry(conn=conn)
-    if set(data.keys()) != _TELEMETRY_KEYS:
-        return _status("telemetry", "error",
-                       f"build_telemetry key set drifted: {sorted(data.keys())}")
-    sessions = data.get("sessions")
-    if isinstance(sessions, dict) and sessions.get("reason"):
+    if not memsom_schema.column_exists(conn, "nodes", "forget_rs"):
         return _status("telemetry", "degraded",
-                       f"sessions subreader degraded: {sessions['reason']}",
+                       "forget_* columns absent: run `memsom bridge-render` once",
                        knobs=["telemetry.consolidation_dir"])
-    return _status("telemetry", "active", "panel contract surface reachable",
+    return _status("telemetry", "active",
+                   "panel contract surface reachable (forget_* columns present)",
                    knobs=["telemetry.consolidation_dir"])
 
 

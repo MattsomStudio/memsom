@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -54,6 +55,11 @@ def load_baselines() -> dict:
 
 def record(key: str, value, source: str, control: str, target, note: str | None = None) -> None:
     """Write (or overwrite) one ratchet row. Called with no --check: 'record fresh'."""
+    if os.environ.get("MEMSOM_GATE_ALLOW_RECORD") != "1":
+        raise SystemExit(
+            "refusing to rewrite baselines.json: pass --check, or set "
+            "MEMSOM_GATE_ALLOW_RECORD=1 for a deliberate Phase-0-style re-record"
+        )
     doc = load_baselines()
     row = {"value": value, "source": source, "control": control, "target": target}
     if note:

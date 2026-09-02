@@ -107,30 +107,32 @@ def recompute_conf(conn: sqlite3.Connection, nid: int):
     if node is None:
         raise ValueError(f"unknown node id {nid}")
 
-    # Fetch current conf_label
-    row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
-    old = row[0]
+    with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        # Fetch current conf_label
+        row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
+        old = row[0]
 
-    if node["channel"] != "agent-derived":
-        # Source nodes are classification roots — don't touch them.
-        return (old, old)
+        if node["channel"] != "agent-derived":
+            # Source nodes are classification roots — don't touch them.
+            return (old, old)
 
-    # Live immediate parents only (tombstoned == 0)
-    parent_rows = conn.execute(
-        "SELECT n.conf_label FROM edges e "
-        "JOIN nodes n ON n.id = e.parent "
-        "WHERE e.child = ? AND n.tombstoned = 0" + _not_superseded_clause(conn),
-        (nid,)
-    ).fetchall()
+        # Live immediate parents only (tombstoned == 0)
+        parent_rows = conn.execute(
+            "SELECT n.conf_label FROM edges e "
+            "JOIN nodes n ON n.id = e.parent "
+            "WHERE e.child = ? AND n.tombstoned = 0" + _not_superseded_clause(conn),
+            (nid,)
+        ).fetchall()
 
-    if not parent_rows:
-        # No live parents: keep stored label, no write.
-        return (old, old)
+        if not parent_rows:
+            # No live parents: keep stored label, no write.
+            return (old, old)
 
-    new = max(r[0] for r in parent_rows)
+        new = max(r[0] for r in parent_rows)
 
-    if new != old:
-        with conn:
+        if new != old:
             conn.execute("UPDATE nodes SET conf_label = ? WHERE id = ?", (new, nid))
 
     return (old, new)
@@ -169,6 +171,7 @@ def recompute_conf_all(conn: sqlite3.Connection):
     original = {}
     final = {}
     with conn:
+        conn.execute("BEGIN IMMEDIATE")
         # A DAG converges in <= depth passes (<= len(ids)); +1 guards the exit.
         for _ in range(len(ids) + 1):
             progressed = False
