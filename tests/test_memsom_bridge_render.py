@@ -223,6 +223,26 @@ sys.stdout.write(open(os.path.join(mem, "MEMORY.md"), encoding="utf-8").read())
 
 
 class TestFactResolutionImportSideEffect(unittest.TestCase):
+    """F-4: this test spawns a subprocess and asserts on its full stdout
+    (the rendered MEMORY.md, title line included), so it must pin
+    MEMDAG_DIGEST_TITLE -- otherwise it renders under whatever the *shell
+    running the test suite* happens to export, and the test's own pass/fail
+    is not reproducible across environments."""
+
+    _PINNED_TITLE = "# Memory"
+
+    def setUp(self):
+        self._saved_digest_title = os.environ.get("MEMDAG_DIGEST_TITLE")
+        os.environ["MEMDAG_DIGEST_TITLE"] = self._PINNED_TITLE
+
+    def tearDown(self):
+        # save/restore, never a bare pop: put back exactly what was there
+        # before this test ran (absent -> stays absent, set -> restored).
+        if self._saved_digest_title is None:
+            os.environ.pop("MEMDAG_DIGEST_TITLE", None)
+        else:
+            os.environ["MEMDAG_DIGEST_TITLE"] = self._saved_digest_title
+
     def test_write_live_resolves_facts_without_cli_import(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -242,6 +262,7 @@ class TestFactResolutionImportSideEffect(unittest.TestCase):
             env["MEMDAG_EMBED_BACKEND"] = "bm25"
             env["CLAUDE_MD_PATH"] = str(root / "CLAUDE.md")
             env["_TEST_MEM_DIR"] = str(mem)
+            env["MEMDAG_DIGEST_TITLE"] = self._PINNED_TITLE  # belt-and-suspenders: explicit, not just inherited
 
             result = subprocess.run(
                 [sys.executable, "-c", _SUBPROCESS_SCRIPT],
@@ -250,6 +271,9 @@ class TestFactResolutionImportSideEffect(unittest.TestCase):
             out = result.stdout
             self.assertNotIn("[[fact_", out)
             self.assertIn("42 GB", out)
+            # the rendered title must be the pinned one, not whatever the
+            # ambient shell exports (e.g. MEMDAG_DIGEST_TITLE=ZZZ would show up here)
+            self.assertIn(self._PINNED_TITLE, out)
 
 
 if __name__ == "__main__":
