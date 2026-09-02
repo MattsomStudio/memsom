@@ -58,9 +58,15 @@ NOTE_KIND = {
     "spec": "project-ref", "interface_io": "project-ref", "architecture": "project-ref",
     "gotchas": "project-log", "decisions": "project-log", "tests": "project-log",
 }
-# Caps (body lines).  Node: Features may grow, the rest keeps a tighter budget.
-NODE_LINE_CAP = 80
-NODE_BYTE_CAP = 6000
+# Caps.  The ## Features list may grow unbounded — it is the source of truth for
+# "what's left" and is never injected in full (only the Status block + a one-line
+# tally reach the prompt).  Everything ELSE (What/Status/Rules/Creds/Where/
+# Sub-notes/Pointers) keeps a tight budget; a generous whole-body guard catches
+# runaway growth.
+NODE_NONFEAT_LINE_CAP = 60
+NODE_NONFEAT_BYTE_CAP = 4000
+NODE_LINE_CAP = 220        # whole-body runaway guard (Features may grow)
+NODE_BYTE_CAP = 16000      # whole-body runaway guard (Features may grow)
 FEATURE_FENCE = 300           # a feature note over this is a contract-turned-essay
 LOG_CAPS = {"gotchas": 150, "decisions": 200, "tests": 200,
             "interface_io": 120, "architecture": 150}
@@ -142,6 +148,18 @@ def _sections(body: str) -> "OrderedDict[str, list]":
         elif cur is not None:
             out[cur].append(ln)
     return out
+
+
+def _nonfeature_body(body: str) -> str:
+    """The node body with the ``## Features`` section removed — that section is
+    exempt from the tight non-feature cap (it grows with the project)."""
+    out, skip = [], False
+    for ln in body.split("\n"):
+        if re.match(r"^##\s+", ln):
+            skip = bool(re.match(r"^##\s+Features\s*$", ln))
+        if not skip:
+            out.append(ln)
+    return "\n".join(out)
 
 
 def _h3(lines) -> "OrderedDict[str, list]":
@@ -652,11 +670,19 @@ def _check_one(memory_dir, slug, d, node, text, fm, alias_owner) -> list:
         if miss3:
             out.append(_F("project-schema", "ERROR", node.name,
                           f"Status missing H3: {', '.join(miss3)}"))
-    # caps
-    nlines = _body_lines(body)
-    if nlines > NODE_LINE_CAP:
+    # caps — the ## Features list is exempt (it grows); the rest keeps the tight
+    # budget; a generous whole-body guard catches runaway growth.
+    nonfeat = _nonfeature_body(body)
+    nf_lines = _body_lines(nonfeat)
+    if nf_lines > NODE_NONFEAT_LINE_CAP:
         out.append(_F("project-schema", "ERROR", node.name,
-                      f"node body {nlines} > {NODE_LINE_CAP}-line cap"))
+                      f"node body (excl. Features) {nf_lines} > {NODE_NONFEAT_LINE_CAP}-line cap"))
+    if len(nonfeat.encode("utf-8")) > NODE_NONFEAT_BYTE_CAP:
+        out.append(_F("project-schema", "ERROR", node.name,
+                      f"node body (excl. Features) > {NODE_NONFEAT_BYTE_CAP}-byte cap"))
+    if _body_lines(body) > NODE_LINE_CAP:
+        out.append(_F("project-schema", "ERROR", node.name,
+                      f"node body {_body_lines(body)} > {NODE_LINE_CAP}-line cap"))
     if len(body.encode("utf-8")) > NODE_BYTE_CAP:
         out.append(_F("project-schema", "ERROR", node.name,
                       f"node body > {NODE_BYTE_CAP}-byte cap"))

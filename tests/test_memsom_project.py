@@ -134,6 +134,28 @@ class TestChecks(Base):
         P.set_status(self.mem, "demo", left="finish f-one")
         self.assertIn("project-schema", self._names())
 
+    def test_features_section_is_exempt_from_the_cap(self):
+        # 70 feature lines blow the old 80-line / 6000-byte whole-body cap, but
+        # ## Features is exempt (it is the source of truth for what's left and is
+        # never injected in full) — so no cap finding fires.
+        for i in range(70):
+            P.set_feature(self.mem, "demo", f"f-{i:02d}", name=f"Feature {i}",
+                          status="planned")
+        msgs = [f["msg"] for f in P.check(self.mem, "demo")]
+        self.assertFalse(any("cap" in m for m in msgs),
+                         f"## Features must be exempt from the cap: {msgs}")
+
+    def test_bloated_nonfeature_prose_trips_the_cap(self):
+        # the tight 60-line / 4000-byte budget still applies to everything that is
+        # NOT the Features list — bloat ## What and the cap fires.
+        np = self.node()
+        text = np.read_text(encoding="utf-8")
+        text = text.replace("## What\n", "## What\n" + ("x " * 2500) + "\n", 1)
+        np.write_text(text, encoding="utf-8")
+        msgs = [f["msg"] for f in P.check(self.mem, "demo")]
+        self.assertTrue(any("excl. Features" in m for m in msgs),
+                        f"bloated non-feature prose must trip the cap: {msgs}")
+
     def test_active_decision_not_in_needs_matt_is_red(self):
         P.set_feature(self.mem, "demo", "f-one", name="F", status="active-decision",
                       decision="D-20260902-01")
