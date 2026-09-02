@@ -39,6 +39,7 @@ from pathlib import Path
 
 import memsom
 from memsom.bridge import bridge_import as bi
+from memsom.distill.digest import _is_project_note
 from memsom.storage import schema as memsom_schema
 
 PROPOSALS_NAME = "consolidate_proposals.json"
@@ -246,6 +247,11 @@ def propose_projects(conn, memory_dir, *, min_age_days=DEFAULT_MIN_AGE_DAYS):
         slug = sub.split("/", 1)[1]
         parent_stem = f"project_{slug}"
         if stem == parent_stem or not stem.startswith(parent_stem + "_"):
+            continue
+        # A fixed sub-note (gotchas/decisions/…) or a per-feature spec note is
+        # part of the project node's structure, never a stand-alone subproject to
+        # propose closing.
+        if _is_project_note(stem, slug):
             continue
         if parent_stem not in files:
             continue

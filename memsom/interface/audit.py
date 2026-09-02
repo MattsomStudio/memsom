@@ -218,6 +218,17 @@ def run_audit(mem_dir):
             findings.append(_F("budget-breach", "WARN", "MEMORY.md",
                                f"{size} bytes > {cap} cap (over by {size - cap})"))
 
+    # structured project memory: fold in project.check (audit-shaped findings —
+    # project-schema/alias-clash/creds-value ERROR, loose-file/nested-frontmatter
+    # WARN, stale-status INFO). Down-rank import (interface -> bridge).
+    try:
+        from memsom.bridge import project as _project
+        findings += _project.check(mem_dir)
+    # FAILOPEN: project checks are additive — a bug in them degrades to one INFO the operator sees, never a crash of the whole store audit.
+    except Exception as exc:
+        findings.append(_F("project-check", "INFO", "projects/",
+                           f"project check skipped: {exc!r}"))
+
     return findings, files, (md_text, db_ok)
 
 

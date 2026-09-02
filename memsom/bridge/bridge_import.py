@@ -133,7 +133,12 @@ DUP_QUARANTINE_SUBDIR = Path(".weights") / "dup_quarantine"
 
 
 def _md_files(d):
-    return [p for p in d.glob("*.md") if p.is_file() and p.name not in INDEX_NAMES]
+    # A Syncthing conflict copy (`foo.sync-conflict-<ts>-<id>.md`) is a transient
+    # duplicate, not a memory — importing it mints a bogus node under a mangled
+    # stem. Excluded at the one walk both the importer and resolve_duplicates use.
+    return [p for p in d.glob("*.md")
+            if p.is_file() and p.name not in INDEX_NAMES
+            and ".sync-conflict-" not in p.name]
 
 
 def _all_memory_files(memory_dir):
