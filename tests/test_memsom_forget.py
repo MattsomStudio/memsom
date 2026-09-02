@@ -107,6 +107,31 @@ class TestParity(unittest.TestCase):
         self.assertEqual(act_a, act_b, "ported actions diverged under param overrides")
 
 
+class TestOracleFixtureNeverReachesHome(unittest.TestCase):
+    """G-7 residual: the vendored oracle must not be able to reach the importing
+    user's ~/.claude even if one of its IO helpers is called (the parity test
+    only calls compute()/DEFAULTS, but a fixture with a live path is a loaded
+    gun). Red if any Path.home()/expanduser() comes back, or if any module-level
+    path constant leaves the neutral base."""
+
+    def test_no_home_lookup_in_fixture_code(self):
+        code = [ln for ln in _MW_PATH.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.lstrip().startswith("#")]
+        offenders = [ln for ln in code if "Path.home(" in ln or "expanduser(" in ln]
+        self.assertEqual(offenders, [], "vendored oracle can reach the real home dir")
+
+    def test_every_path_constant_is_under_the_neutral_base(self):
+        mw = _load_mem_weights()
+        base = mw._NEUTRAL_HOME
+        for name in ("EP", "MEM_DIR", "MEMORY_MD", "WEIGHTS_DIR", "CANONICAL",
+                     "USAGE_DIR", "WEIGHTS_DB", "SCAN_STATE", "STALE_FILE", "PROJECTS_DIR"):
+            p = getattr(mw, name)
+            self.assertFalse(p.is_absolute(), f"{name} is absolute: {p}")
+            self.assertEqual(p.parts[0], base.parts[0], f"{name} escapes the neutral base: {p}")
+        os.environ.pop("EPISODIC_MEM_DIR", None)
+        self.assertEqual(mw.find_mem_dir().parts[0], base.parts[0])
+
+
 class TestPanelParamIsolation(unittest.TestCase):
     """Runs everywhere (no mem_weights needed): the panel-layer params must never
     bleed into the golden DEFAULTS dict that TestParity pins to the original."""

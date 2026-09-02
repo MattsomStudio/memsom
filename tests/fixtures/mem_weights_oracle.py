@@ -5,8 +5,11 @@ VENDORED COPY (tests/fixtures/mem_weights_oracle.py). This is a read-only
 snapshot of the operator's live ~/.claude/episodic/mem_weights.py, checked
 into the repo so tests/test_memsom_forget.py::TestParity has a golden
 oracle that does not depend on the operator's machine or home directory.
-NEUTRALIZED: the only change from the original is the `MEM_DIR` assignment
-below (was `find_mem_dir()`) -- see the comment there. Everything else,
+NEUTRALIZED: the only changes from the original are the `MEM_DIR` assignment
+below (was `find_mem_dir()`) and every home-directory lookup (EP, STALE_FILE,
+find_mem_dir's glob + fallback), all pointed at `_NEUTRAL_HOME` so that NO
+function in this fixture can reach the importing user's real ~/.claude even if
+called -- see the comment at MEM_DIR. Everything else,
 including `compute()` and `DEFAULTS` (the two things TestParity actually
 exercises), is byte-for-byte the original algorithm.
 
@@ -36,7 +39,12 @@ import json, math, os, re, sqlite3, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-EP = Path.home() / ".claude" / "episodic"
+# NEUTRALIZED for this vendored test fixture (see MEM_DIR below): the original
+# derived EP/STALE_FILE/find_mem_dir from Path.home(); here every one of them
+# hangs off a path that cannot exist, so nothing in this module can touch the
+# importing user's ~/.claude even when called.
+_NEUTRAL_HOME = Path("nonexistent-mem-weights-oracle-fixture-dir")
+EP = _NEUTRAL_HOME / ".claude" / "episodic"
 
 # ── defaults (operator-tuned while watching dry-runs) ─────────────────────────
 #
@@ -89,11 +97,11 @@ def find_mem_dir():
     if env and Path(env).is_dir():
         return Path(env)
     candidates = [p.parent for p in
-                  (Path.home() / ".claude" / "projects").glob("*/memory/MEMORY.md")]
+                  (_NEUTRAL_HOME / ".claude" / "projects").glob("*/memory/MEMORY.md")]
     if candidates:
         return max(candidates, key=lambda d: sum(1 for _ in d.glob("*.md")))
     # fall back to the known Mac path so callers get a clear error if absent
-    return Path.home() / ".claude" / "projects" / "-Users-operator" / "memory"
+    return _NEUTRAL_HOME / ".claude" / "projects" / "-Users-operator" / "memory"
 
 
 # NEUTRALIZED for this vendored test fixture: the original line here was
@@ -106,7 +114,7 @@ def find_mem_dir():
 # operator's real ~/.claude tree; every path below is a lazy, disk-free
 # Path join off it, so nothing else in this module changes behaviour unless a
 # caller actually dereferences one of them (which TestParity does not).
-MEM_DIR = Path("nonexistent-mem-weights-oracle-fixture-dir")
+MEM_DIR = _NEUTRAL_HOME
 MEMORY_MD = MEM_DIR / "MEMORY.md"
 WEIGHTS_DIR = MEM_DIR / ".weights"
 CANONICAL = WEIGHTS_DIR / "canonical.json"
@@ -116,7 +124,7 @@ SCAN_STATE = EP / "mem_scan_state.json"
 # Reconsolidation input: the weekly consolidation sweep writes the set of
 # contradicted/stalled memories here (PC-only; absent on the Mac, which doesn't
 # run the sweep or reconcile). compute() suppresses reinforcement for these.
-STALE_FILE = Path.home() / ".claude" / "consolidation" / "stale.json"
+STALE_FILE = _NEUTRAL_HOME / ".claude" / "consolidation" / "stale.json"
 
 
 def machine_id():
