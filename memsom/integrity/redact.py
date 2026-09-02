@@ -89,7 +89,7 @@ def _unlink_within(root, relpath):
 def _resolve_memory_dir(memory_dir):
     if memory_dir is not None:
         return memory_dir
-    # FAILOPEN: allowed to not raise here -- default_memory_dir() is
+    # Rationale for the FAILOPEN below: default_memory_dir() is
     # deliberately loud for its OTHER callers (a wrong answer there once
     # caused a mass wipe), but a purge is best-effort DISK cleanup after a
     # DB redaction that has ALREADY committed; an unresolvable root must
