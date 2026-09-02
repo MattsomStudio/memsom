@@ -47,10 +47,20 @@ INDEX = """# Memory
 LINKED_PROJECT = "---\nname: Widget\ndescription: status\ntype: project\n---\nsee [[user_editor]]\n"
 
 
+_ENV_KEYS = ("MEMDAG_HOME", "MEMDAG_DB", "MEMDAG_EMBED_BACKEND",
+             "CLAUDE_MD_PATH", "MEMDAG_BRIDGE_MEMORY_DIR",
+             "MEMSOM_CONSOLIDATION_DIR", "MEMSOM_EPISODIC_DB")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # RESTORE, never pop, in tearDown: tests/_isolation.py pins
+        # CLAUDE_MD_PATH / MEMSOM_EPISODIC_DB / MEMSOM_CONSOLIDATION_DIR for
+        # the whole process, and a pop here would silently drop that fence
+        # for every test that runs after this module.
+        self._saved_env = {k: os.environ.get(k) for k in _ENV_KEYS}
         os.environ["MEMDAG_HOME"] = str(self.root)
         os.environ["MEMDAG_DB"] = str(self.root / "memdag.db")
         # keep ingest off the network -- BM25-only for the suite (same idiom
@@ -89,10 +99,11 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         self.conn.close()
-        for key in ("MEMDAG_HOME", "MEMDAG_DB", "MEMDAG_EMBED_BACKEND",
-                    "CLAUDE_MD_PATH", "MEMDAG_BRIDGE_MEMORY_DIR",
-                    "MEMSOM_CONSOLIDATION_DIR", "MEMSOM_EPISODIC_DB"):
-            os.environ.pop(key, None)
+        for key, prev in self._saved_env.items():
+            if prev is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prev
         self.tmp.cleanup()
 
     def _run_cli(self, *argv):

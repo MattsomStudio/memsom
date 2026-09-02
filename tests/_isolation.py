@@ -38,6 +38,18 @@ def pin() -> None:
     root = Path(tempfile.mkdtemp(prefix="memsom_test_"))
     os.environ["MEMDAG_HOME"] = str(root)
     os.environ["MEMDAG_DB"] = str(root / "isolated.db")
+    # The three live-home paths a test can reach WITHOUT going through the
+    # store: bridge-render syncs the managed block into ~/.claude/CLAUDE.md
+    # (bridge.claude_md_path), and telemetry reads ~/.claude/episodic/
+    # sessions.db + ~/.claude/consolidation (telemetry.episodic_db /
+    # telemetry.consolidation_dir). MEASURED 2026-09-02 under a redirected
+    # HOME: an unpinned bridge_render() call created <home>/.claude/CLAUDE.md.
+    # Pinned here so a test that forgets cannot touch the operator's brain;
+    # tests that manage these themselves restore the previous value, never
+    # pop it (a pop would silently drop this pin for every later test).
+    os.environ["CLAUDE_MD_PATH"] = str(root / "CLAUDE.md")
+    os.environ["MEMSOM_EPISODIC_DB"] = str(root / "no_sessions.db")
+    os.environ["MEMSOM_CONSOLIDATION_DIR"] = str(root / "consolidation")
     os.environ[_SENTINEL] = "1"
 
 

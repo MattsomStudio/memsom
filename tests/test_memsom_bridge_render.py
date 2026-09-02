@@ -48,6 +48,9 @@ class Base(unittest.TestCase):
         self._embed_prev = os.environ.get("MEMDAG_EMBED_BACKEND")
         os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
         # NEVER let claude-sync touch the real ~/.claude/CLAUDE.md during tests.
+        # Restore (not pop) in tearDown: tests/_isolation.py pins this for the
+        # whole process and a pop would drop that fence for every later test.
+        self._claude_md_prev = os.environ.get("CLAUDE_MD_PATH")
         os.environ["CLAUDE_MD_PATH"] = str(self.root / "CLAUDE.md")
         self.mem = self.root / "memory"
         self.mem.mkdir()
@@ -65,7 +68,10 @@ class Base(unittest.TestCase):
         else:
             os.environ["MEMDAG_EMBED_BACKEND"] = self._embed_prev
         os.environ.pop("MEMDAG_DIGEST_TITLE", None)
-        os.environ.pop("CLAUDE_MD_PATH", None)
+        if self._claude_md_prev is None:
+            os.environ.pop("CLAUDE_MD_PATH", None)
+        else:
+            os.environ["CLAUDE_MD_PATH"] = self._claude_md_prev
         self.tmp.cleanup()
 
 

@@ -51,6 +51,9 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         os.environ["MEMDAG_DB"] = str(self.root / "t.db")
+        # restore (not pop) in tearDown: tests/_isolation.py pins this for the
+        # whole process so no later test can sync the real ~/.claude/CLAUDE.md
+        self._claude_md_prev = os.environ.get("CLAUDE_MD_PATH")
         os.environ["CLAUDE_MD_PATH"] = str(self.root / "CLAUDE.md")
         self.mem = self.root / "memory"
         self.mem.mkdir()
@@ -65,7 +68,10 @@ class Base(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
         os.environ.pop("MEMDAG_DB", None)
-        os.environ.pop("CLAUDE_MD_PATH", None)
+        if self._claude_md_prev is None:
+            os.environ.pop("CLAUDE_MD_PATH", None)
+        else:
+            os.environ["CLAUDE_MD_PATH"] = self._claude_md_prev
         self.tmp.cleanup()
 
     def node_fm(self, rel):

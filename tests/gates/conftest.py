@@ -35,6 +35,12 @@ def _pin_db():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     os.environ["MEMDAG_HOME"] = str(SCRATCH)
     os.environ["MEMDAG_DB"] = str(SCRATCH / "gates.db")
+    # Same live-home fences as tests/_isolation.py: a gate fixture that calls
+    # bridge_render() must not sync the operator's ~/.claude/CLAUDE.md, and
+    # telemetry must not read ~/.claude/episodic or ~/.claude/consolidation.
+    os.environ["CLAUDE_MD_PATH"] = str(SCRATCH / "CLAUDE.md")
+    os.environ["MEMSOM_EPISODIC_DB"] = str(SCRATCH / "no_sessions.db")
+    os.environ["MEMSOM_CONSOLIDATION_DIR"] = str(SCRATCH / "consolidation")
     import memsom
     live = (Path.home() / ".memdag" / "memdag.db").resolve()
     assert memsom.db_path().resolve() != live, "REFUSING: db_path() is the live store"
