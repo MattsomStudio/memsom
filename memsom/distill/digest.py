@@ -54,6 +54,7 @@ Frozen core untouched; read-only over the DB (render/compare never write nodes).
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -96,6 +97,32 @@ PROJECTS_POINTER_LINE = ("- Project memory lives in projects/ — read projects/
                          "when a task touches ongoing work.")
 PROJECT_GROUPS = ("Active", "Parked", "Closed")
 _GROUP_RANK = {g: i for i, g in enumerate(PROJECT_GROUPS)}
+
+# Structured project memory: a `kind: project-node` parent carries these six
+# fixed sub-notes.  They render as ONE `notes:` line under the parent (not as
+# individual subproject lines), and per-feature spec notes
+# (project_<slug>_spec_<feature-id>) are hidden the same way — reached through
+# the spec index, never listed as subprojects.  Defined HERE (distill, rank 5)
+# so bridge (rank 7 — project.py, consolidate.py) imports it DOWN (RULE 1);
+# distill never imports up into bridge.
+PROJECT_NOTES = ("spec", "gotchas", "decisions", "interface_io", "architecture", "tests")
+NODE_KIND = "project-node"
+_FEATURE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _is_project_note(stem, slug):
+    """True for a fixed sub-note (project_<slug>_<suffix>) or a per-feature spec
+    note (project_<slug>_spec_<feature-id>) — the entries the structured group
+    renders through the notes line / spec index rather than as subprojects."""
+    prefix = f"{PROJECT_PREFIX}{slug}_"
+    if not stem.startswith(prefix):
+        return False
+    suffix = stem[len(prefix):]
+    if suffix in PROJECT_NOTES:
+        return True
+    if suffix.startswith("spec_"):
+        return bool(_FEATURE_ID_RE.fullmatch(suffix[len("spec_"):]))
+    return False
 _TIER_TO_GROUP = {"hot": "Active", "warm": "Parked", "cold": "Closed"}
 _STATUS_TO_GROUP = {"active": "Active", "parked": "Parked", "closed": "Closed"}
 DEFAULT_PROJECTS_TITLE = "# Projects"
@@ -277,6 +304,7 @@ def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None, born=No
             # projects split + live-state partition (module docstring)
             "is_project": stem.startswith(PROJECT_PREFIX),
             "is_live_state": (section == LIVE_STATE_SECTION or ftype == "fact"),
+            "node_kind": (fm.get("kind") or "").strip().lower() or None,
             "status": (fm.get("status") or "").strip().lower() or None,
             "subdir": fm.get("memory_subdir") or None,
             # anti-creep (section budget + born-unindexed receipt)
@@ -656,6 +684,16 @@ def render_projects_index(entries, *, title=None, conn=None):
         else:
             lines.append(f"### {slug} (no parent overview)")
             key = (0, 0.0, slug)
+        # Structured node: render ONE fixed `notes:` line for the six sub-notes
+        # (never status-tagged), and drop the sub-notes + per-feature spec notes
+        # from the subproject list — they are reached through that line / the
+        # spec index, not listed individually. Legacy groups (no node) are
+        # unchanged, so a store with no project-node renders byte-identically.
+        if parent is not None and parent.get("node_kind") == NODE_KIND:
+            note_links = " · ".join(
+                f"[{suf}]({slug}/{PROJECT_PREFIX}{slug}_{suf}.md)" for suf in PROJECT_NOTES)
+            lines.append(f"  notes: {note_links}")
+            subs = [m for m in subs if not _is_project_note(m["stem"], slug)]
         ranked = sorted(((_project_status(m, parent), m) for m in subs),
                         key=lambda t: (_GROUP_RANK[t[0]],) + _rs_desc(t[1]))
         for st, m in ranked:
