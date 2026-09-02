@@ -38,7 +38,7 @@ from pathlib import Path
 
 EP = Path.home() / ".claude" / "episodic"
 
-# ── defaults (Matthew tunes these while watching dry-runs) ────────────────────
+# ── defaults (operator-tuned while watching dry-runs) ─────────────────────────
 #
 # Two-number model (Bjork's New Theory of Disuse):
 #   RS = retrieval strength — accessibility. Decays with disuse (slowed by SS),
@@ -93,7 +93,7 @@ def find_mem_dir():
     if candidates:
         return max(candidates, key=lambda d: sum(1 for _ in d.glob("*.md")))
     # fall back to the known Mac path so callers get a clear error if absent
-    return Path.home() / ".claude" / "projects" / "-Users-matthew" / "memory"
+    return Path.home() / ".claude" / "projects" / "-Users-operator" / "memory"
 
 
 # NEUTRALIZED for this vendored test fixture: the original line here was
@@ -163,7 +163,7 @@ def parse_frontmatter(text):
 
 def is_pinned(stem, fm):
     """Identity/feedback memories never demote — losing them would forget who
-    Matthew is. Pin by frontmatter type, explicit pin:true, or filename class."""
+    the operator is. Pin by frontmatter type, explicit pin:true, or filename class."""
     if str(fm.get("pin", "")).lower() in ("true", "1", "yes"):
         return True
     if fm.get("type", "").lower() in PIN_TYPES:
@@ -232,9 +232,9 @@ def iter_memories():
 
 
 # ── usage-signal term extraction (mirrors recall.py's keyword logic) ──────────
-# Matthew's name is in nearly every transcript — it carries no signal about
+# The operator's name is in nearly every transcript — it carries no signal about
 # which memory was used, so it's dropped from match terms.
-_STOP = set("""matthew matt somanlall the a an and or of to in on for with that this
+_STOP = set("""the a an and or of to in on for with that this
 is are was were be been being it its his her their them they we you your my our""".split())
 _WORD = re.compile(r"[a-z0-9]{3,}")
 
@@ -512,7 +512,7 @@ def compute(canon, mems, events, now=None, stale=None):
     return new, actions
 
 
-# ── inspection cache (honors the SQLite storage Matthew picked) ──────────────
+# ── inspection cache (honors the SQLite storage the operator picked) ─────────
 def sync_db(canon):
     """Mirror canonical weights into a local SQLite table for easy querying.
     Pure inspection — not a source of truth, and never synced (*.db ignored)."""
