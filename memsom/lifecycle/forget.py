@@ -74,11 +74,6 @@ def _parse_iso(s):
         return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-    for line in m.group(1).splitlines():
-        if ":" in line and not line.lstrip().startswith("#"):
-            k, _, v = line.partition(":")
-            out[k.strip()] = v.strip().strip('"').strip("'")
-    return out
 
 
 def _salience_of(m, p):

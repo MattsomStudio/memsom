@@ -80,17 +80,22 @@ def classify(conn: sqlite3.Connection, nid: int, level) -> None:
     node = memsom.get_node(conn, nid)
     if node is None:
         raise ValueError(f"unknown node id {nid}")
-    row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
-    current = row[0]
-    if level < current and memsom_schema.column_exists(conn, "nodes", "archived"):
-        arow = conn.execute("SELECT archived FROM nodes WHERE id = ?", (nid,)).fetchone()
-        if arow and arow[0]:
-            raise ValueError(
-                f"cannot lower confidentiality on archived node {nid} "
-                f"({CONF_NAME[current]} -> {CONF_NAME[level]}): archived nodes are "
-                f"frozen — downgrading them would launder a derived summary"
-            )
+    # Rule 9 (RMW guarded): the archived-check read and the conf_label write
+    # are one write-locked unit, so a concurrent archive cannot slip between
+    # the Bypass-2G guard and the downgrade it exists to refuse.
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT conf_label FROM nodes WHERE id = ?", (nid,)).fetchone()
+        current = row[0]
+        if level < current and memsom_schema.column_exists(conn, "nodes", "archived"):
+            arow = conn.execute("SELECT archived FROM nodes WHERE id = ?", (nid,)).fetchone()
+            if arow and arow[0]:
+                raise ValueError(
+                    f"cannot lower confidentiality on archived node {nid} "
+                    f"({CONF_NAME[current]} -> {CONF_NAME[level]}): archived nodes are "
+                    f"frozen — downgrading them would launder a derived summary"
+                )
         conn.execute("UPDATE nodes SET conf_label = ? WHERE id = ?", (level, nid))
 
 

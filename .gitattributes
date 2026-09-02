@@ -1,0 +1,9 @@
+# Rule 14 (ARCHITECTURE.md / RULES): files are UTF-8, LF -- enforced here,
+# not by whatever core.autocrlf a given clone happens to carry.
+* text=auto eol=lf
+# PowerShell 5.1 and cmd need CRLF (reference_powershell_ascii_only); the
+# index keeps LF, the checkout gets CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.gif binary

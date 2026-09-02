@@ -1,22 +1,25 @@
 ---
 name: memdash
-description: Build and open an HTML telemetry dashboard for the Claude memory system — visualizes the forgetting-layer weights, hot/cold tier split, access counts, accessibility (RS) distribution, store growth, demote-risk watchlist, the section/wikilink relationship graph, and the MEMORY.md budget as interactive charts. Trigger on /memdash, "memory dashboard", "visualize my memory", "show memory telemetry", "graph the memory weights". Read-only; never writes to the store.
+description: Open the memory telemetry view of the memsom panel — visualizes the forgetting-layer weights, hot/cold tier split, access counts, accessibility (RS) distribution, store growth, demote-risk watchlist, the section/wikilink relationship graph, and the MEMORY.md budget as interactive charts. Trigger on /memdash, "memory dashboard", "visualize my memory", "show memory telemetry", "graph the memory weights". Read-only; never writes to the store.
 ---
 
 # /memdash — memory telemetry dashboard
 
-Generate a self-contained HTML dashboard from the memsom store's live data and open
-it in the browser. **Read-only** — it reads the `forget_*` node columns, the
-generated `MEMORY.md`, and (optionally) the episodic session archive; it never
-mutates the store. Safe anytime.
+The telemetry view lives in the memsom panel (the `memsom_panel` plugin package,
+`/api/memory`), fed by `memsom.interface.telemetry.build_telemetry()`. It is
+**read-only** — it reads the `forget_*` node columns, the generated `MEMORY.md`,
+and (optionally) the episodic session archive; it never mutates the store. Safe
+anytime. (The former standalone `memsom dashboard` HTML builder was removed; the
+panel is the one telemetry surface.)
 
 ```
-memsom dashboard
+memsom panel --profile <host-profile.json>
 ```
 
-On a `/memdash` invocation, **build AND open it** — run the command as above (it
-writes `~/Desktop/memory-telemetry.html` and launches the browser). Flags:
-`--no-open` (build only, for scripted/headless use), `--out PATH` (custom file).
+On a `/memdash` invocation, launch the panel as above (it binds loopback-only and
+opens the browser; `--no-open` for scripted/headless use, `--port N` to pick the
+port) and open its memory telemetry view. `memsom features --json` reports the
+`telemetry` feature's state if the view comes up empty.
 
 ## Data sources
 

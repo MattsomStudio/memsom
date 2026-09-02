@@ -34,6 +34,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tests/test_panel_contract.py re-derives LIVE_KEYS from `git show main:...` (falls back to origin/main); it FAILS, never skips, without the ref
 
       - uses: actions/setup-python@v5
         with:
@@ -346,6 +348,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # same reason as the unittest job: test_panel_contract needs main / origin/main
 
       - uses: actions/setup-python@v5
         with:

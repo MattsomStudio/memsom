@@ -25,7 +25,9 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-SCRATCH = Path(tempfile.gettempdir()) / "memsom_pentest_gates"
+# G-6: a per-process mkdtemp, not one fixed shared dir -- two concurrent gate
+# runs (parallel worktrees) must never share gates.db or a per-test .db file.
+SCRATCH = Path(tempfile.mkdtemp(prefix="memsom_pentest_gates_"))
 
 
 @pytest.fixture(scope="session", autouse=True)

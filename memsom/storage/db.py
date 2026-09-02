@@ -41,7 +41,6 @@ _DAG_NAMES = frozenset((
     "CASCADE_CTE", "insert_node", "derive_node", "get_node", "live_sources",
     "parents_of", "cascade_set", "revoke_cascade",
 ))
-_NET_NAMES = frozenset(("fetch_external", "EXT_URL", "FALLBACK", "HOME"))
 _CLI_NAMES = {
     "USER_FACT": "USER_FACT", "ENDORSED_FACT": "ENDORSED_FACT",
     "cmd_seed": "frozen_cmd_seed", "cmd_ask": "frozen_cmd_ask",
@@ -64,9 +63,6 @@ def resolve_facade_attr(name):
     if name in _DAG_NAMES:
         dag = importlib.import_module("memsom.integrity.dag")
         return getattr(dag, name)
-    if name in _NET_NAMES:
-        net = importlib.import_module("memsom.effects.net")
-        return getattr(net, name)
     if name in _CLI_NAMES:
         cli = importlib.import_module("memsom.interface.cli")
         return getattr(cli, _CLI_NAMES[name])

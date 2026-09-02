@@ -38,7 +38,8 @@ def _safe(name, fn) -> FeatureStatus:
     `active` or dropped -- kernel.features' own vocabulary rule (Sec2.1/2.3)."""
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001 -- error IS the reportable state here
+    # FAILOPEN: allowed, error IS the reportable state (kernel.features vocabulary)
+    except Exception as exc:  # noqa: BLE001
         return _status(name, "error", f"status() raised: {exc!r}")
 
 
@@ -175,7 +176,10 @@ def _gate3_broker():
     from memsom.federation import broker as memsom_broker
     path = memsom_broker.default_config_path()
     if not path.exists():
-        return _status("gate3.broker", "absent", f"no config at {path}",
+        # ARCH-15: the broker module is present (no dependency missing); a
+        # missing config file is operator state -> `disabled`, not `absent`.
+        return _status("gate3.broker", "disabled",
+                       f"not configured: no broker config at {path}",
                        knobs=["federation.broker_config_path"])
     return _status("gate3.broker", "active", f"config present: {path}",
                    knobs=["federation.broker_config_path"])
@@ -366,7 +370,8 @@ def record_transitions(conn, statuses: dict[str, FeatureStatus]) -> None:
                         "VALUES (?,?,?,?) ON CONFLICT(name) DO UPDATE SET "
                         "state=excluded.state, detail=excluded.detail, since=excluded.since",
                         (name, st["state"], st["detail"], now))
-    except Exception:  # noqa: BLE001 -- diagnostic side-write, never block migrate_all
+    # FAILOPEN: allowed, a diagnostic side-write must never block migrate_all
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -429,8 +434,9 @@ def _cmd_features(args):
     conn = None
     try:
         conn = memsom.get_connection(read_only=True)
+    # FAILOPEN: allowed, no store yet -- probes that need a conn degrade
     except Exception:
-        conn = None  # no store yet -- probes that need a conn degrade gracefully
+        conn = None
     try:
         statuses = all_statuses(conn)
     finally:

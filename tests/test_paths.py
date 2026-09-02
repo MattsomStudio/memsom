@@ -331,5 +331,50 @@ def test_rejection_happens_before_any_resolve(root, monkeypatch):
     assert os.path.normcase(calls[0]) == os.path.normcase(str(root))
 
 
+def _equivalent_spelling(target, tmp_path, root):
+    """A different-but-equivalent spelling of *target* that only realpath()
+    canonicalizes -- the shape live commit 5db43d5 accepts: a Windows 8.3
+    short name when the volume has them, else a symlinked alias directory.
+    Deliberately never skips: if no alias can be made the test FAILS, because
+    a fence test that silently exercised nothing is the vacuous pass rule 15
+    forbids."""
+    if WINDOWS:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(2048)
+        rc = ctypes.windll.kernel32.GetShortPathNameW(str(target), buf, 2048)
+        if rc and os.path.normcase(buf.value) != os.path.normcase(str(target)):
+            return buf.value
+    link = tmp_path / "alias"
+    try:
+        os.symlink(str(root), str(link), target_is_directory=True)
+    except OSError as exc:
+        pytest.fail("no equivalent spelling available on this box (8.3 names off "
+                    f"and a symlink alias was refused: {exc!r}) -- 5db43d5's "
+                    "realpath re-check cannot be exercised here")
+    return str(link / target.relative_to(root))
+
+
+def test_equivalent_spelling_of_in_root_absolute_path_is_accepted(tmp_path):
+    """Live 5db43d5: an absolute path that is INSIDE the root but spelled
+    differently (8.3 short name on Windows, /private/var-style alias on macOS)
+    fails the lexical compare and must be canonicalized before refusal. The
+    panel's scope.py / builtins.py rely on this for CI temp dirs."""
+    root = tmp_path / "longname_directory_for_short_name_spelling"
+    (root / "sub").mkdir(parents=True)
+    target = root / "sub" / "file.md"
+    target.write_text("x", encoding="utf-8")
+    alias = _equivalent_spelling(target, tmp_path, root)
+    assert os.path.normcase(alias) != os.path.normcase(str(target)), alias
+    got = safe_join(root, alias, allow_absolute=True)
+    assert os.path.normcase(str(got)) == os.path.normcase(str(target.resolve()))
+    # Control: the same canonicalization must still refuse a path that is
+    # genuinely outside the root.
+    outside = tmp_path / "elsewhere" / "evil.md"
+    outside.parent.mkdir()
+    outside.write_text("x", encoding="utf-8")
+    with pytest.raises(UnsafePath, match="outside the root"):
+        safe_join(root, str(outside), allow_absolute=True)
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-v"]))

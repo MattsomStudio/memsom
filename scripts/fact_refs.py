@@ -213,16 +213,18 @@ def _open_db_readonly(db_path: Path):
         from memsom.storage.db import get_connection
         conn = get_connection(str(db_path), read_only=True)
         return conn, "memsom.storage.db.get_connection(read_only=True)"
+    # get_connection's read-only branch is documented to open any existing
+    # path via `file:...?mode=ro` already, so this fallback is defensive
+    # (e.g. a future version narrowing what paths it accepts), not the
+    # expected path -- scripts/ is outside memsom/, so a bare sqlite3.connect
+    # here does not trip rule 4.
+    # FAILOPEN: allowed, fall back to a raw read-only sqlite3 open and say so in the note
     except Exception as exc:  # noqa: BLE001
-        # FAILOPEN: get_connection's read-only branch is documented to open
-        # any existing path via `file:...?mode=ro` already, so this fallback
-        # is defensive (e.g. a future version narrowing what paths it
-        # accepts), not the expected path -- scripts/ is outside memsom/, so
-        # a bare sqlite3.connect here does not trip rule 4.
         try:
             uri = f"file:{db_path.as_posix()}?mode=ro"
             conn = sqlite3.connect(uri, uri=True)
             return conn, f"sqlite3.connect(uri=True, mode=ro) fallback ({exc})"
+        # FAILOPEN: allowed, an unopenable --db degrades to 'no prior values' and is reported in the note
         except Exception as exc2:  # noqa: BLE001
             return None, f"could not open --db {db_path}: {exc2}"
 

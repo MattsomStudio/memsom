@@ -247,6 +247,7 @@ def check(conn):
     return violations
 
 
+# RMW-OK: orchestrator -- every write it triggers owns its own BEGIN IMMEDIATE (recompute_all, recompute_conf_all, revoke_cascade are first-death-wins / idempotent) and its one direct UPDATE is self-guarded (WHERE redacted=1 AND content != ''); wrapping the whole pass would nest transactions
 def rebuild_derived(conn):
     """Deterministic rebuild of derived state.  Source nodes are NEVER modified.
 

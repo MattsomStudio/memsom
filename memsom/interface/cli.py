@@ -169,6 +169,7 @@ def cmd_doctor_with_features(args):
     conn = None
     try:
         conn = memsom.get_connection(read_only=True)
+    # FAILOPEN: allowed, no store yet -- probes that need a conn degrade
     except Exception:
         conn = None
     try:

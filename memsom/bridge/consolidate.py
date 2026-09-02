@@ -71,10 +71,15 @@ def _live_memory_nodes(conn):
     has_tier = memsom_schema.column_exists(conn, "nodes", "forget_tier")
     bcol = "COALESCE(forget_first_seen, created_at)" if has_seen else "created_at"
     tcol = "forget_tier" if has_tier else "NULL"
+    # Rule 5: the liveness/taint dimensions come from the ONE primitive, so a
+    # quarantined or redacted memory node is never a BM25 match candidate.
+    clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
+    where = (" AND ".join(clauses)
+             + " AND source_ref LIKE 'memory:%' "
+             "AND source_ref NOT LIKE 'memory:literal:%' AND bridge_path IS NOT NULL")
     rows = conn.execute(
-        f"SELECT id, source_ref, content, {bcol}, {tcol} FROM nodes "
-        "WHERE tombstoned = 0 AND source_ref LIKE 'memory:%' "
-        "AND source_ref NOT LIKE 'memory:literal:%' AND bridge_path IS NOT NULL"
+        f"SELECT id, source_ref, content, {bcol}, {tcol} FROM nodes WHERE {where}",
+        params,
     ).fetchall()
     out = {}
     for nid, sref, content, born, tier in rows:

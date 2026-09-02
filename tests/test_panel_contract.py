@@ -241,21 +241,45 @@ class ForgetContract(unittest.TestCase):
         """Re-derive LIVE_KEYS from `git show main:...forget.py` rather than
         trusting the hardcoded set above to stay honest -- this is the test
         that would catch LIVE_KEYS itself drifting from the real live file."""
-        try:
-            out = subprocess.run(
-                ["git", "show", "main:memsom/lifecycle/forget.py"],
-                cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            self.skipTest(f"git show unavailable in this environment: {exc!r}")
-        if out.returncode != 0:
-            self.skipTest(f"git show main:...forget.py failed: {out.stderr.strip()!r}")
+        # G-5/MF-9: never skip. A checkout of a non-main ref has `main` only as
+        # `origin/main` (CI: actions/checkout with fetch-depth 0), so try both;
+        # if neither resolves this test FAILS -- a silently-green LIVE_KEYS
+        # check on a shallow clone is exactly the vacuous pass rule 15 forbids.
+        errors = []
+        out = None
+        for ref in ("main", "origin/main"):
+            try:
+                cand = subprocess.run(
+                    ["git", "show", f"{ref}:memsom/lifecycle/forget.py"],
+                    cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                self.fail(f"git show unavailable in this environment: {exc!r}")
+            if cand.returncode == 0:
+                out = cand
+                break
+            errors.append(f"{ref}: {cand.stderr.strip()!r}")
+        if out is None:
+            self.fail("git show <main|origin/main>:memsom/lifecycle/forget.py failed "
+                      f"({'; '.join(errors)}) -- fetch main (CI: fetch-depth 0) so "
+                      "the LIVE_KEYS drift check can run; it must not pass vacuously")
         m = re.search(r"PANEL_PARAM_DEFAULTS\s*=\s*\{(.*?)\n\}", out.stdout, re.S)
         self.assertIsNotNone(m, "could not locate PANEL_PARAM_DEFAULTS in main's forget.py")
         live_keys = set(re.findall(r'^\s*"([a-zA-Z0-9_]+)"\s*:', m.group(1), re.M))
         self.assertEqual(live_keys, self.LIVE_KEYS,
                           "this test's LIVE_KEYS has drifted from main's real "
                           "PANEL_PARAM_DEFAULTS key set -- update LIVE_KEYS above")
+
+
+class DistributionContract(unittest.TestCase):
+    """MF-8: the panel resolves memsom's version through importlib.metadata by
+    the DISTRIBUTION name 'memsom' (memsom_panel/kernel/version.py); a rename of
+    the distribution in pyproject.toml would break the panel with no import
+    error anywhere."""
+
+    def test_distribution_named_memsom(self):
+        import importlib.metadata as md
+        self.assertTrue(md.version("memsom"))
 
 
 class PathsContract(unittest.TestCase):

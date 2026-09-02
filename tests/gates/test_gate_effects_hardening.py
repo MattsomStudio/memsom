@@ -102,7 +102,7 @@ def test_proc_resolve_ignores_a_planted_executable_in_cwd(tmp_path, monkeypatch)
     BEFORE the spawn, so the CWD is never consulted."""
     real_git = shutil.which("git")
     if not real_git:
-        pytest.skip("no git on PATH -- nothing to compare against")
+        pytest.fail("git is required for this gate (no git on PATH)")
     poison = tmp_path / "git.exe"
     poison.write_bytes(b"not a real executable")
     monkeypatch.chdir(tmp_path)
@@ -117,7 +117,7 @@ def test_proc_run_executes_the_real_git_not_a_planted_one(tmp_path, monkeypatch)
     poisoned CWD must run the real git (or fail cleanly, if a caller passes a
     genuinely unresolvable name) -- never execute the planted file."""
     if not shutil.which("git"):
-        pytest.skip("no git on PATH -- nothing to compare against")
+        pytest.fail("git is required for this gate (no git on PATH)")
     poison = tmp_path / "git.exe"
     poison.write_bytes(b"not a real executable")
     monkeypatch.chdir(tmp_path)

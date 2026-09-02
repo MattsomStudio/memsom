@@ -141,18 +141,23 @@ def quarantine_node(conn: sqlite3.Connection, nid: int, reason: str) -> bool:
     Raises ValueError for unknown or tombstoned ids.
     """
     migrate(conn)
-    row = conn.execute(
-        "SELECT tombstoned, status FROM nodes WHERE id = ?", (nid,)
-    ).fetchone()
-    if row is None:
-        raise ValueError(f"unknown node id: {nid}")
-    tombstoned, status = row
-    if tombstoned:
-        raise ValueError(f"node {nid} is tombstoned; cannot quarantine a dead node")
-    if status == "quarantined":
-        return False
-
+    # Rule 9 (RMW guarded): same shape as promote() below -- the liveness /
+    # status read and the status flip are ONE write-locked unit, so a
+    # concurrent revoke cannot land between the "not tombstoned" check and
+    # the UPDATE (quarantining a node that just died).
     with conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT tombstoned, status FROM nodes WHERE id = ?", (nid,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown node id: {nid}")
+        tombstoned, status = row
+        if tombstoned:
+            raise ValueError(f"node {nid} is tombstoned; cannot quarantine a dead node")
+        if status == "quarantined":
+            return False
         conn.execute(
             "UPDATE nodes SET status='quarantined', quarantine_reason=?, quarantined_at=?"
             " WHERE id=?",

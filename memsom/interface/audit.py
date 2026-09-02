@@ -80,15 +80,18 @@ def _store_tiers(mem_dir):
         from memsom.storage import schema as memsom_schema
         conn = memsom.get_connection()
         try:
+            # Rule 5: liveness/taint through the ONE primitive -- a quarantined
+            # or redacted memory node is not "live in the store".
+            clauses, params = memsom_schema.taint_filter_clauses(conn, clearance=3)
+            where = " AND ".join(clauses) + " AND source_ref LIKE 'memory:%'"
             if not memsom_schema.column_exists(conn, "nodes", "forget_tier"):
                 # store present but pre-forget schema: treat all imported as live
                 rows = conn.execute(
-                    "SELECT source_ref, NULL FROM nodes "
-                    "WHERE tombstoned=0 AND source_ref LIKE 'memory:%'").fetchall()
+                    f"SELECT source_ref, NULL FROM nodes WHERE {where}", params).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT source_ref, forget_tier FROM nodes "
-                    "WHERE tombstoned=0 AND source_ref LIKE 'memory:%'").fetchall()
+                    f"SELECT source_ref, forget_tier FROM nodes WHERE {where}",
+                    params).fetchall()
         finally:
             conn.close()
     except Exception:
