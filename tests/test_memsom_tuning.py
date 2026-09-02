@@ -67,7 +67,7 @@ class TestIntBoundsFailOpen(RegistryEnv):
         os.environ[self.ENV] = "999999"        # way outside (0, 36500)
         try:
             value = tuning.resolve(self.KEY)
-        except Exception as exc:   # pragma: no cover -- this is exactly what must NOT happen
+        except Exception as exc:   # this is exactly what must NOT happen
             self.fail(f"resolve() raised on an out-of-bounds value: {exc!r}")
         self.assertEqual(value, tuning.REGISTRY[self.KEY].default)
 
@@ -82,7 +82,7 @@ class TestIntBoundsFailOpen(RegistryEnv):
         os.environ[self.ENV] = "abc"
         try:
             value = tuning.resolve(self.KEY)
-        except Exception as exc:   # pragma: no cover
+        except Exception as exc:
             self.fail(f"resolve() raised on a non-coercible value: {exc!r}")
         self.assertEqual(value, tuning.REGISTRY[self.KEY].default)
         self.assertIsInstance(value, int)
