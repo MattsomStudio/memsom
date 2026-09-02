@@ -78,6 +78,7 @@ from memsom.interface import audit as memsom_audit
 from memsom.integrity import tombstone as memsom_tombstone
 from memsom.lifecycle import contradict as memsom_contradict
 from memsom.bridge import facts as memsom_facts
+from memsom.bridge import project as memsom_project
 from memsom import tuning as memsom_tuning
 from memsom.interface import features as memsom_features
 from memsom.interface import remote as memsom_remote
@@ -968,6 +969,7 @@ def main(argv=None):
     memsom_tombstone.register(sub)
     memsom_contradict.register(sub)
     memsom_facts.register(sub)
+    memsom_project.register(sub)
     memsom_setup.register(sub)
     memsom_serve.register(sub)
     memsom_remote.register(sub)
