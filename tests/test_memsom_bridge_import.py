@@ -102,6 +102,18 @@ class TestHelpers(unittest.TestCase):
         # the H1 must not be treated as a section
         self.assertNotIn(None, m.values())
 
+    def test_sync_conflict_files_are_skipped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            mem = Path(td)
+            (mem / "user_real.md").write_text("---\nname: real\n---\nx\n", encoding="utf-8")
+            (mem / "user_real.sync-conflict-20260101-000000-ABCDEFG.md").write_text(
+                "---\nname: conflict\n---\ny\n", encoding="utf-8")
+            names = {p.name for p in bi._all_memory_files(mem)}
+            self.assertIn("user_real.md", names)
+            self.assertNotIn(
+                "user_real.sync-conflict-20260101-000000-ABCDEFG.md", names)
+
     def test_memory_type_from_frontmatter_then_prefix(self):
         self.assertEqual(bi.memory_type("anything", {"type": "feedback"}), "feedback")
         self.assertEqual(bi.memory_type("project_foo", {}), "project")

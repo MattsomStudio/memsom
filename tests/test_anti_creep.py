@@ -575,5 +575,28 @@ class TestWireAbsolutePath(unittest.TestCase):
             self.assertTrue(p.with_name("settings.json.bak").exists())
 
 
+class TestProposeProjectsSkipsFixedNotes(Base):
+    """consolidate.propose_projects must never propose a fixed project sub-note
+    (gotchas/decisions/… or a per-feature spec) for closing — those are part of
+    the node's structure, not stand-alone subprojects."""
+
+    def _mk(self, slug, stem, status="closed"):
+        d = self.mem / bi.PROJECTS_SUBDIR / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{stem}.md").write_text(
+            f"---\nname: {stem}\ndescription: x\ntype: project\nstatus: {status}\n---\nbody\n",
+            encoding="utf-8")
+
+    def test_fixed_subnote_is_never_proposed(self):
+        from memsom.bridge import consolidate
+        self._mk("demo", "project_demo", status="active")      # parent present
+        self._mk("demo", "project_demo_gotchas")               # a fixed sub-note
+        self._mk("demo", "project_demo_legacy")                # a real subproject
+        props = consolidate.propose_projects(self.conn, self.mem, min_age_days=0)
+        stems = {p["stem"] for p in props}
+        self.assertNotIn("project_demo_gotchas", stems)        # guarded
+        self.assertIn("project_demo_legacy", stems)            # control: still works
+
+
 if __name__ == "__main__":
     unittest.main()

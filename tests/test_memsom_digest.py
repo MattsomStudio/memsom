@@ -13,6 +13,7 @@ warnings.simplefilter("error", DeprecationWarning)
 
 import memsom
 from memsom.bridge import bridge_import as bi
+from memsom.bridge import project as P
 from memsom.lifecycle import forget as forget
 from memsom.distill import digest as digest
 from memsom.lifecycle import stale as memsom_stale
@@ -75,6 +76,58 @@ class Base(unittest.TestCase):
             "UPDATE nodes SET forget_tier = 'cold' WHERE source_ref = ?",
             (f"memory:{stem}",))
         self.conn.commit()
+
+
+class TestProjectsHierarchy(Base):
+    """Structured project memory: a project-node group renders ONE notes: line
+    (sub-notes hidden), a legacy group is unchanged, the main-digest pointer is
+    byte-identical, and MEMORY.md byte count never changes (project files never
+    enter it)."""
+
+    def _reimport(self):
+        bi.import_all(self.conn, self.mem, dry_run=False)
+        forget.recompute_forget(self.conn)
+
+    def test_structured_group_renders_one_notes_line(self):
+        P.init_project(self.mem, "widget")
+        P.set_feature(self.mem, "widget", "f-one", name="One", status="planned")
+        self._reimport()
+        idx = digest.render_projects_index(digest.project_entries(self.conn),
+                                           conn=self.conn)
+        self.assertEqual(idx.count("\n  notes: "), 1)
+        self.assertNotIn("project_widget_gotchas]", idx)      # sub-note hidden
+        self.assertNotIn("project_widget_spec_f-one", idx)    # feature spec hidden
+
+    def test_legacy_group_unchanged(self):
+        d = self.mem / bi.PROJECTS_SUBDIR / "old"
+        d.mkdir(parents=True)
+        (d / "project_old.md").write_text(
+            "---\nname: project_old\ndescription: legacy\ntype: project\n---\nx\n",
+            encoding="utf-8")
+        (d / "project_old_sub.md").write_text(
+            "---\nname: project_old_sub\ndescription: a sub\ntype: project\n---\ny\n",
+            encoding="utf-8")
+        self._reimport()
+        idx = digest.render_projects_index(digest.project_entries(self.conn),
+                                           conn=self.conn)
+        self.assertNotIn("notes:", idx)
+        self.assertIn("project_old_sub", idx)
+
+    def test_pointer_line_byte_identical(self):
+        self.assertEqual(
+            digest.PROJECTS_POINTER_LINE,
+            "- Project memory lives in projects/ — read projects/INDEX.md "
+            "(one group per project, subprojects nested, Active/Parked/Closed) "
+            "when a task touches ongoing work.")
+
+    def test_memory_md_bytes_unchanged_by_a_project_node(self):
+        before = digest.render_digest(self.conn)
+        P.init_project(self.mem, "widget")
+        P.set_feature(self.mem, "widget", "f-one", name="One", status="planned")
+        self._reimport()
+        after = digest.render_digest(self.conn)
+        self.assertEqual(len(before.encode("utf-8")), len(after.encode("utf-8")))
+        self.assertEqual(before, after)
 
 
 class TestRender(Base):

@@ -79,6 +79,18 @@ class TestClean(Base):
         self.assertEqual(errs, [], f"expected clean, got {errs}")
 
 
+class TestProjectFindingsMerged(Base):
+    def test_project_check_findings_appear_in_audit(self):
+        from memsom.bridge import project as P
+        P.init_project(self.mem, "demo")
+        n = P._node_path(self.mem, "demo")
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "## Creds\n", "## Creds\n- token=abcd1234efgh5678zz (inline)\n"),
+            encoding="utf-8")
+        names = self.names(self.audit())
+        self.assertIn("project-creds-value", names)
+
+
 class TestChecks(Base):
     def test_dead_index_link(self):
         (self.mem / "user_editor.md").unlink()             # linked but now missing
