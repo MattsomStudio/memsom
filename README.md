@@ -67,6 +67,11 @@ Then restart your MCP client and ask it to use the `memsom` tools. Prefer to see
 every step first? `python3 bootstrap.py --print-only` prints the config snippets
 and writes nothing.
 
+**Reinstalled, upgraded Python, or moved the venv?** Run `memsom wire-claude`
+again: it re-points every Claude Code hook that still names the old `memsom`
+executable. `memsom doctor` reports `claude.hooks: error` with the stale path
+whenever that is needed, so a broken session-end render is never silent.
+
 **Want a guided hands-on tour?** [TESTERS.md](TESTERS.md) walks you from install
 through a scripted mission ("poison it, catch it, revoke it, watch it heal") to
 running it on your own data — with expected outcomes at every step.

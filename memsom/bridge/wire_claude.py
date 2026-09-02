@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -179,10 +180,38 @@ def _upsert_command(groups, substr, entry):
     return changed
 
 
+def command_head(cmd) -> str:
+    """The executable a hook command line starts with: the first shell token,
+    quotes stripped (``"C:\\...\\memsom.exe" bridge-render`` -> ``C:\\...\\memsom.exe``)."""
+    s = (cmd or "").strip()
+    if not s:
+        return ""
+    if s[0] in "\"'":
+        end = s.find(s[0], 1)
+        return s[1:end] if end > 0 else s[1:]
+    return s.split()[0]
+
+
+def is_stale_command(cmd) -> bool:
+    """A memsom hook command that can no longer run: either PATH-dependent
+    (bare ``memsom``) or pointing at an absolute executable that no longer
+    exists -- the exact shape a reinstall leaves behind (user-site install
+    replaced by a system-site one, a venv moved, a Python upgrade). A custom
+    absolute command that still exists is NOT stale and is left alone."""
+    if is_bare_command(cmd):
+        return True
+    head = command_head(cmd)
+    if not head or not os.path.isabs(head):
+        return False
+    return not os.path.exists(head)
+
+
 def _upgrade_bare(groups, substr, entry):
-    """Replace an existing PATH-dependent (bare ``memsom``) handler for *substr*
+    """Replace an existing STALE handler for *substr* (bare ``memsom`` or an
+    absolute executable that no longer exists -- see ``is_stale_command``)
     with *entry* in place, iff *entry* itself is not bare.  Returns True when
-    something changed.  A user's own absolute/custom command is left alone."""
+    something changed.  A user's own absolute command that still exists is
+    left alone."""
     if is_bare_command(entry.get("command")):
         return False
     changed = False
@@ -191,7 +220,8 @@ def _upgrade_bare(groups, substr, entry):
             continue
         for hi, h in enumerate(g.get("hooks") or []):
             if (isinstance(h, dict) and substr in (h.get("command") or "")
-                    and is_bare_command(h.get("command"))):
+                    and is_stale_command(h.get("command"))
+                    and h != entry):
                 g["hooks"][hi] = dict(entry)
                 changed = True
     return changed

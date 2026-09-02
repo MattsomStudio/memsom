@@ -4,6 +4,8 @@ Run:  python -m unittest discover -s . -p test_wire_claude.py
 """
 
 import json
+import os
+import sys
 import tempfile
 import unittest
 import warnings
@@ -50,6 +52,54 @@ class TestHookMerge(unittest.TestCase):
         cmds = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
         self.assertIn("other thing", cmds)                   # user's hook kept
         self.assertTrue(any("bridge-render" in c for c in cmds))
+
+    def test_stale_absolute_exe_is_replaced_in_place(self):
+        # the 2026-09-02 live failure: a reinstall moved memsom.exe, the Stop
+        # hook kept the dead absolute path, every session end errored.
+        dead = r"C:\nope\Roaming\Python\Scripts\memsom.exe" if os.name == "nt" else "/nope/bin/memsom"
+        data = {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "other thing"},
+            {"type": "command", "command": f'"{dead}" bridge-render'},
+        ]}]}}
+        changed = wc.merge_hooks(data, EXE, with_prompt_hook=False)
+        self.assertEqual(changed, ["Stop"])
+        cmds = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertIn("other thing", cmds)                   # sibling hook untouched
+        self.assertEqual(sum("bridge-render" in c for c in cmds), 1)
+        self.assertTrue(any(EXE in c and "bridge-render" in c for c in cmds))
+        self.assertFalse(any(dead in c for c in cmds))
+
+    def test_custom_existing_exe_is_left_alone(self):
+        # a custom absolute command that still exists is the user's choice
+        custom = f'"{sys.executable}" -m memsom.interface.cli bridge-render'
+        data = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": custom}]}]}}
+        self.assertEqual(wc.merge_hooks(data, EXE, with_prompt_hook=False), [])
+        self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"], custom)
+
+    def test_is_stale_command_shapes(self):
+        self.assertTrue(wc.is_stale_command("memsom bridge-render"))
+        self.assertTrue(wc.is_stale_command('"/definitely/not/here/memsom" bridge-render'))
+        self.assertFalse(wc.is_stale_command(f'"{sys.executable}" -m x'))
+        self.assertFalse(wc.is_stale_command("other thing"))
+        self.assertEqual(wc.command_head('"C:\\a b\\memsom.exe" hook-prompt'), "C:\\a b\\memsom.exe")
+
+    def test_claude_hooks_feature_probe_names_the_stale_path(self):
+        from memsom.interface import features as feats
+        with tempfile.TemporaryDirectory() as home:
+            p = wc.settings_path(home)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            self.assertEqual(feats._claude_hooks(home)["state"], "disabled")   # not wired
+            dead = "/nope/bin/memsom"
+            p.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": f'"{dead}" bridge-render'}]}]}}), encoding="utf-8")
+            st = feats._claude_hooks(home)
+            self.assertEqual(st["state"], "error")
+            self.assertIn(dead, st["detail"])
+            self.assertIn("wire-claude", st["detail"])
+            p.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [
+                {"type": "command", "command": f'"{sys.executable}" -m memsom.interface.cli bridge-render'}]}]}}),
+                encoding="utf-8")
+            self.assertEqual(feats._claude_hooks(home)["state"], "active")
 
     def test_gate_opt_in_adds_pre_post(self):
         data = {}

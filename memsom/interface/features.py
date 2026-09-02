@@ -299,6 +299,46 @@ def _telemetry(conn):
 # panel -- external package, attaches via the memsom.commands entry-point group
 # ---------------------------------------------------------------------------
 
+_MEMSOM_HOOK_SUBS = ("bridge-render", "hook-prompt", "hook-pre", "hook-post")
+
+
+def _claude_hooks(home=None):
+    """Are the Claude Code hooks that call memsom actually runnable?
+
+    The failure this catches (2026-09-02, live): a reinstall moved memsom.exe
+    from the user-site Scripts dir to the system one, settings.json kept the
+    old absolute path, and every session end printed a Stop-hook error
+    instead of rendering MEMORY.md. `memsom doctor` / `memsom features` now
+    say so and name the fix (`memsom wire-claude`), which re-points every
+    stale memsom hook in place.
+    """
+    from memsom.bridge import wire_claude as wc
+    path = wc.settings_path(home)
+    if not path.exists():
+        return _status("claude.hooks", "disabled",
+                       f"not wired: no {path} (run `memsom wire-claude`)")
+    import json
+    data = json.loads(path.read_text(encoding="utf-8"))
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    ours, stale = [], []
+    for event, groups in (hooks or {}).items():
+        for g in groups if isinstance(groups, list) else []:
+            for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                cmd = h.get("command") if isinstance(h, dict) else None
+                if cmd and any(s in cmd for s in _MEMSOM_HOOK_SUBS):
+                    ours.append(f"{event}: {cmd}")
+                    if wc.is_stale_command(cmd):
+                        stale.append(f"{event} -> {wc.command_head(cmd) or cmd!r}")
+    if not ours:
+        return _status("claude.hooks", "disabled",
+                       f"no memsom hook in {path} (run `memsom wire-claude`)")
+    if stale:
+        return _status("claude.hooks", "error",
+                       "stale hook executable, session-end render is failing: "
+                       + "; ".join(stale) + " -- run `memsom wire-claude`")
+    return _status("claude.hooks", "active", f"{len(ours)} memsom hook(s) resolve in {path}")
+
+
 def _panel():
     if importlib.util.find_spec("memsom_panel") is None:
         return _status("panel", "absent", "memsom-panel not installed")
@@ -328,6 +368,7 @@ _REGISTRANTS = {
     "remote.client": lambda conn: _remote_client(),
     "telemetry": lambda conn: _telemetry(conn),
     "panel": lambda conn: _panel(),
+    "claude.hooks": lambda conn: _claude_hooks(),
 }
 
 _EXTERNAL: dict[str, object] = {}
