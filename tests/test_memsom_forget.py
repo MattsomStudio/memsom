@@ -2,8 +2,10 @@
 
 Run:  python -m unittest discover -s . -p test_memsom_forget.py
 
-TestParity proves the ported pure functions are identical to the originals in
-~/.claude/episodic/mem_weights.py; it SKIPS where that file isn't present (CI).
+TestParity proves the ported pure functions are identical to the vendored
+oracle at tests/fixtures/mem_weights_oracle.py (a checked-in snapshot of the
+operator's ~/.claude/episodic/mem_weights.py). The fixture ships in the repo,
+so this is not optional: a missing fixture is a test FAILURE, not a skip.
 """
 
 import importlib.util
@@ -21,19 +23,18 @@ import memsom
 from memsom.lifecycle import forget as forget
 
 
-# --- locate the original mem_weights for the parity test (optional) ----------
-_MW_PATH = Path.home() / ".claude" / "episodic" / "mem_weights.py"
+# --- locate the vendored parity oracle (required, not optional) --------------
+_MW_PATH = Path(__file__).resolve().parent / "fixtures" / "mem_weights_oracle.py"
 
 
 def _load_mem_weights():
     if not _MW_PATH.exists():
-        return None
-    spec = importlib.util.spec_from_file_location("mem_weights_orig", _MW_PATH)
+        raise FileNotFoundError(
+            f"vendored parity oracle missing: {_MW_PATH} "
+            "(tests/fixtures/mem_weights_oracle.py must ship in the repo)")
+    spec = importlib.util.spec_from_file_location("mem_weights_oracle", _MW_PATH)
     mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception:
-        return None
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -80,8 +81,6 @@ def _sample_inputs():
 class TestParity(unittest.TestCase):
     def setUp(self):
         self.mw = _load_mem_weights()
-        if self.mw is None:
-            self.skipTest("mem_weights.py not present (CI / non-author machine)")
 
     def test_compute_identical_to_original(self):
         canon, mems, events, now = _sample_inputs()
