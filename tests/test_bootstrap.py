@@ -9,6 +9,7 @@ Run:  python -m unittest -v test_bootstrap
 import io
 import unittest
 from contextlib import redirect_stdout
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -114,6 +115,51 @@ class TestWireFailureAborts(unittest.TestCase):
         out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("=== done ===", out)
+
+
+class TestPrintOnlyIsADryRun(unittest.TestCase):
+    """N-3: `--print-only` must not install, pull or create anything. Before the
+    dry-run branch, it executed steps 1-4 for real (venv + pip install, `ollama
+    pull` against the live daemon, `memsom init`) and only steps 5-6 printed."""
+
+    def test_print_only_skips_install_ollama_and_init(self):
+        with mock.patch.object(bootstrap, "install_memsom") as inst, \
+             mock.patch.object(bootstrap, "install_ollama") as oll, \
+             mock.patch.object(bootstrap, "run_init") as init, \
+             mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)) as run:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = bootstrap.main(["--print-only", "--no-ingest", "--data-dir", "/abs/data"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        inst.assert_not_called()
+        oll.assert_not_called()
+        init.assert_not_called()
+        self.assertIn("DRY RUN", out)
+        self.assertIn("=== done ===", out)
+        # the two wiring steps still run, in their print modes, through the
+        # in-repo package (nothing was installed, so no console script exists)
+        argvs = [c.args[0] for c in run.call_args_list]
+        self.assertEqual(len(argvs), 2)
+        for argv in argvs:
+            self.assertEqual(argv[:3], [sys.executable, "-m", "memsom.interface.cli"])
+            self.assertIn("--print-only", argv)
+
+    def test_real_run_still_installs(self):
+        # Control: without --print-only the three side-effect steps DO run.
+        with mock.patch.object(bootstrap, "install_memsom",
+                               return_value=("venv", Path("/abs/memsom-mcp"), Path("/abs/memsom"))) as inst, \
+             mock.patch.object(bootstrap, "install_ollama", return_value={"ok": True}) as oll, \
+             mock.patch.object(bootstrap, "run_init", return_value="/abs/data/memdag.db") as init, \
+             mock.patch.object(bootstrap.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)):
+            with redirect_stdout(io.StringIO()):
+                rc = bootstrap.main(["--no-ingest"])
+        self.assertEqual(rc, 0)
+        inst.assert_called_once()
+        oll.assert_called_once()
+        init.assert_called_once()
 
 
 class TestMemoryLoopStepSoftFails(unittest.TestCase):

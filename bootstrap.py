@@ -182,7 +182,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="bootstrap.py", description="Set up memsom for testing.")
     ap.add_argument("--data-dir", default=DATA_DIR_DEFAULT)
     ap.add_argument("--print-only", action="store_true",
-                    help="print client-config snippets instead of writing them")
+                    help="DRY RUN: install nothing, pull nothing, create nothing -- print "
+                         "the install/pull/init commands a real run would execute and "
+                         "the client-config snippets instead of writing them")
     ap.add_argument("--no-ingest", action="store_true", help="skip the chat-history seeding offer")
     ap.add_argument("--clients", default=None,
                     help="comma-separated subset of: " + ",".join(CLIENTS))
@@ -201,37 +203,57 @@ def main(argv=None):
     data_dir = args.data_dir
     os_name = platform.system()
 
-    # 2. Install memsom
-    print("\n[1/6] Installing memsom (isolated)...")
-    try:
-        method, mcp_exe, cli_exe = install_memsom(repo_dir, data_dir, os_name=os_name)
-    except subprocess.CalledProcessError as exc:
-        print(f"ERROR: memsom install failed (exit {exc.returncode}). "
-              f"Aborting — nothing was wired.", file=sys.stderr)
-        return 1
-    print(f"  installed via {method}; server exe -> {mcp_exe}")
-
-    # 3. Ollama (graceful-fail, continue)
-    print("\n[2/6] Installing Ollama + embedding model (required for semantic search)...")
-    plan = ollama_install_plan(os_name)
-    ostatus = install_ollama(plan)
-    if ostatus.get("ok"):
-        print(f"  ollama ready; {EMBED_MODEL} pulled.")
+    # DRY RUN (--print-only): steps 1-4 touch the machine (a venv/pipx install,
+    # `ollama pull` against the live daemon, a DB on disk), so they are only
+    # DESCRIBED here; the wiring steps 5-6 run in their own print modes through
+    # the in-repo package (`python -m memsom.interface.cli`) since nothing was
+    # installed. Before this branch existed, --print-only still executed 1-4.
+    if args.print_only:
+        print("\n  --print-only: DRY RUN -- nothing is installed, pulled or created.")
+        method = "pipx" if shutil.which("pipx") else "venv"
+        mcp_exe = resolve_exe_path(method, data_dir, "memsom-mcp", os_name=os_name)
+        cli_exe = resolve_exe_path(method, data_dir, "memsom", os_name=os_name)
+        db_path = str(Path(data_dir).expanduser() / "memdag.db")
+        print(f"\n[1/6] Would install memsom via {method}; server exe -> {mcp_exe}")
+        print(f"\n[2/6] Would run: ollama pull {EMBED_MODEL}  (skipped: dry run)")
+        print(f"\n[3/6] Would create the database at {db_path}  (skipped: dry run)")
+        print("\n[4/6] Chat ingest is an interactive offer; skipped in a dry run.")
+        cli_cmd = [sys.executable, "-m", "memsom.interface.cli"]
     else:
-        print(f"  WARNING: Ollama not ready ({ostatus.get('reason', '?')}). memsom will run on "
-              f"BM25-only until you fix this:\n    {ostatus.get('manual', '')}")
+        # 2. Install memsom
+        print("\n[1/6] Installing memsom (isolated)...")
+        try:
+            method, mcp_exe, cli_exe = install_memsom(repo_dir, data_dir, os_name=os_name)
+        except subprocess.CalledProcessError as exc:
+            print(f"ERROR: memsom install failed (exit {exc.returncode}). "
+                  f"Aborting — nothing was wired.", file=sys.stderr)
+            return 1
+        print(f"  installed via {method}; server exe -> {mcp_exe}")
+        cli_cmd = [str(cli_exe)]
 
-    # 4. init
-    print("\n[3/6] Creating the database...")
-    try:
-        db_path = run_init(cli_exe, data_dir)
-    except RuntimeError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-    print(f"  DB at {db_path}")
+        # 3. Ollama (graceful-fail, continue)
+        print("\n[2/6] Installing Ollama + embedding model (required for semantic search)...")
+        plan = ollama_install_plan(os_name)
+        ostatus = install_ollama(plan)
+        if ostatus.get("ok"):
+            print(f"  ollama ready; {EMBED_MODEL} pulled.")
+        else:
+            print(f"  WARNING: Ollama not ready ({ostatus.get('reason', '?')}). memsom will run on "
+                  f"BM25-only until you fix this:\n    {ostatus.get('manual', '')}")
+
+        # 4. init
+        print("\n[3/6] Creating the database...")
+        try:
+            db_path = run_init(cli_exe, data_dir)
+        except RuntimeError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(f"  DB at {db_path}")
 
     # 5. Opt-in chat ingest
-    if not args.no_ingest:
+    if args.print_only:
+        pass
+    elif not args.no_ingest:
         print("\n[4/6] Seed from your OWN chat history? This reads local Claude Code / Codex "
               "transcripts and ingests them stamped 'user'. Nothing leaves your machine.")
         if should_ingest(input("  Ingest your chat history now? [y/N] ")):
@@ -243,7 +265,7 @@ def main(argv=None):
 
     # 6. Wire client configs
     print("\n[5/6] Wiring MCP client config(s)...")
-    wire = [str(cli_exe), "wire-config", "--exe", str(mcp_exe), "--db", db_path]
+    wire = cli_cmd + ["wire-config", "--exe", str(mcp_exe), "--db", db_path]
     if args.print_only:
         wire.append("--print-only")
     # BOOTSTRAP-1: a real (non print-only) wiring run must abort on failure like
@@ -262,7 +284,7 @@ def main(argv=None):
     # 7. Wire the Claude Code memory loop (skills + Stop hook + CLAUDE.md block).
     # Soft step: a failure here leaves the MCP server working, so warn but don't abort.
     print("\n[6/6] Wiring the Claude Code memory loop (skills + Stop hook + CLAUDE.md)...")
-    wc = [str(cli_exe), "wire-claude",
+    wc = cli_cmd + ["wire-claude",
           "--exe", str(cli_exe),
           "--skills-src", str(repo_dir / "claude" / "skills")]
     if args.print_only:
