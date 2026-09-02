@@ -37,6 +37,11 @@ Checks (--check)
    hardware string like "...5070"), every project body is scanned for that
    fact's current value AND every prior value from the DB's supersede chain
    (`--db`), written bare instead of cited as `[[fact_memsom_x]]`.
+   Only patterns of >= 4 chars are attributable (a bare "252" is not); a
+   dotted version stays whole ("0.2.0", never "0.2"); a fact may declare
+   `distinct: false` to opt out when its value is shared by other things
+   (a version several packages carry). Generated files (projects/INDEX.md,
+   MEMORY.md) are never scanned.
 3. Fail closed: 0 project files -> violation ("0 checked"), 0
    `fact_memsom_*` files -> violation, unless `--allow-no-memsom-facts`.
 
@@ -79,12 +84,18 @@ _CANDIDATE = re.compile(
 
 # --- discovery ---------------------------------------------------------------
 
+_GENERATED = {"INDEX.md", "MEMORY.md"}   # rendered by bridge-render, never authored
+
+
 def _discover_project_files(root: Path) -> list[Path]:
     found = set(root.rglob("project_memsom*.md"))
     projects_dir = root / "projects"
     if projects_dir.is_dir():
         found |= set(projects_dir.rglob("*.md"))
-    return sorted(found)
+    # projects/INDEX.md is generated from the same files this walk already
+    # covers; scanning it would report every authored value twice and flag
+    # the digest's own rendering of a fact as "bare".
+    return sorted(p for p in found if p.name not in _GENERATED)
 
 
 def _discover_fact_files(root: Path) -> dict[str, str | None]:
@@ -97,6 +108,27 @@ def _discover_fact_files(root: Path) -> dict[str, str | None]:
     return out
 
 
+_FALSY = {"false", "no", "0", "off"}
+
+
+def _discover_nondistinct(root: Path) -> set[str]:
+    """Stems of fact_*.md files that declare `distinct: false` in frontmatter.
+
+    A fact whose value is too generic to own on sight (a version string
+    like 0.2.0 that several packages share, a three-digit seconds count)
+    opts OUT of the bare-value scan this way. It still exists, still
+    resolves as [[fact_x]], still counts as a memsom fact; the scanner just
+    never claims a coincidental "0.2.0" in another project's memory for it.
+    """
+    out: set[str] = set()
+    for path in sorted(root.glob("fact_*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        fm, _ = frontmatter_dict(text)
+        if str(fm.get("distinct", "")).strip().lower() in _FALSY:
+            out.add(path.stem)
+    return out
+
+
 # --- value -> match patterns --------------------------------------------------
 
 def _patterns_for_value(value: str) -> list[tuple[str, str]]:
@@ -104,28 +136,35 @@ def _patterns_for_value(value: str) -> list[tuple[str, str]]:
 
     Full string (case-insensitive, whitespace-collapsed) always; the leading
     numeric token (',' and '_' stripped) additionally when the value starts
-    with a number. Patterns shorter than 2 chars are dropped by the caller.
+    with a number. A dotted version (0.2.0, 1.4.12) is kept WHOLE as the
+    numeric token -- truncating it to its first float ("0.2") would own every
+    decay constant and probability in the corpus. Patterns shorter than
+    _MIN_PATTERN chars are dropped by the caller: a bare "252" or "0.2" is
+    not distinctive enough to attribute to one fact on sight.
     """
     value = (value or "").strip()
     if not value:
         return []
     out = [("string", re.sub(r"\s+", " ", value).lower())]
-    m = re.match(r"^-?\d[\d,_]*(?:\.\d+)?", value)
+    m = re.match(r"^-?\d[\d,_]*(?:\.\d+)*", value)
     if m:
         numeric = m.group(0).replace(",", "").replace("_", "")
         out.append(("numeric", numeric))
     return out
 
 
+_MIN_PATTERN = 4   # "252" / "0.2" are not attributable; "1568" / "0.2.0" are
+
+
 def _owned_patterns(memsom_fact_values: dict[str, set[str]]) -> dict[str, list[tuple[str, str]]]:
-    """stem -> deduped [(kind, pattern), ...], length-2+ only."""
+    """stem -> deduped [(kind, pattern), ...], length-_MIN_PATTERN+ only."""
     out: dict[str, list[tuple[str, str]]] = {}
     for stem, values in memsom_fact_values.items():
         seen = set()
         pats = []
         for v in values:
             for kind, pat in _patterns_for_value(v):
-                if len(pat) < 2:
+                if len(pat) < _MIN_PATTERN:
                     continue
                 key = (kind, pat)
                 if key in seen:
@@ -289,17 +328,20 @@ def main() -> int:
         violations.append("no fact_memsom_* fact exists (Q11 not migrated)")
 
     if args.check and project_files:
-        # collect owned values (current + prior via --db) for memsom facts only
+        # collect owned values (current + prior via --db) for memsom facts only;
+        # a fact that declares `distinct: false` opts out of the bare scan.
+        nondistinct = _discover_nondistinct(root)
         memsom_fact_values: dict[str, set[str]] = {
-            s: {fact_values[s]} if fact_values[s] else set() for s in memsom_stems
+            s: {fact_values[s]} if fact_values[s] else set()
+            for s in memsom_stems if s not in nondistinct
         }
         db_conn = None
-        if args.db and memsom_stems:
+        if args.db and memsom_fact_values:
             db_path = Path(args.db)
             db_conn, note = _open_db_readonly(db_path)
             print(f"[fact_refs] --db: {note}")
             if db_conn is not None:
-                for stem in memsom_stems:
+                for stem in memsom_fact_values:
                     memsom_fact_values[stem].update(_prior_values(db_conn, stem))
         owned = _owned_patterns(memsom_fact_values)
         if db_conn is not None:

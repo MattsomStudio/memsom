@@ -168,6 +168,58 @@ def test_nested_project_file_under_projects_is_found(tmp_path):
     assert "checked: 1 files" in out
 
 
+def test_generated_index_under_projects_is_not_scanned(tmp_path):
+    _fact(tmp_path, "fact_memsom_loc", "12500")
+    _project(tmp_path / "projects" / "memsom" / "project_memsom_x.md",
+              "LOC is [[fact_memsom_loc]].\n")
+    # bridge-render writes projects/INDEX.md from the same files, with the
+    # fact RESOLVED to its value -- a scan of it would flag the digest itself.
+    (tmp_path / "projects" / "INDEX.md").write_text(
+        "# Projects\n- [x](memsom/project_memsom_x.md) — LOC is 12500\n",
+        encoding="utf-8")
+
+    rc, out = _run("--check", "--memory-dir", str(tmp_path))
+    assert rc == 0, out
+    assert "checked: 1 files" in out
+
+
+def test_short_value_is_not_attributable_so_never_flagged(tmp_path):
+    _fact(tmp_path, "fact_memsom_suite_time", "252")
+    _project(tmp_path / "projects" / "memsom" / "project_memsom_x.md",
+              "port 252 on the router, 252 tickets closed; nothing about the suite.\n")
+
+    rc, out = _run("--check", "--memory-dir", str(tmp_path))
+    assert rc == 0, out
+    assert "violations: 0" in out
+
+
+def test_dotted_version_is_matched_whole_not_as_its_first_float(tmp_path):
+    _fact(tmp_path, "fact_memsom_version", "0.2.0")
+    _project(tmp_path / "projects" / "memsom" / "project_memsom_x.md",
+              "demote_below 0.2 and rs 0.25 are tuning knobs, not versions.\n"
+              "shipped memsom 0.2.0 to PyPI.\n")
+
+    rc, out = _run("--check", "--memory-dir", str(tmp_path))
+    assert rc == 1
+    assert out.count("bare value") == 1, out
+    assert "'0.2.0'" in out
+    assert ":8:" in out   # only the second body line (file line 8: 6 fm lines + 2) is a hit
+
+
+def test_distinct_false_opts_a_fact_out_of_the_bare_scan(tmp_path):
+    (tmp_path / "fact_memsom_version.md").write_text(
+        "---\nname: fact-memsom-version\ndescription: d\ntype: fact\n"
+        "value: 0.2.0\nlast-verified: 2026-09-02\nsection: none\ndistinct: false\n"
+        "---\nbody\n", encoding="utf-8")
+    _project(tmp_path / "projects" / "memsom" / "project_memsom_x.md",
+              "memsom-panel is also at 0.2.0, a different package.\n")
+
+    rc, out = _run("--check", "--memory-dir", str(tmp_path))
+    assert rc == 0, out
+    assert "facts: 1 (memsom: 1)" in out   # still counts as the memsom fact
+    assert "violations: 0" in out
+
+
 def test_candidates_never_gates_and_lists_the_phrase(tmp_path):
     _fact(tmp_path, "fact_memsom_loc", "12500")
     _project(tmp_path / "projects" / "memsom" / "project_memsom_x.md",
