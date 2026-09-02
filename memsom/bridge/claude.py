@@ -234,7 +234,8 @@ def _cmd_claude_sync(args):
         return
     try:
         res = sync(path=args.path, dry_run=args.dry_run)
-    except Exception as exc:  # noqa: BLE001 — never break a hook chain
+    # FAILOPEN: logs and returns -- this is a hook-chain CLI boundary, it must never break the chain.
+    except Exception as exc:
         print(f"[claude-sync] skipped (CLAUDE.md unchanged): {exc!r}")
         return
     if res["action"] == "malformed":
@@ -264,8 +265,9 @@ def main(argv=None) -> None:
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8")
+        # FAILOPEN: swallows and continues -- reconfigure unsupported on this stream, keep its default encoding.
         except Exception:
-            pass  # reconfigure unsupported on this stream — keep its default encoding
+            pass
     ap = argparse.ArgumentParser(prog="memsom_claude", description=__doc__)
     ap.add_argument("--path", default=None)
     ap.add_argument("--print-only", action="store_true")

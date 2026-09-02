@@ -65,8 +65,9 @@ def _tokens(text: str) -> set:
     try:
         from memsom.retrieval import retrieve as memsom_retrieve
         return set(memsom_retrieve.tokenize(text))
+    # FAILOPEN: swallows and falls back to memsom.stems -- import failed or tokenize raised, use the simpler stemmer instead of crashing.
     except Exception:
-        return memsom.stems(text)  # import failed or tokenize raised — use the simpler stemmer
+        return memsom.stems(text)
 
 
 # ---------------------------------------------------------------------------

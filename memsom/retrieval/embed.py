@@ -156,8 +156,9 @@ def bge_available() -> bool:
             import torch  # noqa: F401
             import FlagEmbedding  # noqa: F401
             _BGE_AVAILABLE = True
+        # FAILOPEN: swallows and marks unavailable -- any numpy/torch/FlagEmbedding import or DLL failure means bge is unavailable, never raises.
         except Exception:
-            _BGE_AVAILABLE = False  # any import/DLL failure -> bge unavailable (never raises)
+            _BGE_AVAILABLE = False
     return _BGE_AVAILABLE
 
 
@@ -191,8 +192,9 @@ def unload() -> None:
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    # FAILOPEN: swallows and continues -- torch missing or cache-clear failed, nothing to free, ignore.
     except Exception:
-        pass  # torch missing or cache-clear failed — nothing to free, ignore
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +253,7 @@ def encode_doc(text: str):
     """Encode a document. Returns the signal dict, or None on any failure."""
     try:
         return _encode(text)
+    # FAILOPEN: warns once and returns None -- document encoding failure degrades this doc to the sparse-only path, never crashes ingest.
     except Exception as exc:
         _warn_fallback("document encoding", exc)
         return None
@@ -264,6 +267,7 @@ def encode_query(text: str):
     """
     try:
         return _encode(text)
+    # FAILOPEN: warns once and returns None -- query encoding failure degrades this query to the sparse-only path, never crashes retrieval.
     except Exception as exc:
         _warn_fallback("query encoding", exc)
         return None
@@ -406,8 +410,8 @@ def colbert_maxsim(q_colbert, d_colbert) -> float:
         # [n_q, n_d] sims -> max over doc tokens -> sum over query tokens
         sims = q @ d.T
         return float(sims.max(dim=1).values.sum().item())
+    # FAILOPEN: not actually open -- falls back to an equivalent pure-Python computation (CI-testable, no torch) instead of raising.
     except Exception:
-        # Pure-Python fallback (CI-testable, no torch).
         total = 0.0
         for qv in q_colbert:
             best = None

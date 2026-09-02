@@ -218,7 +218,8 @@ def regenerate(conn, node_id):
     try:
         from memsom.retrieval import retrieve as memsom_retrieve
         memsom_retrieve.deindex_node(conn, node_id)
-    except Exception:  # noqa: BLE001 — retrieval is optional
+    # FAILOPEN: swallows and continues -- retrieval is optional, a deindex failure must not undo the already-committed rederive/archive.
+    except Exception:
         pass
 
     return new_id

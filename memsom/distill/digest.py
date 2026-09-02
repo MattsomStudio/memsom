@@ -128,6 +128,7 @@ def resolve_budget(memory_dir):
         params, _ = _forget.load_params(
             Path(memory_dir) / ".weights" / "canonical.json")
         return int(params["memory_budget"])
+    # FAILOPEN: swallows and returns the built-in BUDGET -- a missing/malformed canonical.json must not block the render.
     except Exception:
         return BUDGET
 
@@ -716,7 +717,8 @@ def validate(conn, *, budget=None, max_lines=None, title=None, prior_text=None,
                              section_budgets=section_budgets)
     except DigestTooLarge as exc:
         return [{"kind": "export-boundary", "detail": str(exc)}]
-    except Exception as exc:  # any render failure must block the write, not crash it
+    # FAILOPEN: not actually open -- converts any render failure into a blocking export-boundary problem instead of crashing the process.
+    except Exception as exc:
         return [{"kind": "export-boundary", "detail": f"render failed: {exc!r}"}]
     problems = []
     if not text.strip():
@@ -883,8 +885,9 @@ def main(argv=None) -> None:
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8")
+        # FAILOPEN: swallows and continues -- reconfigure unsupported on this stream, keep its default encoding.
         except Exception:
-            pass  # reconfigure unsupported on this stream — keep its default encoding
+            pass
     ap = argparse.ArgumentParser(prog="memsom_digest", description=__doc__)
     ap.add_argument("memory_dir", nargs="?", default=None)
     _cmd_shadow(ap.parse_args(argv))

@@ -23,8 +23,9 @@ def _version():
     try:
         import importlib.metadata as im
         return im.version("memsom")
+    # FAILOPEN: swallows and returns a placeholder label -- metadata lookup failed, this is a best-effort bug-report field only.
     except Exception:
-        return "unknown (not installed as a package)"  # metadata lookup failed — best-effort label
+        return "unknown (not installed as a package)"
 
 
 def _node_count():
@@ -41,8 +42,9 @@ def _node_count():
             return conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         finally:
             conn.close()
+    # FAILOPEN: swallows and returns None -- DB missing/locked/corrupt means node count is unknown, not fatal for a bug-report dump.
     except Exception:
-        return None  # DB missing/locked/corrupt -- node count unknown, not fatal
+        return None
 
 
 def _ollama_status():
@@ -56,6 +58,7 @@ def _ollama_status():
         names = [m.get("name", "") for m in data.get("models", [])]
         return {"reachable": True, "model": model,
                 "model_present": any(model in n for n in names)}
+    # FAILOPEN: swallows and reports unreachable -- doctor must never raise on a dead Ollama (module docstring).
     except Exception as exc:
         return {"reachable": False, "model": model, "error": str(exc)}
 
@@ -68,6 +71,7 @@ def _selfcheck():
                             capture_output=True, text=True, timeout=30,
                             encoding="utf-8", errors="replace")
         return {"returncode": r.returncode, "output": (r.stdout + r.stderr).strip()}
+    # FAILOPEN: swallows and reports the failure as a doctor field -- the subprocess itself failing to launch must not crash doctor.
     except Exception as exc:
         return {"returncode": None, "output": f"selfcheck failed to run: {exc}"}
 

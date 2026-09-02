@@ -110,11 +110,13 @@ def _register_plugin_commands(sub) -> None:
         return
     try:
         found = entry_points(group="memsom.commands")
+    # FAILOPEN: swallows and returns -- entry-point discovery itself failing means no plugin subcommands exist; must not take down the core CLI.
     except Exception:                                      # pragma: no cover
         return
     for ep in sorted(found, key=lambda e: e.name):
         try:
             ep.load()(sub)
+        # FAILOPEN: logs and skips this one plugin -- a broken optional subcommand must never take down the core CLI (module docstring above).
         except Exception as exc:                           # pragma: no cover
             print(f"memsom: skipping subcommand '{ep.name}': {exc}",
                   file=sys.stderr)

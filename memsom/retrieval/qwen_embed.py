@@ -87,9 +87,11 @@ def qwen_available(force: bool = False) -> bool:
         try:
             if json.loads(body).get("enabled") is False:
                 ok = False
+        # FAILOPEN: swallows and continues (leaves ok as-is) -- an older supervisor with no `enabled` key means a 200 response already implies available.
         except Exception:
-            pass  # older supervisor with no `enabled` key -> 200 means available
+            pass
         _AVAILABLE = ok
+    # FAILOPEN: swallows and marks unavailable -- the health probe itself failing (unreachable, bad JSON) means the qwen embedder is unavailable, never raises.
     except Exception:
         _AVAILABLE = False
     _AVAILABLE_AT = now
@@ -147,8 +149,10 @@ def _embed(texts):
             for t in batch:            # split the offending batch
                 try:
                     rows.append(_one(t))
+                # FAILOPEN: swallows and returns None -- one text in the split batch still fails, the whole call degrades to unavailable rather than a partial result.
                 except Exception:
                     return None
+        # FAILOPEN: swallows and returns None -- any non-400 network error means the embed call degrades to unavailable, caller falls back to BM25-only.
         except Exception:
             return None
         out.extend(rows)
@@ -162,6 +166,7 @@ def encode_docs(texts):
         return None
     try:
         return _embed(list(texts))
+    # FAILOPEN: swallows and returns None -- server down/errored, this function's own docstring guarantees it never raises.
     except Exception:
         return None
 
@@ -172,6 +177,7 @@ def encode_query(text):
         return None
     try:
         vecs = _embed([Q_INSTRUCT + text])
+    # FAILOPEN: swallows and returns None -- server down/errored, this function's own docstring guarantees it returns None rather than raising.
     except Exception:
         return None
     if not vecs:

@@ -53,6 +53,7 @@ def emit(event, **payload):
     for fn in list(_SUBSCRIBERS.get(event, ())):
         try:
             fn(**payload)
-        except Exception as exc:  # noqa: BLE001 -- collected, never swallowed
+        # FAILOPEN: not actually open -- collects (subscriber, exception) into failures and continues to the next subscriber; the caller decides what failure means (see docstring).
+        except Exception as exc:
             failures.append((fn, exc))
     return failures

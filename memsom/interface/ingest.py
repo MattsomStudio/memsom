@@ -111,7 +111,8 @@ def _cmd_ingest_dir(args) -> None:
             f"ingested {len(ids)} node(s) from {args.dir}"
             f" [channel={args.channel}, glob={args.glob}]"
         )
-    except Exception as exc:  # noqa: BLE001
+    # FAILOPEN: not actually open -- logs and exits nonzero; broad only to turn any ingest failure into a clean CLI error instead of a raw traceback.
+    except Exception as exc:
         print(f"[memsom-ingest] {exc}", file=sys.stderr)
         sys.exit(1)
     finally:

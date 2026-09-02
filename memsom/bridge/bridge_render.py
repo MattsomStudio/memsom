@@ -84,6 +84,7 @@ def _write_shed_manifest(memory_dir, excluded, budget, rendered_bytes,
         tmp = weights / "shed.json.tmp"
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(weights / "shed.json")
+    # FAILOPEN: logs and continues -- shed.json is best-effort telemetry, must never block the render.
     except Exception as exc:  # noqa: BLE001
         print(f"[bridge] shed manifest skipped: {exc!r}")
 
@@ -175,7 +176,8 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
         if verify._threshold_days() > 0:
             vstats = verify.recompute_verify_stale(conn)
             stale_marked = len(vstats.get("marked", []))
-    except Exception as exc:  # staleness is advisory — never block the render
+    # FAILOPEN: logs and continues -- staleness marking is advisory, must never block the render.
+    except Exception as exc:
         print(f"[bridge] verify-stale skipped: {exc!r}")
 
     # Budget + line cap come from the same loaded params (memory_budget /
@@ -215,7 +217,8 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
         try:
             from memsom.bridge import claude as memsom_claude
             claude = memsom_claude.sync()
-        except Exception as exc:  # noqa: BLE001
+        # FAILOPEN: logs and continues -- a CLAUDE.md sync problem must never stop the MEMORY.md render from being reported.
+        except Exception as exc:
             print(f"[bridge] claude-sync skipped: {exc!r}")
 
     return {"rendered": True, "ok": ok, "info": info,
@@ -254,11 +257,13 @@ def _cmd_bridge_render_safe(args):
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8")
+        # FAILOPEN: swallows and continues -- reconfigure unsupported on this stream, keep its default encoding.
         except Exception:
-            pass  # reconfigure unsupported on this stream — keep its default encoding
+            pass
     try:
         _cmd_bridge_render(args)
-    except Exception as exc:  # noqa: BLE001 — the hook must never crash the session
+    # FAILOPEN: logs and continues -- this is the Stop-hook CLI boundary, it must never crash the session.
+    except Exception as exc:
         print(f"[bridge] render skipped (MEMORY.md unchanged): {exc!r}")
 
 

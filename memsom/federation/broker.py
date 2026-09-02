@@ -307,9 +307,8 @@ class Upstream:
             try:
                 self.proc.terminate()
                 self.proc.wait(timeout=5)
+            # FAILOPEN: swallows and force-kills -- terminate/wait failed for any reason (timeout, already dead, OS error); kill() is the last-resort cleanup.
             except Exception:
-                # terminate/wait failed for any reason (timeout, already dead,
-                # OS error) — force kill as the last-resort cleanup.
                 self.proc.kill()
         if self.proc:
             for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
@@ -472,6 +471,7 @@ def _handle(conn, cfg, policy, upstreams, sid, msg):
 
         try:
             result = decide_and_forward(conn, cfg, policy, sid, fq, arguments, caller)
+        # FAILOPEN: logs and returns a JSON-RPC error response -- an internal forwarding failure must not crash the broker process.
         except Exception as exc:
             print(f"[memsom-broker] error forwarding {fq}: {exc}", file=sys.stderr)
             return {"jsonrpc": "2.0", "id": msg_id,

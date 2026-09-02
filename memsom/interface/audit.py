@@ -94,8 +94,9 @@ def _store_tiers(mem_dir):
                     params).fetchall()
         finally:
             conn.close()
+    # FAILOPEN: swallows and returns empty sets -- store unreachable, degrades to WARN (see docstring) instead of crashing the audit.
     except Exception:
-        return set(), set(), False  # store unreachable — degrade to WARN (see docstring)
+        return set(), set(), False
     live, cold = set(), set()
     for sref, tier in rows:
         stem = sref.split(":", 1)[1] if sref.startswith("memory:") else sref
@@ -263,8 +264,9 @@ def _cmd_audit(args):
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
+        # FAILOPEN: swallows and continues -- reconfigure unsupported on this stream, keep its default encoding.
         except Exception:
-            pass  # reconfigure unsupported on this stream — keep its default encoding
+            pass
     # Friend-beta convention: the store lives in ~/.memdag unless MEMDAG_DB is set,
     # so the cold-tier refinement reads the real store with no env wiring.
     os.environ.setdefault("MEMDAG_DB", str(Path.home() / ".memdag" / "memdag.db"))

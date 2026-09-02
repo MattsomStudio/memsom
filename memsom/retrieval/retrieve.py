@@ -304,8 +304,9 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
                 memsom_embed.store_bge(conn, nid, enc)
                 _clear_degraded(conn, nid)
                 return True
+        # FAILOPEN: swallows and falls through -- bge failed, try the Ollama dense path next, then BM25-only if that fails too.
         except Exception:
-            pass  # bge failed -> fall through to Ollama, then BM25-only
+            pass
 
     # Ollama dense path (default, or bge fall-through).
     try:
@@ -320,11 +321,8 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
                 (nid, model, dim, blob),
             )
         _clear_degraded(conn, nid)
+    # FAILOPEN: warns once and records the node as degraded -- Ollama down/model not pulled/network error (MS-32: the DEFAULT backend) must not block ingest; a later recovery pass can find it via _record_degraded.
     except Exception as exc:
-        # Ollama down, model not pulled, network error. MS-32: this is the
-        # DEFAULT backend, so this used to be the silent path -- the bge
-        # branch above already warned once per process; this one now does
-        # too, plus records the node so a recovery can find it.
         _warn_embed_fallback(exc)
         _record_degraded(conn, nid, f"ollama embed failed: {exc}")
     return True
@@ -494,8 +492,9 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
             q_vec = enc["dense"]
         else:
             q_vec = _call_ollama_embed(query)
+    # FAILOPEN: swallows and returns [] -- embedder down, caller's fusion falls back to BM25-only.
     except Exception:
-        return []  # embedder down -> silent fallback to BM25
+        return []
 
     # Load this backend's stored embeddings ONLY (dim-collision fix).
     rows = conn.execute(

@@ -99,7 +99,8 @@ def _resolve_memory_dir(memory_dir):
     try:
         from memsom.kernel.paths import default_memory_dir
         return default_memory_dir()
-    except Exception:  # noqa: BLE001
+    # FAILOPEN: swallows and returns None -- an unresolvable memory dir must not crash a purge that runs after the DB redaction already committed.
+    except Exception:
         return None
 
 
@@ -287,7 +288,8 @@ def redact_node(conn, nid, reason, cascade=True, *, memory_dir=None, vault=None,
     if redacted_ids:
         try:
             conn.execute("VACUUM")
-        except Exception:  # noqa: BLE001
+        # FAILOPEN: swallows and continues -- VACUUM is best-effort disk reclaim; a concurrent holder blocking it must never fail the redaction that already committed.
+        except Exception:
             pass
 
     return sorted(redacted_ids)

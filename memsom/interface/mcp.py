@@ -626,12 +626,9 @@ def _call_tool(name, arguments):
         code = exc.code
         if code not in (0, None):
             is_error = True
+    # MCP-2 (inner path): _call_tool CATCHES the exception and returns its text, so writing the traceback into out_buf would leak absolute paths + the internal call graph to the client (the outer handle() guard never sees it).
+    # FAILOPEN: logs the traceback to stderr for the operator and writes only a generic message to out_buf -- matching the MCP-2 contract on every route.
     except Exception:
-        # MCP-2 (inner path): _call_tool CATCHES the exception and returns its
-        # text, so writing the traceback into out_buf leaked absolute paths + the
-        # internal call graph to the client (the outer handle() guard never sees
-        # it). Log the traceback to stderr for the operator; return only a generic
-        # message — matching the MCP-2 contract on every route.
         is_error = True
         print(traceback.format_exc(), file=sys.stderr)
         out_buf.write(f"internal error in tool {name!r}")
@@ -714,9 +711,8 @@ def handle(msg):
 
         try:
             text, is_error = _call_tool(tool_name, arguments)
+        # FAILOPEN: logs the full traceback to stderr (operator) but never returns it to the client -- it leaks absolute paths + the internal call graph (MCP-2).
         except Exception:
-            # MCP-2: log the full traceback to stderr (operator), but NEVER return
-            # it to the client — it leaks absolute paths + the internal call graph.
             tb = traceback.format_exc()
             print(f"[memsom-mcp] unhandled error in _call_tool: {tb}", file=sys.stderr)
             return {
@@ -831,6 +827,7 @@ def _serve_lines(stream):
 
         try:
             response = handle(msg)
+        # FAILOPEN: logs the traceback and turns the crash into a JSON-RPC internal-error response -- one malformed/unhandled message must not kill the server loop.
         except Exception:
             tb = traceback.format_exc()
             print(f"[memsom-mcp] handle() crash: {tb}", file=sys.stderr)

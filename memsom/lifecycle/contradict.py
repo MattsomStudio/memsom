@@ -101,7 +101,8 @@ def nli_available():
             import torch  # noqa: F401,PLC0415
             import transformers  # noqa: F401,PLC0415
             _NLI_AVAILABLE = True
-        except Exception:  # noqa: BLE001 -- any import/DLL failure -> tier unavailable
+        # FAILOPEN: swallows and marks unavailable -- any torch/transformers import or DLL failure means the NLI tier is unavailable, not a crash.
+        except Exception:
             _NLI_AVAILABLE = False
     return _NLI_AVAILABLE
 
@@ -147,7 +148,8 @@ def nli_score(premise, hypothesis):
                       max_length=512, return_tensors="pt")
             probs = torch.softmax(model(**enc).logits[0], dim=-1)
             return float(probs[ci])
-    except Exception:  # noqa: BLE001 -- a scorer failure must never break ingest
+    # FAILOPEN: logs once and returns None -- a scorer failure must never break ingest.
+    except Exception:
         _warn_nli_fallback()
         return None
 
@@ -225,7 +227,8 @@ def _sentences(text, *, max_sents=40, min_len=12):
     try:
         from memsom.kernel.frontmatter import split_frontmatter
         _fm, body, _ = split_frontmatter(body)
-    except Exception:  # noqa: BLE001 -- frontmatter parsing is best-effort
+    # FAILOPEN: swallows and falls back to the raw text -- frontmatter parsing is best-effort here.
+    except Exception:
         body = text or ""
     body = re.sub(r"```.*?```", " ", body, flags=re.DOTALL)   # drop code fences
     out = []
@@ -272,6 +275,7 @@ def _make_anchored_adjudicator(nli_fn, *, anchor=None, threshold=None):
     try:
         from memsom.retrieval import embed as memsom_embed
         import numpy as np  # noqa: PLC0415
+    # FAILOPEN: swallows and returns None -- no embed backend/numpy available, caller falls back to retrieve-based candidates.
     except Exception:  # noqa: BLE001
         return None
     if not memsom_embed.bge_available():
@@ -402,7 +406,8 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
             from memsom.retrieval import retrieve as memsom_retrieve
             hits = memsom_retrieve.retrieve(conn, new_text, k=k, clearance=clearance)
             candidates = [(h[0], h[1]) for h in hits]
-        except Exception:  # noqa: BLE001 -- no retriever/embedder -> nothing to compare
+        # FAILOPEN: swallows and returns [] -- no retriever/embedder available means nothing to compare against.
+        except Exception:
             return []
 
     marked = []
@@ -413,7 +418,8 @@ def detect(conn, new_id, *, k=5, candidates=None, adjudicate=None,
             continue
         try:
             verdict = adjudicate(new_text, ctext)
-        except Exception:  # noqa: BLE001 -- an adjudicator failure must not break ingest
+        # FAILOPEN: swallows and treats as no-verdict -- an adjudicator failure must not break ingest.
+        except Exception:
             verdict = None
         if verdict is None:
             continue
@@ -481,6 +487,7 @@ def _embed_candidate_fn(conn, k):
     try:
         from memsom.retrieval import embed as memsom_embed
         import numpy as np  # noqa: PLC0415
+    # FAILOPEN: swallows and returns None -- no embed backend/numpy available, caller falls back to retrieve-based candidates.
     except Exception:  # noqa: BLE001
         return None
     if not memsom_embed.bge_available():

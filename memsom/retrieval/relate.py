@@ -96,8 +96,9 @@ def _node_conf(conn, nid):
     try:
         row = conn.execute("SELECT conf_label FROM nodes WHERE id=?", (nid,)).fetchone()
         return row[0] if row else 0
+    # FAILOPEN: swallows and returns 0 -- conf_label column absent (pre-migration schema) means a neutral default, not a crash.
     except Exception:
-        return 0  # conf_label column absent (pre-migration schema) -> neutral default
+        return 0
 
 
 def _is_dead(conn, nid):
@@ -116,8 +117,9 @@ def _is_redacted(conn, nid):
     try:
         row = conn.execute("SELECT redacted FROM nodes WHERE id=?", (nid,)).fetchone()
         return bool(row[0]) if row else False
+    # FAILOPEN: swallows and returns False -- redacted column absent (pre-migration schema) means a neutral default, not a crash.
     except Exception:
-        return False  # redacted column absent (pre-migration schema) -> neutral default
+        return False
 
 
 def _is_archived(conn, nid):

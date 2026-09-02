@@ -310,6 +310,7 @@ def chunk_file(path: str) -> list:
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             src = f.read()
+    # FAILOPEN: swallows and returns [] -- an unreadable file (permissions, race, binary) yields no chunks instead of crashing the index build.
     except Exception:
         return []
     if not src.strip():
@@ -370,6 +371,7 @@ def _git_listed_files(root: str):
             ["git", "-C", root, "ls-files", "-z", "--cached", "--others",
              "--exclude-standard"],
             capture_output=True, timeout=120)
+    # FAILOPEN: swallows and returns None -- git ls-files failing (no repo, git missing) means the tracked-file listing is unavailable, caller degrades.
     except Exception:
         return None
     if out.returncode != 0:
@@ -510,6 +512,7 @@ def _git_changed(root: str) -> list:
         out = memsom_proc.run(
             ["git", "-C", root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
             capture_output=True, text=True, timeout=30)
+    # FAILOPEN: swallows and returns [] -- git diff-tree failing (no repo, no HEAD yet) means no changed files, not a crash.
     except Exception:
         return []
     if out.returncode != 0:

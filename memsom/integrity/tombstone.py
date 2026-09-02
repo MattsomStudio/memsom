@@ -224,8 +224,9 @@ def main(argv=None) -> None:
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8")
+        # FAILOPEN: swallows and continues -- reconfigure unsupported on this stream, keep its default encoding.
         except Exception:
-            pass  # reconfigure unsupported on this stream — keep its default encoding
+            pass
     ap = argparse.ArgumentParser(prog="memsom_tombstone", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     register(sub)

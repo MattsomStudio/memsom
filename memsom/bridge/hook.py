@@ -88,7 +88,8 @@ def load_hook_policy():
     if path is not None:
         try:
             return memsom_policy.load_policy(path)
-        except Exception as exc:  # noqa: BLE001 — fall back, never disable the gate
+        # FAILOPEN: logs and falls back to the built-in policy -- a malformed override must never disable the gate.
+        except Exception as exc:
             print(f"[memsom-hook] policy {path} unusable, using built-in default: {exc}",
                   file=sys.stderr)
     return memsom_policy._normalize(DEFAULT_HOOK_POLICY)
@@ -150,9 +151,7 @@ def apply_post(conn, policy, session_id, tool):
     reason = f"hook:{tool}"
     try:
         return memsom_session.lower_floor(conn, session_id, taint, tool, reason=reason)
-    # FAILOPEN: not actually open -- caught only to record a pending taint
-    # before propagating; the bare `raise` below re-throws unchanged so
-    # cmd_hook_post's own handler still logs it to stderr.
+    # FAILOPEN: not actually open -- re-raises after recording the pending taint; broad only to guarantee the taint is recorded before any exception type propagates.
     except Exception:
         memsom_session.record_pending_taint(conn, session_id, taint, tool, reason)
         raise
@@ -182,7 +181,8 @@ def _read_stdin_json():
     try:
         raw = sys.stdin.read()
         return json.loads(raw) if raw.strip() else {}
-    except Exception:  # noqa: BLE001
+    # FAILOPEN: swallows and returns {} -- malformed/unreadable hook JSON must not crash the hook process.
+    except Exception:
         return {}
 
 
@@ -199,12 +199,14 @@ def cmd_hook_pre(args):
             verdict = decide_pre(conn, policy, sid, tool)
         finally:
             conn.close()
-    except Exception as exc:  # noqa: BLE001 — fail OPEN (availability), logged
+    # FAILOPEN: logs and returns (allows the tool call) -- an internal PreToolUse error fails OPEN for availability.
+    except Exception as exc:
         print(f"[memsom-hook] pre error (failing open): {exc}", file=sys.stderr)
         return
     try:
         log_shadow_decision(verdict, tool)
-    except Exception as exc:  # noqa: BLE001 -- logging must never break the gate
+    # FAILOPEN: logs and continues -- shadow-log writing must never break the gate decision already made.
+    except Exception as exc:
         print(f"[memsom-hook] shadow log write failed: {exc}", file=sys.stderr)
     if hook_mode() != "enforcing":
         return  # shadow mode: decision logged, nothing ever blocked
@@ -226,7 +228,8 @@ def cmd_hook_post(args):
             apply_post(conn, policy, sid, tool)
         finally:
             conn.close()
-    except Exception as exc:  # noqa: BLE001
+    # FAILOPEN: logs and returns -- an internal PostToolUse error must not crash the hook process.
+    except Exception as exc:
         print(f"[memsom-hook] post error: {exc}", file=sys.stderr)
         return
 
