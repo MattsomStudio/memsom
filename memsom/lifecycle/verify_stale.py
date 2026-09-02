@@ -71,7 +71,10 @@ DUE_RE = re.compile(
 # --- pure helpers -------------------------------------------------------------
 
 def _threshold_days() -> int:
-    raw = (memsom_tuning.resolve("lifecycle.verify_stale_days") or "").strip()
+    raw = memsom_tuning.resolve("lifecycle.verify_stale_days")
+    if isinstance(raw, int):  # unset -> the registered (typed) default
+        return raw
+    raw = (raw or "").strip()
     if not raw:
         return DEFAULT_THRESHOLD_DAYS
     try:

@@ -117,6 +117,8 @@ def _cite_overlap_floor():
     node — falls below the floor and is rejected fail-closed.
     """
     raw = memsom_tuning.resolve("llm.cite_overlap")
+    if isinstance(raw, float):  # unset -> the registered (typed) default
+        return max(0.0, min(1.0, raw))
     if raw is None or not raw.strip():
         return DEFAULT_CITE_OVERLAP
     try:

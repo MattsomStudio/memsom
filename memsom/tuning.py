@@ -21,24 +21,40 @@ lifecycle/forget.py:load_params (PLAN.md Sec1.7: protected, byte-identical
 DEFAULTS, golden parity test). This registry is for the knobs that were
 scattered bare os.environ.get() calls before Phase 8; it centralizes the
 *read*, not the parsing each call site already did on the raw value.
+
+Every knob carries an explicit `type` -- one of the Python types `int`,
+`float`, `bool`, `str`, or the string sentinels `"path"` (a str, semantically
+a filesystem path) and `"enum"` (a str restricted to `choices`). Numeric
+knobs (`int`/`float`) carry `bounds` -- a generous sanity fence, not a tuning
+opinion; the bound only exists so a badly-set operator env var cannot corrupt
+the process, not to enforce a "best" value. `resolve()` NEVER raises on a
+malformed or out-of-bounds env value: it logs one warning per knob per
+process and falls back to `default`. On a VALID env value it still returns
+the raw string unmodified, exactly as before Phase 8's ARCH-09 pass -- every
+call site keeps doing its own final coercion; this module only decides
+whether the raw value is safe to hand to that call site at all.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
+
+_LOG = logging.getLogger("memsom.tuning")
 
 
 @dataclass(frozen=True)
 class Knob:
     key: str
-    type: type
+    type: type | str
     default: object
     bounds: tuple | None
     source: str   # "env:MEMDAG_..." | "canonical" | "const" -- only "env:" resolves here
     doc: str
     feature: str | None = None
+    choices: tuple | None = None   # only meaningful when type == "enum"
 
 
 REGISTRY: dict[str, Knob] = {}
@@ -46,35 +62,106 @@ REGISTRY: dict[str, Knob] = {}
 _lock = threading.Lock()
 _overrides: dict[str, object] = {}
 
+_warn_lock = threading.Lock()
+_warned_keys: set[str] = set()
 
-def _register(key: str, *, type: type = str, default=None, bounds=None,
-              source: str, doc: str, feature: str | None = None) -> None:
+_BOOL_TRUE = ("1", "true", "yes")
+_BOOL_FALSE = ("0", "false", "no")
+
+
+def _register(key: str, *, type: type | str = str, default=None, bounds=None,
+              source: str, doc: str, feature: str | None = None,
+              choices: tuple | None = None) -> None:
     REGISTRY[key] = Knob(key=key, type=type, default=default, bounds=bounds,
-                          source=source, doc=doc, feature=feature)
+                          source=source, doc=doc, feature=feature, choices=choices)
+
+
+def _coerce(knob: Knob, raw: str):
+    """Interpret *raw* as knob.type. Returns the coerced value on success;
+    raises ValueError/TypeError on failure -- resolve() catches this, never
+    lets it propagate."""
+    t = knob.type
+    if t is bool:
+        s = raw.strip().lower()
+        if s in _BOOL_TRUE:
+            return True
+        if s in _BOOL_FALSE:
+            return False
+        raise ValueError(f"not a boolean (expected one of {_BOOL_TRUE + _BOOL_FALSE}): {raw!r}")
+    if t is int:
+        return int(raw.strip())
+    if t is float:
+        return float(raw.strip())
+    if t == "enum":
+        s = raw.strip()
+        choices = knob.choices or ()
+        for c in choices:
+            if s.lower() == str(c).lower():
+                return s
+        raise ValueError(f"{raw!r} not one of {choices}")
+    # str / path: any string is valid, no coercion needed.
+    return raw
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Log at most one fail-open warning per knob per process (stdlib
+    logging, never print/raise)."""
+    with _warn_lock:
+        if key in _warned_keys:
+            return
+        _warned_keys.add(key)
+    _LOG.warning(message)
+
+
+def _clear_warned(key: str | None = None) -> None:
+    """Test-isolation escape hatch (mirrors clear_override below): forget
+    which knobs have already logged a fail-open warning this process, so a
+    test can assert 'exactly one warning' without an earlier test's resolve()
+    call having already consumed it. Production call sites never need this."""
+    with _warn_lock:
+        if key is None:
+            _warned_keys.clear()
+        else:
+            _warned_keys.discard(key)
 
 
 def resolve(key: str, *, conn=None):
-    """In-process override > env > default. Every knob here is `source="env:..."`;
-    the raw string is returned unmodified (or `default`) -- callers keep doing
-    the same coercion they always did, on a value read from one place now."""
+    """In-process override > env > default.
+
+    Every real knob here is `source="env:..."`. When the env var is unset,
+    `default` is returned as-is (its native type -- a bool/int/float for a
+    typed knob, a str otherwise). When it IS set, the raw string is validated
+    against the knob's type and bounds; a value that coerces cleanly and (for
+    numeric knobs) sits inside `bounds` is returned UNMODIFIED as the raw
+    string -- callers keep doing the same coercion they always did. A value
+    that fails coercion or falls outside bounds never raises: it logs one
+    warning for this key (this process) and falls back to `default`.
+    """
     knob = REGISTRY[key]
     with _lock:
         if key in _overrides:
             return _overrides[key]
-    if knob.source.startswith("env:"):
-        var = knob.source[len("env:"):]
-        raw = os.environ.get(var)
-        if raw is not None:
-            if knob.bounds is not None:
-                try:
-                    numeric = float(raw)
-                except ValueError:
-                    return knob.default
-                lo, hi = knob.bounds
-                if not (lo <= numeric <= hi):
-                    raise ValueError(f"{key} ({var}={raw!r}) out of bounds [{lo}, {hi}]")
-            return raw
-    return knob.default
+    if not knob.source.startswith("env:"):
+        return knob.default
+    var = knob.source[len("env:"):]
+    raw = os.environ.get(var)
+    if raw is None:
+        return knob.default
+
+    try:
+        value = _coerce(knob, raw)
+    except (ValueError, TypeError) as exc:
+        _warn_once(key, f"{key} ({var}={raw!r}): {exc}; falling back to default {knob.default!r}")
+        return knob.default
+
+    if knob.bounds is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+        lo, hi = knob.bounds
+        if not (lo <= value <= hi):
+            _warn_once(key, f"{key} ({var}={raw!r}) out of bounds [{lo}, {hi}]; "
+                             f"falling back to default {knob.default!r}")
+            return knob.default
+
+    return raw
 
 
 def override(key: str, value) -> None:
@@ -96,15 +183,20 @@ def snapshot(conn=None) -> dict[str, object]:
     return {key: resolve(key, conn=conn) for key in REGISTRY}
 
 
+def _type_name(t) -> str:
+    return t.__name__ if isinstance(t, type) else str(t)
+
+
 def as_json(conn=None) -> dict[str, dict]:
     out = {}
     for key, knob in REGISTRY.items():
         out[key] = {
             "key": key,
             "name": key,
-            "type": knob.type.__name__ if isinstance(knob.type, type) else str(knob.type),
+            "type": _type_name(knob.type),
             "default": knob.default,
             "bounds": list(knob.bounds) if knob.bounds is not None else None,
+            "choices": list(knob.choices) if knob.choices is not None else None,
             "source": knob.source,
             "doc": knob.doc,
             "feature": knob.feature,
@@ -117,127 +209,153 @@ def as_json(conn=None) -> dict[str, dict]:
 # Registrations. Grouped by the module that reads them.
 # ---------------------------------------------------------------------------
 
-_register("bridge.author", default="1", source="env:MEMDAG_BRIDGE_AUTHOR",
+_register("bridge.author", type=bool, default=True, source="env:MEMDAG_BRIDGE_AUTHOR",
            doc="Stamp bridge-authored nodes as author-channel unless '0'.")
-_register("bridge.claude_md_path", default="", source="env:CLAUDE_MD_PATH",
+_register("bridge.claude_md_path", type="path", default="", source="env:CLAUDE_MD_PATH",
            doc="Override path to the bundled CLAUDE.md template.")
-_register("bridge.hook_policy_path", default="", source="env:MEMDAG_HOOK_POLICY",
+_register("bridge.hook_policy_path", type="path", default="", source="env:MEMDAG_HOOK_POLICY",
            doc="Override path to the Stop-hook policy file.")
-_register("bridge.hook_mode", default="shadow", source="env:MEMDAG_HOOK_MODE",
+_register("bridge.hook_mode", type="enum", choices=("shadow", "enforcing"),
+           default="shadow", source="env:MEMDAG_HOOK_MODE",
            doc="Gate #3 hook arm: 'shadow' (log would-be decisions, deny nothing) "
                "or 'enforcing' (emit real PreToolUse denials). PLAN.md Phase 9 "
                "mandates shadow first.", feature="gate3.hook")
-_register("bridge.hook_shadow_log", default="", source="env:MEMDAG_HOOK_SHADOW_LOG",
+_register("bridge.hook_shadow_log", type="path", default="", source="env:MEMDAG_HOOK_SHADOW_LOG",
            doc="Override path to Gate #3's shadow decision log "
                "(default ~/.claude/gate3_shadow.jsonl).", feature="gate3.hook")
-_register("bridge.memory_dir", default="", source="env:MEMDAG_BRIDGE_MEMORY_DIR",
+_register("bridge.memory_dir", type="path", default="", source="env:MEMDAG_BRIDGE_MEMORY_DIR",
            doc="Override the discovered Claude memory dir (also read directly "
                "by kernel.paths.default_memory_dir -- see module docstring).")
-_register("bridge.index_enabled", default="1", source="env:MEMDAG_BRIDGE_INDEX",
+_register("bridge.index_enabled", type=bool, default=True, source="env:MEMDAG_BRIDGE_INDEX",
            doc="Keep the retrieval index current on bridge import unless '0' "
                "(the kill-switch restores the old write-only behaviour).")
-_register("obsidian.vault", default="", source="env:MEMDAG_OBSIDIAN_VAULT",
+_register("obsidian.vault", type="path", default="", source="env:MEMDAG_OBSIDIAN_VAULT",
            doc="The operator-configured Obsidian vault root.", feature="obsidian")
 
-_register("distill.digest_shrink_floor", default="", source="env:MEMDAG_DIGEST_SHRINK_FLOOR",
-           doc="Digest shrink floor override (float).", feature="distill")
-_register("distill.digest_sections", default="", source="env:MEMDAG_DIGEST_SECTIONS",
+_register("distill.digest_shrink_floor", type=float, default=0.5, bounds=(0.0, 1.0),
+           source="env:MEMDAG_DIGEST_SHRINK_FLOOR",
+           doc="Digest shrink floor (0..1); out-of-range or unparsable falls back "
+               "to this default (matches digest.py's own SHRINK_FLOOR).", feature="distill")
+_register("distill.digest_sections", type=str, default="", source="env:MEMDAG_DIGEST_SECTIONS",
            doc="Comma-separated digest section display order.", feature="distill")
-_register("distill.digest_title", default="# Memory", source="env:MEMDAG_DIGEST_TITLE",
+_register("distill.digest_title", type=str, default="# Memory", source="env:MEMDAG_DIGEST_TITLE",
            doc="Digest document title.", feature="distill")
-_register("distill.projects_title", default="# Projects", source="env:MEMDAG_PROJECTS_TITLE",
+_register("distill.projects_title", type=str, default="# Projects", source="env:MEMDAG_PROJECTS_TITLE",
            doc="projects/INDEX.md document title.", feature="distill")
 
-_register("llm.model", default="", source="env:MEMDAG_LLM_MODEL",
+_register("llm.model", type=str, default="", source="env:MEMDAG_LLM_MODEL",
            doc="Ollama model name for distill/retrieval LLM calls.", feature="llm")
-_register("llm.url", default="", source="env:MEMDAG_LLM_URL",
+_register("llm.url", type=str, default="", source="env:MEMDAG_LLM_URL",
            doc="Ollama base URL for LLM calls.", feature="llm")
-_register("llm.ollama_keep_alive", default="", source="env:MEMDAG_OLLAMA_KEEP_ALIVE",
-           doc="Ollama keep_alive duration string, passed through verbatim.", feature="llm")
-_register("llm.cite_overlap", default="", source="env:MEMDAG_LLM_CITE_OVERLAP",
-           doc="Minimum citation overlap floor (float).", feature="llm")
+_register("llm.ollama_keep_alive", type=str, default="", source="env:MEMDAG_OLLAMA_KEEP_ALIVE",
+           doc="Ollama keep_alive duration string, passed through verbatim "
+               "(a numeric string OR a duration like '10m' -- caller decides).",
+           feature="llm")
+_register("llm.cite_overlap", type=float, default=0.2, bounds=(-1_000_000.0, 1_000_000.0),
+           source="env:MEMDAG_LLM_CITE_OVERLAP",
+           doc="Minimum citation overlap floor (float); llm.py clamps the final "
+               "value to [0.0, 1.0] itself, so this bound is a wide sanity fence "
+               "only, not the real domain (test_cite_overlap_floor_env_clamped "
+               "relies on out-of-[0,1] values like 2.5/-1 reaching that clamp).",
+           feature="llm")
 
-_register("federation.broker_config_path", default="", source="env:MEMDAG_BROKER_CONFIG",
+_register("federation.broker_config_path", type="path", default="", source="env:MEMDAG_BROKER_CONFIG",
            doc="Override path to the broker's config file.", feature="gate3.broker")
-_register("federation.origin", default="", source="env:MEMDAG_ORIGIN",
+_register("federation.origin", type=str, default="", source="env:MEMDAG_ORIGIN",
            doc="This machine's federation origin name.", feature="federation.sync")
 
-_register("integrity.channel_ceiling", default="", source="env:MEMDAG_CHANNEL_CEILING",
-           doc="Max channel rank ingest_text will stamp (0-3), or unset for none.")
-_register("integrity.clearance_ceiling", default="", source="env:MEMDAG_CLEARANCE_CEILING",
-           doc="Max confidentiality rank retrieval may see (0-3 or a rank name).")
+_register("integrity.channel_ceiling", type=str, default="", source="env:MEMDAG_CHANNEL_CEILING",
+           doc="Max channel rank ingest_text will stamp (0-3 or a channel name), "
+               "or unset for none. ingest.py validates and raises its own "
+               "ValueError on a bad value -- kept as str here, no tuning-level "
+               "bounds, since the valid domain is a rank name OR a digit.")
+_register("integrity.clearance_ceiling", type=str, default="", source="env:MEMDAG_CLEARANCE_CEILING",
+           doc="Max confidentiality rank retrieval may see (0-3 or a rank name). "
+               "Same shape as integrity.channel_ceiling -- validated locally.")
 
-_register("mcp.channel_ceiling", default="", source="env:MEMSOM_MCP_CHANNEL_CEILING",
-           doc="MCP server's channel ceiling override.")
-_register("mcp.export_dir", default="", source="env:MEMSOM_MCP_EXPORT_DIR",
+_register("mcp.channel_ceiling", type=str, default="", source="env:MEMSOM_MCP_CHANNEL_CEILING",
+           doc="MCP server's channel ceiling override (rank name or 0-3).")
+_register("mcp.export_dir", type="path", default="", source="env:MEMSOM_MCP_EXPORT_DIR",
            doc="Directory a model-driven export may write into.")
 
-_register("retrieval.warm_disabled", default="", source="env:MEMDAG_WARM_ENDPOINT",
+_register("retrieval.warm_disabled", type=str, default="", source="env:MEMDAG_WARM_ENDPOINT",
            doc="'0'/'off'/'false'/'no' disables the loopback warm retrieval "
-               "endpoint the prompt hook queries.")
+               "endpoint the prompt hook queries. Kept as str (not bool) -- "
+               "'off' isn't in the standard bool vocabulary and warm.py's own "
+               "disabled_by_env() already does this exact comparison.")
 
-_register("saveall.userprofile_fallback", default="", source="env:USERPROFILE",
+_register("saveall.userprofile_fallback", type="path", default="", source="env:USERPROFILE",
            doc="Windows subprocess cwd fallback for the detached /saveall child.")
 
-_register("contradict.nli_model", default="", source="env:MEMDAG_CONTRADICT_NLI_MODEL",
+_register("contradict.nli_model", type=str, default="", source="env:MEMDAG_CONTRADICT_NLI_MODEL",
            doc="NLI model name for contradiction detection.", feature="contradict.nli")
-_register("contradict.nli_threshold", default="0.85", source="env:MEMDAG_CONTRADICT_NLI_THRESHOLD",
-           doc="Contradiction-probability cutoff (float).", feature="contradict.nli")
-_register("contradict.nli_enabled", default="", source="env:MEMDAG_CONTRADICT_NLI",
+_register("contradict.nli_threshold", type=float, default=0.85, bounds=(0.0, 1.0),
+           source="env:MEMDAG_CONTRADICT_NLI_THRESHOLD",
+           doc="Contradiction-probability cutoff (float, 0..1).", feature="contradict.nli")
+_register("contradict.nli_enabled", type=bool, default=False, source="env:MEMDAG_CONTRADICT_NLI",
            doc="Opt in to the NLI contradiction tier.", feature="contradict.nli")
-_register("contradict.anchor", default="0.80", source="env:MEMDAG_CONTRADICT_ANCHOR",
-           doc="Anchor-similarity threshold for contradiction candidates (float).",
+_register("contradict.anchor", type=float, default=0.80, bounds=(0.0, 1.0),
+           source="env:MEMDAG_CONTRADICT_ANCHOR",
+           doc="Anchor-similarity threshold for contradiction candidates (float, 0..1).",
            feature="contradict.nli")
-_register("contradict.enabled", default="", source="env:MEMDAG_CONTRADICT",
+_register("contradict.enabled", type=bool, default=False, source="env:MEMDAG_CONTRADICT",
            doc="Opt in to the structured contradiction detector.")
-_register("contradict.enforce", default="", source="env:MEMDAG_CONTRADICT_ENFORCE",
+_register("contradict.enforce", type=bool, default=False, source="env:MEMDAG_CONTRADICT_ENFORCE",
            doc="Enforce (not just record) contradiction sweeps.")
 
-_register("retrieval.embed_url", default="", source="env:MEMDAG_EMBED_URL",
+_register("retrieval.embed_url", type=str, default="", source="env:MEMDAG_EMBED_URL",
            doc="Ollama embeddings endpoint, used by doctor and retrieve.")
-_register("retrieval.embed_model", default="", source="env:MEMDAG_EMBED_MODEL",
+_register("retrieval.embed_model", type=str, default="", source="env:MEMDAG_EMBED_MODEL",
            doc="Ollama embeddings model, used by doctor and retrieve.")
-_register("lifecycle.verify_stale_days", default="", source="env:MEMDAG_VERIFY_STALE_DAYS",
-           doc="Staleness threshold in days (int).")
+_register("lifecycle.verify_stale_days", type=int, default=21, bounds=(0, 36500),
+           source="env:MEMDAG_VERIFY_STALE_DAYS",
+           doc="Staleness threshold in days (int); 0 turns the pass off "
+               "(bridge_render's test_... relies on 0 being in-bounds).")
 
-_register("code_rag.enabled", default="", source="env:MEMSOM_CODE_RAG",
+_register("code_rag.enabled", type=bool, default=False, source="env:MEMSOM_CODE_RAG",
            doc="Opt in to the code-RAG index.", feature="code_rag")
-_register("code_rag.qwen_url", default="", source="env:MEMSOM_QWEN_URL",
+_register("code_rag.qwen_url", type=str, default="", source="env:MEMSOM_QWEN_URL",
            doc="Qwen embedding supervisor URL.", feature="code_rag")
 
-_register("embed.backend", default="", source="env:MEMDAG_EMBED_BACKEND",
-           doc="Embedding backend: ollama | bge-m3 | bm25.", feature="retrieval.bge")
-_register("retrieval.colbert_candidates", default="", source="env:MEMDAG_COLBERT_CANDIDATES",
+_register("embed.backend", type="enum", choices=("ollama", "bge-m3", "bm25"),
+           default="", source="env:MEMDAG_EMBED_BACKEND",
+           doc="Embedding backend: ollama | bge-m3 | bm25. Unknown/unset falls "
+               "back to embed.py's own DEFAULT_BACKEND ('ollama').",
+           feature="retrieval.bge")
+_register("retrieval.colbert_candidates", type=int, default=100, bounds=(1, 1_000_000),
+           source="env:MEMDAG_COLBERT_CANDIDATES",
            doc="ColBERT re-rank window size (int).", feature="retrieval.colbert")
-_register("retrieval.colbert_maxlen", default="", source="env:MEMDAG_COLBERT_MAXLEN",
+_register("retrieval.colbert_maxlen", type=int, default=512, bounds=(1, 1_000_000),
+           source="env:MEMDAG_COLBERT_MAXLEN",
            doc="ColBERT passage/query token cap (int).", feature="retrieval.colbert")
-_register("retrieval.bge_device", default="", source="env:MEMDAG_BGE_DEVICE",
+_register("retrieval.bge_device", type=str, default="", source="env:MEMDAG_BGE_DEVICE",
            doc="Force the BGE-M3 device (cuda/cpu); unset auto-selects.", feature="retrieval.bge")
-_register("retrieval.bge_unload", default="", source="env:MEMDAG_BGE_UNLOAD",
+_register("retrieval.bge_unload", type=bool, default=False, source="env:MEMDAG_BGE_UNLOAD",
            doc="Unload the BGE-M3 model after a batch reindex.", feature="retrieval.bge")
 
-_register("storage.sync_extra_markers", default="", source="env:MEMSOM_EXTRA_SYNC_MARKERS",
+_register("storage.sync_extra_markers", type=str, default="", source="env:MEMSOM_EXTRA_SYNC_MARKERS",
            doc="Comma-separated extra file-sync marker names, visibility only -- "
                "kernel.syncguard (rank 0) reads MEMSOM_EXTRA_SYNC_MARKERS itself "
                "(cannot import tuning upward). Same pattern as bridge.memory_dir.")
-_register("remote.action_gate_mode", default="shadow", source="env:MEMDAG_REMOTE_ACTION_GATE_MODE",
+_register("remote.action_gate_mode", type="enum", choices=("shadow", "enforcing"),
+           default="shadow", source="env:MEMDAG_REMOTE_ACTION_GATE_MODE",
            doc="Remote mutate calls' action-gate (capgate.check_capability) mode: "
                "'shadow' (log the verdict, deny nothing beyond the capability "
                "table) or 'enforcing'. PLAN.md Phase 10 mandates shadow first, "
                "same schedule as bridge.hook_mode.", feature="remote.server")
-_register("remote.export_dir", default="", source="env:MEMSOM_REMOTE_EXPORT_DIR",
+_register("remote.export_dir", type="path", default="", source="env:MEMSOM_REMOTE_EXPORT_DIR",
            doc="Directory a remote export tool call may write into.")
-_register("remote.tls_cert", default="", source="env:MEMSOM_REMOTE_TLS_CERT",
+_register("remote.tls_cert", type="path", default="", source="env:MEMSOM_REMOTE_TLS_CERT",
            doc="Optional self-signed cert for remote serve (mesh already encrypts).",
            feature="remote.server")
-_register("remote.tls_key", default="", source="env:MEMSOM_REMOTE_TLS_KEY",
+_register("remote.tls_key", type="path", default="", source="env:MEMSOM_REMOTE_TLS_KEY",
            doc="Private key matching remote.tls_cert.", feature="remote.server")
 
-_register("telemetry.consolidation_dir", default="", source="env:MEMSOM_CONSOLIDATION_DIR",
+_register("telemetry.consolidation_dir", type="path", default="", source="env:MEMSOM_CONSOLIDATION_DIR",
            doc="Override where the weekly consolidation sweep's dated reports "
                "live (default ~/.claude/consolidation); telemetry.last_consolidation "
                "reads the newest report's mtime from here.", feature="telemetry")
-_register("telemetry.episodic_db", default="", source="env:MEMSOM_EPISODIC_DB",
+_register("telemetry.episodic_db", type="path", default="", source="env:MEMSOM_EPISODIC_DB",
            doc="Override the episodic sessions archive path (default "
                "~/.claude/episodic/sessions.db) telemetry.sessions counts from.",
            feature="telemetry")
@@ -249,7 +367,7 @@ _register("telemetry.episodic_db", default="", source="env:MEMSOM_EPISODIC_DB",
 # The 13 forget params + memory_budget are NOT registered here (module
 # docstring) -- `tuning set` therefore refuses every key today, honestly: it
 # has zero canonical-sourced knobs to write, not a bug. `tuning list`/`get`
-# already cover the ~35 knobs that used to be scattered os.environ.get()
+# already cover the ~47 knobs that used to be scattered os.environ.get()
 # calls, which is the ratchet this phase actually closes.
 # ---------------------------------------------------------------------------
 
@@ -260,8 +378,8 @@ def _cmd_tuning_list(args) -> None:
         return
     for key in sorted(REGISTRY):
         knob = REGISTRY[key]
-        print(f"{key:<32} {resolve(key)!r:<20} default={knob.default!r} "
-              f"source={knob.source}")
+        print(f"{key:<32} {resolve(key)!r:<20} type={_type_name(knob.type):<6} "
+              f"default={knob.default!r} source={knob.source}")
 
 
 def _cmd_tuning_get(args) -> None:

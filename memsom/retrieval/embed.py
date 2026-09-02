@@ -96,6 +96,8 @@ def active_model_name() -> str:
 def colbert_candidates() -> int:
     """Re-rank window size from MEMDAG_COLBERT_CANDIDATES (default 100)."""
     raw = memsom_tuning.resolve("retrieval.colbert_candidates")
+    if isinstance(raw, int):  # unset -> the registered (typed) default
+        return max(1, raw)
     if raw is None or not raw.strip():
         return DEFAULT_COLBERT_CANDIDATES
     try:
@@ -112,6 +114,8 @@ def _maxlen() -> int:
     chunker already bounds content; this is the explicit storage valve.
     """
     raw = memsom_tuning.resolve("retrieval.colbert_maxlen")
+    if isinstance(raw, int):  # unset -> the registered (typed) default
+        return max(1, raw)
     if raw is None or not raw.strip():
         return DEFAULT_MAXLEN
     try:
