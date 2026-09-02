@@ -71,6 +71,15 @@ sit at `memory/projects/project_<x>.md`. Append to the existing parent/subprojec
 file — never create a sibling of an existing project. `projects/INDEX.md` is
 GENERATED (project_ files get no MEMORY.md line); `section: none` withdraws a file.
 
+A project may instead be a STRUCTURED node: a `kind: project-node` parent carrying
+What / Status / Features / Rules / Creds / Where, plus six fixed sub-notes (spec,
+gotchas, decisions, interface_io, architecture, tests) and one spec note per
+feature (`project_<slug>_spec_<feature-id>.md`). Those sub-notes render as one
+`notes:` line under the group in INDEX.md, and the node's `## Features` list (each
+implemented / planned / active-decision / archived, linked to its spec note) is the
+source of truth for what is left. Write them with `memsom project …`
+(init / feature / spec / status / log / check), never as new sibling files.
+
 **But DO add the index line when you create a NEW non-project memory** — one
 `- [Title](file.md) — hook` bullet under the right `##` section. This is the one
 hand-edit that IS required: the importer reads a memory's `section` from the
