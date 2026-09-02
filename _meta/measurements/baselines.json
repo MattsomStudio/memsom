@@ -85,7 +85,7 @@
     "note": "The `# FAILOPEN:` convention does not exist before Phase 6 -- this baseline is 'every broad except today', not 'every violation'.",
     "source": "python scripts/failopen_annotations.py",
     "target": 0,
-    "value": 70
+    "value": 0
   },
   "gate_readpool.builders": {
     "control": "control-tested red: baseline > 1 at Phase 0 (MS-13/MS-08 -- live_sources, cmd_dump, redact.live_unredacted_sources, quarantine.live_unquarantined_sources all hand-roll a partial filter). Phase 7 (layers land): the 10 modules the unrefined classifier flagged were adjudicated one by one -- distill.py's export_training and two dead partial-filter helpers (confid.sources_for_clearance, quarantine.live_source_ids, zero production consumers) were the only genuine duplicates, now fixed/deleted; the rest were false positives (single-row-by-key fetches, edges-table DAG walks, OR-joined inclusion predicates, positive quarantined-status listings) and the classifier was refined to stop flagging them, matching C-1's federation.py precedent.",
@@ -99,7 +99,7 @@
     "note": "Phase 4 builds the `ingest` single write path (A1.4) and this should collapse to 1: the ingest module's own call.",
     "source": "python scripts/gate_writeowner.py",
     "target": 1,
-    "value": 3
+    "value": 1
   },
   "upward_imports.count": {
     "control": "control-tested by construction: a planted try:-import of a strictly higher-ranked package is counted (see test coverage added alongside).",
@@ -113,6 +113,6 @@
     "note": "MEASURED in 00-chat-findings.md A4: 26 modules issue INSERT/UPDATE/DELETE, 11 use BEGIN IMMEDIATE -- this script is the walk that was missing for the rest, per Phase 6's writer-census item.",
     "source": "python scripts/writer_census.py",
     "target": 0,
-    "value": 6
+    "value": 0
   }
 }
