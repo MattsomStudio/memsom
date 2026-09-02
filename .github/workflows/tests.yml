@@ -101,6 +101,10 @@ jobs:
           fi
           echo "$files"
           python -W error::DeprecationWarning -m pytest -q $files
+          # tests/gates/ is pytest-only (function-style, no __init__.py) and
+          # is NOT matched by the tests/test_*.py glob above: it needs its own
+          # line or the 96 gate tests never run in CI (RULES rule 15).
+          python -W error::DeprecationWarning -m pytest -q tests/gates
 
   # ---------------------------------------------------------------------
   # PLAN.md Sec6 Phase 11 ("bootstrap and three-OS CI"): the bootstrap
@@ -379,6 +383,7 @@ jobs:
             exit 1
           fi
           python -W error::DeprecationWarning -m coverage run -a -m pytest -q $files
+          python -W error::DeprecationWarning -m coverage run -a -m pytest -q tests/gates
 
       # xml + html first so the artifact exists even when `report` trips the
       # floor; `report` last because it is the step that fails.
