@@ -535,11 +535,22 @@ class TestWireAbsolutePath(unittest.TestCase):
         self.assertEqual(wc.merge_hooks(data, abs_exe), [])             # idempotent
 
     def test_custom_absolute_stop_entry_is_left_alone(self):
-        data = {"hooks": {"Stop": [{"hooks": [
-            {"type": "command", "command": '"/my/own/memsom" bridge-render --flag'}]}]}}
+        # a custom absolute command whose executable EXISTS is the user's
+        # choice and is never rewritten (wc.__file__ = any real absolute file)
+        custom = f'"{wc.__file__}" bridge-render --flag'
+        data = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": custom}]}]}}
         self.assertEqual(wc.merge_hooks(data, "/opt/venv/bin/memsom", with_prompt_hook=False), [])
+        self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"], custom)
+
+    def test_dead_absolute_stop_entry_is_repointed(self):
+        # ...but an absolute path that no longer exists cannot be anyone's
+        # working choice: it is the reinstall/venv-move residue wire-claude
+        # exists to repair (2026-09-02 live: every session end errored on it).
+        data = {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": '"/my/own/dead/memsom" bridge-render --flag'}]}]}}
+        self.assertEqual(wc.merge_hooks(data, "/opt/venv/bin/memsom", with_prompt_hook=False), ["Stop"])
         self.assertEqual(data["hooks"]["Stop"][0]["hooks"][0]["command"],
-                         '"/my/own/memsom" bridge-render --flag')
+                         '"/opt/venv/bin/memsom" bridge-render')
 
     def test_bare_resolution_never_upgrades_to_bare(self):
         data = {"hooks": {"Stop": [{"hooks": [
