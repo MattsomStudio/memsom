@@ -46,8 +46,10 @@ PKG = pathlib.Path(__file__).resolve().parents[1] / "memsom"
 #   PRIMITIVE- inside memsom/paths.py, which is the implementation.
 # ---------------------------------------------------------------------------
 ALLOWED: dict[str, str] = {
-    "__init__.py::<module>":
-        "SELF - HOME = Path(__file__).resolve().parent, the packaged-resource dir.",
+    "effects/net.py::<module>":
+        "SELF - HOME = Path(__file__).resolve().parent.parent, the packaged-resource "
+        "dir. This is where HOME now lives (moved from __init__.py, which re-exports "
+        "it via the Phase-2 facade in memsom.effects.net).",
     "bridge/wire_claude.py::default_skills_src":
         "SELF - Path(__file__).resolve().parents[2], locates the bundled claude/ dir.",
     "bridge/wire_claude.py::resolve_exe":
@@ -72,6 +74,195 @@ ALLOWED: dict[str, str] = {
     "paths.py::safe_join":
         "PRIMITIVE - the root resolve and the post-containment symlink re-check. "
         "This is the implementation the rest of the codebase defers to.",
+
+    # -- kernel/syncguard.py -- resolving the TRUSTED store/data directory (the
+    # DB path from MEMDAG_DB/MEMDAG_HOME, or the `memsom setup` wizard's own
+    # answer) and OS-set OneDrive env vars, to walk ancestors looking for
+    # file-sync markers. Neither input is model-, request-, or store-supplied;
+    # both are exactly the kind of trusted root safe_join fences *against*. --
+    "kernel/syncguard.py::_ancestors":
+        "ROOT - resolves the store's data directory (path.parent of MEMDAG_DB, or "
+        "the `memsom setup` wizard's own answer) to walk its ancestors for "
+        "file-sync markers. Trusted config path, not model/request-supplied.",
+    "kernel/syncguard.py::_onedrive_roots":
+        "ROOT - resolves $OneDrive / $OneDriveCommercial / $OneDriveConsumer, "
+        "OS-set env-var directories, to compare against the store path above.",
+
+    # -- memsom.tuning.resolve(key) -- an in-process-override > env > default
+    # config-knob lookup (see tuning.py's `resolve()` docstring). Same
+    # attribute name as Path.resolve(), unrelated call: no filesystem I/O, no
+    # path construction. Listed individually (one per call site, same as the
+    # existing lifecycle/compact.py::_llm_summarize entry) so the sweep's
+    # false positive is on the record rather than being rediscovered. --
+    "bridge/bridge_import.py::index_enabled":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.index_enabled\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "bridge/bridge_render.py::_is_author":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.author\") reads a config knob. "
+        "Same attribute name, unrelated call.",
+    "bridge/claude.py::default_path":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.claude_md_path\") reads a "
+        "config knob (the string is then wrapped in Path(...).expanduser(), a "
+        "separate, non-.resolve() call). Same attribute name, unrelated call.",
+    "bridge/hook.py::hook_mode":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.hook_mode\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "bridge/hook.py::hook_policy_path":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.hook_policy_path\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "bridge/hook.py::shadow_log_path":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.hook_shadow_log\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "bridge/obsidian.py::_default_vault":
+        "NOT A PATH - memsom_tuning.resolve(\"obsidian.vault\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "bridge/wire_claude.py::memory_dir_candidates":
+        "NOT A PATH - memsom_tuning.resolve(\"bridge.memory_dir\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "distill/digest.py::_section_order":
+        "NOT A PATH - memsom_tuning.resolve(\"distill.digest_sections\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "distill/digest.py::_shrink_floor":
+        "NOT A PATH - memsom_tuning.resolve(\"distill.digest_shrink_floor\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "distill/digest.py::render_digest":
+        "NOT A PATH - memsom_tuning.resolve(\"distill.digest_title\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "distill/digest.py::render_projects_index":
+        "NOT A PATH - memsom_tuning.resolve(\"distill.projects_title\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "distill/distill.py::distill_plan":
+        "NOT A PATH - memsom_tuning.resolve(\"llm.model\") reads a config knob "
+        "(picks an Ollama model name). Same attribute name, unrelated call.",
+    "federation/broker.py::__init__":
+        "NOT A PATH - memsom_proc.resolve(spec[\"command\"]) resolves an "
+        "executable name to an absolute path via PATH search (effects/proc.py, "
+        "deliberately never the CWD); it is not pathlib's Path.resolve() and "
+        "makes no UNC/SMB-style syscall. `spec` is the federation config file, a "
+        "trusted admin-supplied document, not model/request input. Same "
+        "attribute name, unrelated call.",
+    "federation/broker.py::default_config_path":
+        "NOT A PATH - memsom_tuning.resolve(\"federation.broker_config_path\") "
+        "reads a config knob. Same attribute name, unrelated call.",
+    "federation/federation.py::default_origin":
+        "NOT A PATH - memsom_tuning.resolve(\"federation.origin\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "integrity/ingest.py::channel_ceiling":
+        "NOT A PATH - memsom_tuning.resolve(\"integrity.channel_ceiling\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "integrity/redact.py::_resolve_vault":
+        "NOT A PATH - memsom_tuning.resolve(\"obsidian.vault\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "interface/features.py::_code_rag":
+        "NOT A PATH - memsom_tuning.resolve(\"code_rag.qwen_url\") reads a "
+        "config knob, used only in a status string. Same attribute name, "
+        "unrelated call.",
+    "interface/features.py::_contradict_nli":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.nli_enabled\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "interface/features.py::_obsidian":
+        "NOT A PATH - memsom_tuning.resolve(\"obsidian.vault\") reads a config "
+        "knob, used only in a status string. Same attribute name, unrelated call.",
+    "interface/features.py::_remote_server":
+        "NOT A PATH - memsom_tuning.resolve(\"remote.action_gate_mode\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "interface/mcp.py::_checked_vault":
+        "NOT A PATH - memsom_tuning.resolve(\"obsidian.vault\") reads a config "
+        "knob to get the trusted root; the model-supplied `raw` path is then "
+        "fenced with safe_join(root, str(raw), ...) on the very next line. Same "
+        "attribute name, unrelated call.",
+    "interface/mcp.py::_mcp_channel_ceiling":
+        "NOT A PATH - memsom_tuning.resolve(\"mcp.channel_ceiling\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "interface/mcp.py::_mcp_export_dir":
+        "NOT A PATH - memsom_tuning.resolve(\"mcp.export_dir\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "interface/remote.py::handle_request":
+        "NOT A PATH - memsom_tuning.resolve(\"remote.action_gate_mode\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "interface/saveall.py::start":
+        "NOT A PATH - memsom_tuning.resolve(\"saveall.userprofile_fallback\") "
+        "reads a config knob used as a subprocess cwd fallback. Same attribute "
+        "name, unrelated call.",
+    "interface/serve.py::_maybe_wrap_tls":
+        "NOT A PATH - memsom_tuning.resolve(\"remote.tls_cert\") and "
+        "memsom_tuning.resolve(\"remote.tls_key\") read config knobs. Same "
+        "attribute name, unrelated call.",
+    "interface/telemetry.py::_consolidation_dir":
+        "NOT A PATH - memsom_tuning.resolve(\"telemetry.consolidation_dir\") "
+        "reads a config knob. Same attribute name, unrelated call.",
+    "interface/telemetry.py::_session_count":
+        "NOT A PATH - memsom_tuning.resolve(\"telemetry.episodic_db\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::_anchor":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.anchor\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::_default_nli":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.nli_enabled\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::_enforce_default":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.enforce\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::_nli_model_name":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.nli_model\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::_nli_threshold":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.nli_threshold\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "lifecycle/contradict.py::enabled":
+        "NOT A PATH - memsom_tuning.resolve(\"contradict.enabled\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "lifecycle/doctor.py::_ollama_status":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.embed_url\") and "
+        "memsom_tuning.resolve(\"retrieval.embed_model\") read config knobs. "
+        "Same attribute name, unrelated call.",
+    "lifecycle/verify_stale.py::_threshold_days":
+        "NOT A PATH - memsom_tuning.resolve(\"lifecycle.verify_stale_days\") "
+        "reads a config knob. Same attribute name, unrelated call.",
+    "retrieval/code_index.py::_enabled":
+        "NOT A PATH - memsom_tuning.resolve(\"code_rag.enabled\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/embed.py::_device":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_device\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/embed.py::_maxlen":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.colbert_maxlen\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "retrieval/embed.py::backend":
+        "NOT A PATH - memsom_tuning.resolve(\"embed.backend\") reads a config "
+        "knob. Same attribute name, unrelated call.",
+    "retrieval/embed.py::colbert_candidates":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.colbert_candidates\") "
+        "reads a config knob. Same attribute name, unrelated call.",
+    "retrieval/llm.py::_cite_overlap_floor":
+        "NOT A PATH - memsom_tuning.resolve(\"llm.cite_overlap\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/llm.py::keep_alive":
+        "NOT A PATH - memsom_tuning.resolve(\"llm.ollama_keep_alive\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/llm.py::resolve":
+        "NOT A PATH - this IS memsom.retrieval.llm.resolve(), the model/base_url "
+        "resolver itself: memsom_tuning.resolve(\"llm.model\") and "
+        "memsom_tuning.resolve(\"llm.url\") read config knobs inside it. Same "
+        "attribute name as Path.resolve(), unrelated call.",
+    "retrieval/qwen_embed.py::_url":
+        "NOT A PATH - memsom_tuning.resolve(\"code_rag.qwen_url\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/retrieve.py::_cmd_reindex":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_unload\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/retrieve.py::_embed_model":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.embed_model\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/retrieve.py::_embed_url":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.embed_url\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/warm.py::disabled_by_env":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.warm_disabled\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "storage/schema.py::clearance_ceiling":
+        "NOT A PATH - memsom_tuning.resolve(\"integrity.clearance_ceiling\") "
+        "reads a config knob. Same attribute name, unrelated call.",
 }
 
 
