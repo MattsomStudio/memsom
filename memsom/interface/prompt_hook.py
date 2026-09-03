@@ -76,6 +76,8 @@ def load_hook_params(memory_dir):
         "floor": float(params["prompt_hook_floor"]),
         "deadline_ms": int(params["prompt_hook_deadline_ms"]),
         "log_max_mb": float(params["prompt_hook_log_max_mb"]),
+        "project_bytes": int(params["prompt_hook_project_bytes"]),
+        "project_max": int(params["prompt_hook_project_max"]),
     }
 
 
@@ -149,9 +151,64 @@ def query_hits(query, k=HOOK_K, clearance="topsecret", deadline_ms=800,
 # Block rendering
 # ---------------------------------------------------------------------------
 
+def is_slash(prompt) -> bool:
+    """A slash command is never a retrieval query — skip the hook entirely."""
+    return (prompt or "").strip().startswith("/")
+
+
+def too_short_for_bm25(prompt) -> bool:
+    """The 12-char floor gates BM25 ONLY (a long query is what BM25 needs); the
+    project alias matcher runs on shorter prompts too (a bare "mspanel?")."""
+    return len((prompt or "").strip()) < MIN_PROMPT_CHARS
+
+
 def should_skip(prompt) -> bool:
-    p = (prompt or "").strip()
-    return len(p) < MIN_PROMPT_CHARS or p.startswith("/")
+    """Back-compat: skip when a slash command OR too short for BM25.  The hook
+    body no longer calls this (it splits the two so aliases match short prompts);
+    kept because external callers / tests import it."""
+    return is_slash(prompt) or too_short_for_bm25(prompt)
+
+
+def _hook_age_days(iso_date: str) -> int:
+    try:
+        import datetime as _dt
+        return (_dt.date.today() - _dt.date.fromisoformat(iso_date[:10])).days
+    # FAILOPEN: an unparseable date is not "stale"; 0 keeps the header non-alarming
+    except Exception:
+        return 0
+
+
+def _is_stale(status: str, age: int) -> bool:
+    from memsom.bridge import project as _project
+    limit = _project.STALE_PARKED_DAYS if (status or "").lower() == "parked" \
+        else _project.STALE_ACTIVE_DAYS
+    return age > limit
+
+
+def render_project_block(primary, also, cache) -> str:
+    """The injected project block: a header + features tally + Status/Creds/Rules
+    block + a sub-note pointer per matched project, then an `also:` trailer."""
+    projects = cache.get("projects") or {}
+    out = []
+    for slug in primary:
+        meta = projects.get(slug) or {}
+        status = meta.get("status", "active")
+        lv = meta.get("last_verified", "")
+        age = _hook_age_days(lv)
+        verif = f"verified {lv} ({age}d)" if lv else "unverified"
+        header = f"[memsom project: {slug} | {status} | {verif} | node {meta.get('path', '')}]"
+        if lv and _is_stale(status, age):
+            header += f"  STALE ({age}d) — confirm before acting"
+        out.append(header)
+        if meta.get("features"):
+            out.append(f"features: {meta['features']}")
+        if meta.get("block"):
+            out.append(meta["block"])
+        out.append(f"sub-notes: memsom project show {slug} "
+                   "--note spec|gotchas|decisions|interface_io|architecture|tests")
+    if also:
+        out.append("also: " + ", ".join(also))
+    return "\n".join(out).strip()
 
 
 def apply_floor(hits, floor):
@@ -256,7 +313,10 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
     if query_fn is None:
         query_fn = query_hits
     prompt = data.get("prompt") if isinstance(data, dict) else None
-    if not isinstance(prompt, str) or should_skip(prompt):
+    # A slash command is never a query — skip entirely. The 12-char floor is NOT
+    # applied here anymore: it gates BM25 only, so an alias ("mspanel?") still
+    # matches on a short prompt.
+    if not isinstance(prompt, str) or is_slash(prompt):
         return None
     if memory_dir is None:
         memory_dir = find_memory_dir()
@@ -266,16 +326,41 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
     if mode == "off":
         return None
 
+    # 1. project auto-load — file-only, ~1 ms, fails open to no-project.
+    primary, also, project_block = [], [], ""
+    try:
+        from memsom.bridge import project as _project
+        cache = _project.load_cache(memory_dir) if memory_dir is not None else None
+        if cache:
+            primary, also = _project.match_projects(prompt, cache, params["project_max"])
+            if primary:
+                project_block = render_project_block(primary, also, cache)
+    # FAILOPEN: a missing/corrupt cache or matcher error just means "no project".
+    except Exception:
+        primary, also, project_block = [], [], ""
+    matched_stems = {f"project_{s}" for s in primary}
+
+    # 2. BM25 retrieval — only when the prompt clears the 12-char floor.
     t0 = time.perf_counter()
-    hits, source = query_fn(prompt, k=HOOK_K, clearance=clearance,
-                            deadline_ms=params["deadline_ms"])
+    if too_short_for_bm25(prompt):
+        hits, source = [], "short"
+    else:
+        hits, source = query_fn(prompt, k=HOOK_K, clearance=clearance,
+                                deadline_ms=params["deadline_ms"])
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     kept = apply_floor(hits, params["floor"])
-    block = render_block(kept) if kept else ""
+    # a retrieval hit that IS a matched project node is redundant with the block;
+    # its sub-notes (project_<slug>_*) are not and stay.
+    kept = [h for h in kept if (h.get("label") or h.get("stem")) not in matched_stems]
+    mem_block = render_block(kept) if kept else ""
+
+    # 3. assemble — the project block precedes the retrieval block.
+    block = "\n\n".join(x for x in (project_block, mem_block) if x)
     would_inject = bool(block)
     injected = would_inject and mode == "inject"
 
-    if memory_dir is not None:
+    should_log = memory_dir is not None and (not too_short_for_bm25(prompt) or primary)
+    if should_log:
         append_log(memory_dir, {
             "ts": now(),
             "mode": mode,
@@ -285,6 +370,8 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
             "ms": elapsed_ms,
             "hits": [{"stem": h.get("label") or h.get("stem"),
                       "score": h.get("score")} for h in hits[:HOOK_K]],
+            "projects": primary,
+            "project_bytes": len(project_block.encode("utf-8")),
             "would_inject": would_inject,
             "injected": injected,
         }, params["log_max_mb"])
@@ -382,6 +469,8 @@ def summarize_log(records, *, top_n=10, bins=10) -> dict:
     n = 0
     injected = 0
     would = 0
+    project_matched = 0
+    proj_surfaced = Counter()
     by_mode = Counter()
     by_source = Counter()
     surfaced = Counter()
@@ -395,6 +484,11 @@ def summarize_log(records, *, top_n=10, bins=10) -> dict:
             injected += 1
         if r.get("would_inject"):
             would += 1
+        projs = r.get("projects") or []
+        if projs:
+            project_matched += 1
+            for s in projs:
+                proj_surfaced[str(s)] += 1
         hits = r.get("hits") or []
         if hits and isinstance(hits[0], dict):
             s = hits[0].get("score")
@@ -425,6 +519,9 @@ def summarize_log(records, *, top_n=10, bins=10) -> dict:
         "inject_rate": round(injected / n, 3) if n else 0.0,
         "would_inject": would,
         "would_inject_rate": round(would / n, 3) if n else 0.0,
+        "project_matched": project_matched,
+        "project_match_rate": round(project_matched / n, 3) if n else 0.0,
+        "top_projects": proj_surfaced.most_common(top_n),
         "by_mode": dict(by_mode),
         "by_source": dict(by_source),
         "top_stems": surfaced.most_common(top_n),
@@ -451,6 +548,7 @@ def cmd_hook_stats(args):
     print(f"queries        : {summary['queries']}")
     print(f"injected       : {summary['injected']}  (rate {summary['inject_rate']})")
     print(f"would inject   : {summary['would_inject']}  (rate {summary['would_inject_rate']})")
+    print(f"project match  : {summary['project_matched']}  (rate {summary['project_match_rate']})")
     print(f"by mode        : {summary['by_mode']}")
     print(f"by source      : {summary['by_source']}")
     if summary["ms_p50"] is not None:

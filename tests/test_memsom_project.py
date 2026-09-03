@@ -406,5 +406,68 @@ class TestReorg(Base):
         self.assertEqual(before, after)
 
 
+class TestCache(Base):
+    """P2 auto-load: the project_aliases.json the prompt hook reads."""
+
+    def test_write_cache_shape_and_block(self):
+        P.init_project(self.mem, "demo", aliases="alpha, beta gamma")
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8")
+                     .replace("### Done", "### Done\n- shipped it")
+                     .replace("## Creds\n", "## Creds\n- pw in [[reference_x]]\n")
+                     .replace("## Rules & gates\n", "## Rules & gates\n- r1\n- r2\n- r3\n"),
+                     encoding="utf-8")
+        P.set_feature(self.mem, "demo", "f-one", name="One", status="planned")
+        out = P.write_cache(self.mem, project_bytes=1024, max_n=2)
+        self.assertEqual(out["projects"], 1)
+        cache = P.load_cache(self.mem)
+        e = cache["projects"]["demo"]
+        self.assertEqual(e["aliases"], ["alpha", "beta gamma"])
+        self.assertIn("## Status", e["block"])
+        self.assertIn("## Creds", e["block"])
+        # only the first two Rules lines are carried
+        self.assertIn("- r1", e["block"])
+        self.assertIn("- r2", e["block"])
+        self.assertNotIn("- r3", e["block"])
+        self.assertEqual(e["features"], "1 planned")
+
+    def test_block_truncated_on_line_boundary_to_byte_cap(self):
+        P.init_project(self.mem, "demo")
+        n = self.node()
+        big = "\n".join(f"- done item {i} " + "x" * 40 for i in range(60))
+        n.write_text(n.read_text(encoding="utf-8").replace("### Done", "### Done\n" + big),
+                     encoding="utf-8")
+        P.write_cache(self.mem, project_bytes=300, max_n=2)
+        block = P.load_cache(self.mem)["projects"]["demo"]["block"]
+        self.assertLessEqual(len(block.encode("utf-8")), 300)
+        for ln in block.split("\n"):        # whole lines only, never a half
+            self.assertFalse(ln.endswith("x" * 39 + "x") and len(ln) > 300)
+
+    def test_fact_refs_resolved_when_resolver_given(self):
+        P.init_project(self.mem, "demo")
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "### Done", "### Done\n- runs at [[fact_speed]]"), encoding="utf-8")
+        body = split_frontmatter(n.read_text(encoding="utf-8"))[1]
+        block = P.build_inject_block(body, resolve=lambda t: t.replace("[[fact_speed]]", "9ms"))
+        self.assertIn("9ms", block)
+        self.assertNotIn("[[fact_speed]]", block)
+
+    def test_clashing_alias_dropped_from_both(self):
+        P.init_project(self.mem, "demo", aliases="shared, demo-only")
+        P.init_project(self.mem, "beta", aliases="shared, beta-only")
+        P.write_cache(self.mem, project_bytes=1024, max_n=2)
+        cache = P.load_cache(self.mem)
+        self.assertNotIn("shared", cache["projects"]["demo"]["aliases"])
+        self.assertNotIn("shared", cache["projects"]["beta"]["aliases"])
+        self.assertIn("demo-only", cache["projects"]["demo"]["aliases"])
+
+    def test_load_cache_failopen_on_corrupt(self):
+        (self.mem / ".weights").mkdir(parents=True)
+        (self.mem / ".weights" / "project_aliases.json").write_text("{ not json",
+                                                                    encoding="utf-8")
+        self.assertIsNone(P.load_cache(self.mem))
+
+
 if __name__ == "__main__":
     unittest.main()

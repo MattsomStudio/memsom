@@ -1124,6 +1124,153 @@ def list_projects(memory_dir) -> list:
             for sl, d, node, text, fm in _iter_project_dirs(memory_dir)]
 
 
+# --- P2: auto-load cache + prompt matcher -----------------------------------
+#
+# The Stop-hook render writes <memory>/.weights/project_aliases.json; the
+# UserPromptSubmit hook reads it (file-only, ~1 ms, fails open) and injects a
+# project's Status block when a prompt names it by slug or alias.  The cache is
+# the seam: the hook never parses a node, and this module never touches the hook.
+
+PROJECT_CACHE_NAME = "project_aliases.json"
+PROJECT_CACHE_VERSION = 1
+_RULES_KEEP = 2   # first N `## Rules & gates` lines carried into the injected block
+
+
+def _features_tally(feats) -> str:
+    from collections import Counter
+    c = Counter(f["status"] for f in feats)
+    order = ("implemented", "planned", "active-decision", "archived")
+    parts = [f"{c[s]} {s}" for s in order if c.get(s)]
+    return " · ".join(parts)
+
+
+def build_inject_block(body: str, *, resolve=None) -> str:
+    """The text injected for a matched project: its full ``## Status`` and
+    ``## Creds`` sections plus the first two ``## Rules & gates`` lines, with
+    ``[[fact_*]]`` refs resolved (when a resolver is given)."""
+    secs = _sections(body)
+    out = []
+    status = secs.get("Status")
+    if status is not None:
+        out.append("## Status")
+        out += [ln for ln in status]
+    creds = [ln for ln in secs.get("Creds", []) if ln.strip()]
+    if creds:
+        out.append("## Creds")
+        out += creds
+    rules = [ln for ln in secs.get("Rules & gates", []) if ln.strip().startswith("-")]
+    if rules:
+        out.append("## Rules & gates")
+        out += rules[:_RULES_KEEP]
+    text = "\n".join(out).strip("\n")
+    if resolve is not None:
+        try:
+            text = resolve(text)
+        # FAILOPEN: a resolver failure keeps the literal [[fact_*]] refs, never crashes the cache
+        except Exception:
+            pass
+    return text
+
+
+def _truncate_lines(text: str, max_bytes: int) -> str:
+    """Whole-line truncation to a byte cap (a half line is worse than a short one)."""
+    kept = []
+    for ln in text.split("\n"):
+        cand = "\n".join(kept + [ln])
+        if len(cand.encode("utf-8")) > max_bytes and kept:
+            break
+        kept.append(ln)
+    return "\n".join(kept)
+
+
+def write_cache(memory_dir, *, conn=None, project_bytes=1024, max_n=2) -> dict:
+    """Build ``.weights/project_aliases.json`` from the project nodes.  Atomic
+    tmp+replace (like ``_write_shed_manifest``).  An alias two nodes claim is
+    dropped from BOTH (it is also a check ERROR)."""
+    import json
+    memory_dir = Path(memory_dir)
+    resolve = None
+    if conn is not None:
+        from memsom.bridge.facts import resolve_fact_refs
+        resolve = lambda t: resolve_fact_refs(conn, t)
+    # first pass: collect aliases to find clashes
+    entries = {}
+    alias_owner = {}
+    clashed = set()
+    for slug, d, node, text, fm in _iter_project_dirs(memory_dir):
+        fm_lines, body, _ = split_frontmatter(text)
+        aliases = [a.strip().lower() for a in (fm.get("aliases") or "").split(",")
+                   if len(a.strip()) >= 3]
+        for a in aliases:
+            if a in alias_owner and alias_owner[a] != slug:
+                clashed.add(a)
+            alias_owner[a] = slug
+        feats = _parse_features(_sections(body).get("Features", []))
+        block = _truncate_lines(build_inject_block(body, resolve=resolve), project_bytes)
+        entries[slug] = {
+            "aliases": aliases,
+            "status": (fm.get("status") or "active").strip(),
+            "headline": (fm.get("description") or slug).strip(),
+            "last_verified": (fm.get("last-verified") or "").strip(),
+            "features": _features_tally(feats),
+            "path": str(node.relative_to(memory_dir)).replace("\\", "/"),
+            "block": block,
+        }
+    # drop clashed aliases from every entry
+    for e in entries.values():
+        e["aliases"] = [a for a in e["aliases"] if a not in clashed]
+    payload = {"version": PROJECT_CACHE_VERSION, "built_at": memsom.now_iso(),
+               "max_default": max_n, "projects": entries}
+    wdir = memory_dir / ".weights"
+    wdir.mkdir(parents=True, exist_ok=True)
+    dest = wdir / PROJECT_CACHE_NAME
+    tmp = dest.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(dest)
+    return {"projects": len(entries), "dropped_aliases": sorted(clashed),
+            "path": str(dest)}
+
+
+def load_cache(memory_dir):
+    """Read the alias cache; None on absent/corrupt (the hook then behaves as
+    though no project matched — FAILOPEN)."""
+    import json
+    try:
+        p = Path(memory_dir) / ".weights" / PROJECT_CACHE_NAME
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("projects"), dict):
+            return data
+    # FAILOPEN: an absent/corrupt cache means the hook injects no project, never crashes the turn
+    except Exception:
+        pass
+    return None
+
+
+def match_projects(prompt, cache, max_n=2):
+    """Pure: which projects a prompt names, by slug or alias, word-boundary,
+    case-insensitive, ordered by first occurrence.  Returns (primary, also) —
+    up to ``max_n`` primary slugs, the rest as an ``also:`` trailer list."""
+    if not cache:
+        return [], []
+    pl = (prompt or "").lower()
+    hits = []
+    for slug, meta in (cache.get("projects") or {}).items():
+        terms = [slug] + list(meta.get("aliases") or [])
+        best = None
+        for t in terms:
+            t = (t or "").lower().strip()
+            if len(t) < 3:
+                continue
+            m = re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", pl)
+            if m and (best is None or m.start() < best):
+                best = m.start()
+        if best is not None:
+            hits.append((best, slug))
+    hits.sort()
+    slugs = [s for _, s in hits]
+    return slugs[:max_n], slugs[max_n:]
+
+
 # --- CLI --------------------------------------------------------------------
 
 def _memdir(args) -> Path:
@@ -1202,6 +1349,28 @@ def cmd_project_check(args):
         for f in findings:
             print(f"  {f['sev']:5}  [{f['name']}] {f['target']} — {f['msg']}")
     return 1 if any(f["sev"] == "ERROR" for f in findings) else 0
+
+
+def cmd_project_cache(args):
+    mem = _memdir(args)
+    from memsom.lifecycle import forget
+    params, _ = forget.load_params(mem / ".weights" / "canonical.json")
+    conn = None
+    if not args.no_facts:
+        try:
+            conn = memsom.get_connection()
+        # FAILOPEN: no DB just means the cache carries literal fact refs, still useful
+        except Exception:
+            conn = None
+    try:
+        out = write_cache(mem, conn=conn,
+                          project_bytes=int(params["prompt_hook_project_bytes"]),
+                          max_n=int(params["prompt_hook_project_max"]))
+    finally:
+        if conn is not None:
+            conn.close()
+    print("[memsom] " + ", ".join(f"{k}={v}" for k, v in out.items()))
+    return 0
 
 
 def cmd_project_reorg(args):
@@ -1298,6 +1467,12 @@ def register(subparsers) -> None:
     pc.add_argument("--json", action="store_true")
     _md(pc)
     pc.set_defaults(func=cmd_project_check)
+
+    pca = ps.add_parser("cache", help="rebuild the prompt-hook alias cache (project_aliases.json)")
+    pca.add_argument("--no-facts", action="store_true",
+                     help="do not open a DB to resolve [[fact_*]] refs (leave them literal)")
+    _md(pca)
+    pca.set_defaults(func=cmd_project_cache)
 
     pr = ps.add_parser("reorg", help="maintenance sweep: report + mechanical fixes")
     pr.add_argument("--project", default=None, help="limit to one slug")

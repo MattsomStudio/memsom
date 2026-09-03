@@ -283,6 +283,9 @@ PANEL_PARAM_DEFAULTS = {
     "prompt_hook_floor": 0.35,         # min BM25 coverage [0,1] for a hit to surface
     "prompt_hook_deadline_ms": 800,    # hard wall for the whole hook-query
     "prompt_hook_log_max_mb": 20,      # rotate hook_log.jsonl past this (keeps 3)
+    # Structured project auto-load (bridge/project.py cache + the hook matcher):
+    "prompt_hook_project_bytes": 1024,  # byte cap for one project's injected block
+    "prompt_hook_project_max": 2,       # max projects injected; a 3rd -> `also:` trailer
     # Anti-creep (distill/digest.py + bridge_import.py). A NEW feedback_* file
     # with no `why_own_line:` is imported with its section cleared (it belongs
     # in a feedback_cluster_* body, not on its own pinned line) ...
@@ -319,6 +322,10 @@ def _param_ok(key, v):
         return 50 <= v <= 30000
     if key == "prompt_hook_log_max_mb":
         return 1 <= v <= 1024
+    if key == "prompt_hook_project_bytes":
+        return 256 <= v <= 8192
+    if key == "prompt_hook_project_max":
+        return 1 <= v <= 10
     if key == "decay_base":
         return 0 < v <= 1
     if key in ("rs_cap", "ss_cap", "rs_seed"):

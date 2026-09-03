@@ -208,6 +208,19 @@ def bridge_render(conn, memory_dir, *, render=True, sync_claude=True):
         # FAILOPEN: allowed, the projects sub-index is advisory and must never block the main render.
         except Exception as exc:
             print(f"[bridge] projects index skipped: {exc!r}")
+        # P2 auto-load: the prompt-hook alias cache (project_aliases.json). Written
+        # here because this pass already holds the conn (fact-ref resolution) and
+        # runs on every Stop hook. Advisory — a cache problem must never block the
+        # render (the hook fails open to no-project when the file is absent/stale).
+        try:
+            from memsom.bridge import project as _project
+            info["project_cache"] = _project.write_cache(
+                memory_dir, conn=conn,
+                project_bytes=int(params["prompt_hook_project_bytes"]),
+                max_n=int(params["prompt_hook_project_max"]))
+        # FAILOPEN: allowed, the alias cache is advisory and must never block the main render.
+        except Exception as exc:
+            print(f"[bridge] project cache skipped: {exc!r}")
 
     # Keep the CLAUDE.md managed block current in the same pass (idempotent: a
     # second run is a no-op). Best-effort — a CLAUDE.md problem must never stop the

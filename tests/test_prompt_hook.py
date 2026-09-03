@@ -571,7 +571,8 @@ class TestHookPrompt(unittest.TestCase):
             {"params": {"prompt_hook_mode": "log", "prompt_hook_floor": 0.5,
                         "prompt_hook_deadline_ms": 300, "prompt_hook_log_max_mb": 2}}))
         p = ph.load_hook_params(self.mem)
-        self.assertEqual(p, {"mode": "log", "floor": 0.5, "deadline_ms": 300, "log_max_mb": 2.0})
+        self.assertEqual(p, {"mode": "log", "floor": 0.5, "deadline_ms": 300,
+                             "log_max_mb": 2.0, "project_bytes": 1024, "project_max": 2})
 
     def test_bad_params_fall_back_to_defaults(self):
         weights = self.mem / ".weights"
@@ -596,6 +597,115 @@ class TestHookPrompt(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # log rotation + stats
 # ---------------------------------------------------------------------------
+
+class TestProjectMatch(unittest.TestCase):
+    """P2 auto-load: the alias matcher (pure) and the hook's project block."""
+
+    from memsom.bridge import project as _proj
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.mem = Path(self.tmp.name)
+        (self.mem / ".weights").mkdir()
+        self.params = {"mode": "inject", "floor": 0.35, "deadline_ms": 800,
+                       "log_max_mb": 20, "project_bytes": 1024, "project_max": 2}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _cache(self, projects):
+        cache = {"version": 1, "built_at": "t", "projects": projects}
+        (self.mem / ".weights" / "project_aliases.json").write_text(
+            json.dumps(cache), encoding="utf-8")
+        return cache
+
+    def _entry(self, aliases=(), block="## Status\n### Done", status="active"):
+        return {"aliases": list(aliases), "status": status, "headline": "h",
+                "last_verified": "2026-09-02", "features": "1 implemented",
+                "path": "projects/x/project_x.md", "block": block}
+
+    def _log(self):
+        p = ph.log_path(self.mem)
+        return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l] \
+            if p.exists() else []
+
+    # --- pure matcher ---
+    def test_boundary_phrase_and_case(self):
+        cache = {"projects": {"mspanel": self._entry(aliases=["ms panel", "brain platform"])}}
+        self.assertEqual(self._proj.match_projects("How is MSPANEL doing", cache, 2), (["mspanel"], []))
+        self.assertEqual(self._proj.match_projects("the ms panel status", cache, 2), (["mspanel"], []))
+        self.assertEqual(self._proj.match_projects("brain PLATFORM health", cache, 2), (["mspanel"], []))
+        # substring inside a longer word does NOT match (word boundary)
+        self.assertEqual(self._proj.match_projects("mspanelization theory", cache, 2), ([], []))
+        self.assertEqual(self._proj.match_projects("nothing here", cache, 2), ([], []))
+
+    def test_two_matches_ordered_by_position(self):
+        cache = {"projects": {"memsom": self._entry(), "ondemand": self._entry()}}
+        self.assertEqual(
+            self._proj.match_projects("first ondemand then memsom", cache, 2),
+            (["ondemand", "memsom"], []))
+
+    def test_third_match_becomes_also_trailer(self):
+        cache = {"projects": {"a1x": self._entry(), "b2x": self._entry(), "c3x": self._entry()}}
+        primary, also = self._proj.match_projects("a1x then b2x then c3x", cache, 2)
+        self.assertEqual(primary, ["a1x", "b2x"])
+        self.assertEqual(also, ["c3x"])
+
+    # --- hook integration ---
+    def test_project_block_precedes_retrieval_block(self):
+        self._cache({"mspanel": self._entry(aliases=["ms panel"])})
+        out = ph.run_prompt_hook({"prompt": "how is the ms panel doing lately"},
+                                 memory_dir=self.mem, params=self.params,
+                                 query_fn=_fake_query(HITS))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("[memsom project: mspanel |"))
+        self.assertIn("\n\nRelevant memories:", ctx)          # retrieval block after
+        self.assertLess(ctx.index("mspanel"), ctx.index("Relevant memories:"))
+
+    def test_matched_node_dropped_from_hits_subnotes_stay(self):
+        self._cache({"mspanel": self._entry(aliases=["ms panel"])})
+        hits = [{"id": 1, "label": "project_mspanel", "hook": "the node", "score": 0.9},
+                {"id": 2, "label": "project_mspanel_gotchas", "hook": "a gotcha", "score": 0.9}]
+        out = ph.run_prompt_hook({"prompt": "tell me about the ms panel please"},
+                                 memory_dir=self.mem, params=self.params,
+                                 query_fn=_fake_query(hits))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("[project_mspanel]", ctx)            # node hit dropped
+        self.assertIn("[project_mspanel_gotchas]", ctx)       # sub-note hit stays
+
+    def test_three_char_alias_prompt_gets_block(self):
+        self._cache({"ondemand": self._entry(aliases=["ond"])})
+        out = ph.run_prompt_hook({"prompt": "ond"}, memory_dir=self.mem,
+                                 params=self.params, query_fn=_fake_query(HITS))
+        self.assertIsNotNone(out)                             # short, but alias matched
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("[memsom project: ondemand |"))
+        self.assertNotIn("Relevant memories:", ctx)          # BM25 skipped under 12 chars
+
+    def test_slash_still_skipped_even_with_alias(self):
+        self._cache({"mspanel": self._entry(aliases=["ms panel"])})
+        out = ph.run_prompt_hook({"prompt": "/status mspanel"}, memory_dir=self.mem,
+                                 params=self.params, query_fn=_fake_query(HITS))
+        self.assertIsNone(out)
+        self.assertEqual(self._log(), [])
+
+    def test_absent_cache_matches_prior_output(self):
+        # no project_aliases.json → identical output to the pre-P2 retrieval-only path
+        out = ph.run_prompt_hook({"prompt": "why does my piped command report success?"},
+                                 memory_dir=self.mem, params=self.params,
+                                 query_fn=_fake_query(HITS))
+        ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(ctx.startswith("Relevant memories:"))
+
+    def test_log_carries_projects(self):
+        self._cache({"mspanel": self._entry(aliases=["ms panel"])})
+        ph.run_prompt_hook({"prompt": "how is the ms panel doing today"},
+                           memory_dir=self.mem, params=self.params,
+                           query_fn=_fake_query(HITS))
+        rec = self._log()[0]
+        self.assertEqual(rec["projects"], ["mspanel"])
+        self.assertGreater(rec["project_bytes"], 0)
+
 
 class TestLogRotationAndStats(unittest.TestCase):
     def setUp(self):
