@@ -10,6 +10,7 @@ Run:
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -310,6 +311,141 @@ class TestSubprocess(Base):
         r2 = json.loads(lines[1])
         self.assertEqual(r1["id"], 1)
         self.assertEqual(r2["id"], 2)
+
+
+# ---------------------------------------------------------------------------
+# Code-snapshot pin — one process, one version of memsom (2026-09-03 incident)
+# ---------------------------------------------------------------------------
+#
+# The MCP server is started once per client session and lives for hours on top
+# of an editable install whose working tree keeps changing. It used to import
+# `memsom.tuning` at startup and the CLI/retrieval stack lazily at the first
+# tool call. Commit 7503087 landed 13 minutes after a server started; at the
+# first `retrieve` the NEW embed.py was imported and resolved a knob
+# (`retrieval.bge_dense`) that the OLD tuning registry in memory had never
+# registered -> KeyError -> `internal error in tool 'retrieve'` on every call
+# until restart, while the CLI (a fresh process each time) worked fine.
+#
+# The fix pins the whole memsom.* import graph at stdio-server start. These two
+# tests replay the incident against a throwaway copy of the package and hold
+# the pin's hygiene line (nothing heavy, nothing on stdout, no DB opened).
+
+class TestCodeSnapshotPin(Base):
+
+    #: Server-side script: run the REAL startup path (serve_stdio) with the
+    #: read loop swapped for a probe that reports what is in sys.modules.
+    _PROBE = r"""
+import io, json, os, sys, pkgutil
+import memsom
+from memsom.interface import mcp
+out = {}
+def probe(stream):
+    names = [m.name for m in pkgutil.walk_packages(memsom.__path__, "memsom.")
+             if not m.name.endswith(".__main__")]
+    out["missing"] = sorted(n for n in names if n not in sys.modules)
+    out["pinned"] = len(names) - len(out["missing"])
+    out["heavy"] = sorted(m for m in ("torch", "numpy", "FlagEmbedding", "transformers")
+                          if m in sys.modules)
+mcp._serve_lines = probe
+buf = io.StringIO()
+real_stdout = sys.stdout
+sys.stdout = buf
+try:
+    mcp.serve_stdio()
+finally:
+    sys.stdout = real_stdout
+out["stdout_bytes"] = len(buf.getvalue())
+out["db_exists"] = os.path.exists(os.environ["MEMDAG_DB"])
+print(json.dumps(out))
+"""
+
+    def test_startup_pins_every_submodule_without_heavy_imports(self):
+        """After serve_stdio's startup, every memsom.* submodule on disk is
+        already in sys.modules -- so no later tool call can import a newer
+        file against older in-memory modules -- and the pin dragged in no
+        torch/numpy, wrote nothing to stdout, and opened no DB."""
+        # A path setUp has NOT created, so "db_exists" measures the pin alone.
+        probe_db = Path(self.tmp.name) / "probe_untouched.db"
+        env = {**os.environ, "MEMDAG_DB": str(probe_db), "MEMDAG_WARM_ENDPOINT": "0"}
+        r = subprocess.run(
+            [sys.executable, "-c", self._PROBE],
+            capture_output=True, text=True, encoding="utf-8", env=env, timeout=120,
+        )
+        self.assertEqual(r.returncode, 0, f"probe crashed:\n{r.stderr}")
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["missing"], [],
+                         f"{len(out['missing'])} submodule(s) still lazily importable "
+                         f"after startup: {out['missing'][:8]}...")
+        self.assertGreater(out["pinned"], 50, out)
+        self.assertEqual(out["heavy"], [], f"startup pin imported heavy deps: {out['heavy']}")
+        self.assertEqual(out["stdout_bytes"], 0, "startup wrote to stdout (protocol corruption)")
+        self.assertFalse(out["db_exists"], "startup pin opened/created the DB")
+
+    def test_retrieve_survives_code_change_after_server_start(self):
+        """Replay of the 2026-09-03 failure against a private copy of memsom:
+        start the stdio server, THEN land a consistent code change on disk
+        (embed.py resolves a knob that tuning.py newly registers), THEN call
+        `retrieve`. Pre-fix the first tool call imported the new embed.py
+        against the old in-memory tuning -> KeyError -> isError. Post-fix the
+        process runs the version it started with and answers."""
+        site = Path(self.tmp.name) / "site"
+        pkg = site / "memsom"
+        shutil.copytree(Path(memsom.__file__).parent, pkg,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        # Stamp the copy so the server proves which package it loaded.
+        mcp_py = pkg / "interface" / "mcp.py"
+        stamped = "0.4.0+snapshot-test"
+        src = mcp_py.read_text(encoding="utf-8")
+        self.assertIn('SERVER_VERSION = "', src)
+        mcp_py.write_text(src.replace('SERVER_VERSION = "0.4.0"', f'SERVER_VERSION = "{stamped}"'),
+                          encoding="utf-8")
+
+        env = {**os.environ, "MEMDAG_DB": str(self.db), "MEMDAG_EMBED_BACKEND": "bm25",
+               "PYTHONPATH": str(site) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        stderr_path = Path(self.tmp.name) / "server.stderr"
+        with open(stderr_path, "w", encoding="utf-8") as stderr_f:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", MCP_MODULE],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr_f,
+                text=True, encoding="utf-8", env=env, cwd=str(site),
+            )
+            try:
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"protocolVersion": memsom_mcp.PROTOCOL_VERSION}}) + "\n")
+                proc.stdin.flush()
+                r1 = json.loads(proc.stdout.readline())
+                self.assertEqual(r1["result"]["serverInfo"]["version"], stamped,
+                                 "server did not load the throwaway copy -- the test is "
+                                 "not exercising a code change and would pass vacuously")
+
+                # The "commit lands" while the server is up: a consistent pair on
+                # disk -- embed.py resolves a knob that tuning.py now registers --
+                # exactly 7503087's retrieval.bge_dense shape.
+                with open(pkg / "tuning.py", "a", encoding="utf-8") as f:
+                    f.write('\n_register("retrieval.__drift_canary__", type=str, default="", '
+                            'source="env:MEMDAG_DRIFT_CANARY", doc="snapshot-pin test")\n')
+                with open(pkg / "retrieval" / "embed.py", "a", encoding="utf-8") as f:
+                    f.write('\nmemsom_tuning.resolve("retrieval.__drift_canary__")\n')
+
+                proc.stdin.write(json.dumps({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "retrieve", "arguments": {"query": "drift"}}}) + "\n")
+                proc.stdin.flush()
+                r2 = json.loads(proc.stdout.readline())
+                proc.stdin.close()
+                proc.wait(timeout=60)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=30)
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        self.assertFalse(
+            r2["result"]["isError"],
+            "retrieve broke after a code change landed under the running server:\n"
+            f"{r2['result']['content'][0]['text']}\n--- server stderr ---\n{stderr_text[-3000:]}",
+        )
+        self.assertEqual(proc.returncode, 0, f"server crashed:\n{stderr_text[-3000:]}")
 
 
 # ---------------------------------------------------------------------------

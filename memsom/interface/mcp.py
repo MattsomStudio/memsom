@@ -14,8 +14,10 @@ stdlib only.  No third-party deps.
 
 import argparse
 import contextlib
+import importlib
 import io
 import json
+import pkgutil
 import sys
 import traceback
 
@@ -788,6 +790,39 @@ def _stop_warm_endpoint(srv):
     srv.stop()
 
 
+def _pin_code_snapshot():
+    """Import every memsom.* submodule NOW, so this long-lived process runs one
+    coherent version of the package for its whole life.
+
+    Why: memsom is normally an editable install running from a live working
+    tree that keeps changing while the MCP server (started by the client at
+    session start, alive for hours) is up. Until 2026-09-03 the server imported
+    `memsom.tuning` at startup but the CLI/retrieval stack lazily, at the first
+    tool call. Commit 7503087 landed 13 minutes after a server had started: its
+    NEW retrieval/embed.py, first imported at the first `retrieve`, resolved
+    `retrieval.bge_dense` against the OLD tuning registry already in memory ->
+    KeyError -> `internal error in tool 'retrieve'` on every call until restart.
+    Pinning the whole import graph at startup makes a later disk change invisible
+    until the next restart, instead of splitting one process across two versions.
+
+    Measured cheap and side-effect free (90 modules, ~0.1 s, no torch/numpy, no
+    DB opened, nothing written to stdout); the regression test holds that line.
+    Import-time stdout is routed to stderr while pinning because stray stdout
+    corrupts the protocol. Returns the submodule names that were pinned.
+    """
+    import memsom
+    names = [m.name for m in pkgutil.walk_packages(memsom.__path__, memsom.__name__ + ".")
+             if not m.name.endswith(".__main__")]
+    with contextlib.redirect_stdout(sys.stderr):
+        for name in names:
+            try:
+                importlib.import_module(name)
+            # FAILOPEN: allowed -- one submodule that fails to import must not stop the server; tools that never touch it keep working (the same blast radius as the lazy import this replaces) and the operator sees which module broke.
+            except Exception as exc:
+                print(f"[memsom-mcp] snapshot import of {name} failed: {exc!r}", file=sys.stderr)
+    return names
+
+
 def serve_stdio():
     """Run the stdio server loop. Reads until EOF; writes one JSON line per response."""
     # Reconfigure streams to UTF-8 line-buffered
@@ -800,6 +835,7 @@ def serve_stdio():
     except AttributeError:
         pass
 
+    _pin_code_snapshot()
     warm = _start_warm_endpoint()
     try:
         _serve_lines(sys.stdin)
