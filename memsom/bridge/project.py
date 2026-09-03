@@ -719,6 +719,8 @@ def _check_one(memory_dir, slug, d, node, text, fm, alias_owner) -> list:
         stem = p.stem
         if p.name in allowed:
             continue
+        if _SYNC_CONFLICT_RE.search(p.name):   # Syncthing conflict copy — reorg's domain
+            continue
         if _is_project_note(stem, slug):   # a per-feature spec note is fine
             continue
         if stem.startswith(f"{PROJECT_PREFIX}{slug}_") or stem == f"{PROJECT_PREFIX}{slug}":
@@ -828,6 +830,273 @@ def _age_days(iso_date: str) -> float:
         return 0.0
 
 
+# --- reorg (maintenance sweep) ----------------------------------------------
+#
+# `project reorg` is the deterministic half of the /reorgmem skill: it runs
+# check() (every schema finding), adds the maintenance checks that check() does
+# not own (sub-note presence/kind, caps, dangling wikilinks, missing fact refs,
+# rules⊆architecture, stale sub-note counts, sync-conflict copies), applies ONLY
+# the mechanical fixes that need no judgment, and routes everything else to Matt
+# (interactive) or to .weights/reorgmem_pending.json (--sweep, no model).  It is
+# the ONLY project writer allowed to touch a file it did not just scaffold, so it
+# is conservative: content-bearing edits are proposed, never applied unattended.
+
+# The two fixes that carry ZERO judgment — safe to apply on the headless sweep.
+REORG_MECHANICAL = {"reorg-sync-conflict", "reorg-subnote-count"}
+_SYNC_CONFLICT_RE = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+", re.I)
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:[#|][^\]]*)?\]\]")
+_ENTRY_ID_RE = re.compile(r"\b([GDT]-\d{8}-\d{2})\b")
+
+
+def _all_stems(memory_dir) -> set:
+    """Every memory stem in the store (flat + projects/**), for link resolution."""
+    return {p.stem for p in Path(memory_dir).rglob("*.md")
+            if p.name not in ("MEMORY.md", "INDEX.md")}
+
+
+def _bullet_count(body: str) -> int:
+    """Number of top-level ``- `` bullets in a note body — the sub-note count."""
+    return len([ln for ln in body.split("\n") if re.match(r"^-\s", ln)])
+
+
+def _subnote_line_count(memory_dir, slug, suffix) -> int:
+    p = _note_path(memory_dir, slug, suffix)
+    if not p.exists():
+        return 0
+    return _bullet_count(split_frontmatter(p.read_text(encoding="utf-8"))[1])
+
+
+def _reorg_checks(memory_dir, slug, d, node, text, fm) -> list:
+    """Maintenance findings check() does not own.  Each is tagged fix=mechanical
+    (safe to auto-apply) or fix=content (needs Matt/the model)."""
+    out = []
+    stems = _all_stems(memory_dir)
+    fm_lines, body, _ = split_frontmatter(text)
+    secs = _sections(body)
+
+    def F(name, sev, target, msg, fix="content"):
+        f = _F(name, sev, target, msg)
+        f["fix"] = fix
+        return f
+
+    # 1. every fixed sub-note exists with the right kind + parent
+    for suffix in PROJECT_NOTES:
+        p = _note_path(memory_dir, slug, suffix)
+        if not p.exists():
+            out.append(F("reorg-subnote-missing", "ERROR", p.name,
+                         f"fixed sub-note {suffix!r} is missing — run "
+                         f"`memsom project init {slug}`"))
+            continue
+        nfm = fm_top_level(split_frontmatter(p.read_text(encoding="utf-8"))[0])
+        if (nfm.get("kind") or "").strip() != NOTE_KIND[suffix]:
+            out.append(F("reorg-subnote-kind", "WARN", p.name,
+                         f"kind {nfm.get('kind')!r} should be {NOTE_KIND[suffix]!r}"))
+        if (nfm.get("depends_on") or "").strip() != f"{PROJECT_PREFIX}{slug}":
+            out.append(F("reorg-subnote-kind", "WARN", p.name,
+                         f"depends_on should be {PROJECT_PREFIX}{slug}"))
+
+    # 2. log sub-notes over their cap → fold superseded entries into ## History
+    for suffix, cap in LOG_CAPS.items():
+        p = _note_path(memory_dir, slug, suffix)
+        if p.exists():
+            b = split_frontmatter(p.read_text(encoding="utf-8"))[1]
+            n = _body_lines(b)
+            if n > cap:
+                out.append(F("reorg-subnote-cap", "WARN", p.name,
+                             f"{n} lines > {cap} cap — fold superseded entries into ## History"))
+
+    # 3. dangling wikilinks in the node + the six sub-notes (fact_* → fact check).
+    #    A missing fixed sub-note is reported as reorg-subnote-missing above, not
+    #    as a broken link, so those stems are skipped here.
+    fixed_stems = {f"{PROJECT_PREFIX}{slug}_{s}" for s in PROJECT_NOTES} | {f"{PROJECT_PREFIX}{slug}"}
+    scope = [node] + [_note_path(memory_dir, slug, s) for s in PROJECT_NOTES]
+    seen_broken = set()
+    for p in scope:
+        if not p.exists():
+            continue
+        for target in _WIKILINK_RE.findall(p.read_text(encoding="utf-8", errors="replace")):
+            target = target.strip()
+            if not target or target in seen_broken or target in stems or target in fixed_stems:
+                continue
+            seen_broken.add(target)
+            if target.startswith("fact_"):
+                out.append(F("reorg-fact-missing", "WARN", p.name,
+                             f"[[{target}]] resolves to no fact file"))
+            else:
+                out.append(F("reorg-link-broken", "WARN", p.name,
+                             f"[[{target}]] resolves to no memory in the store"))
+
+    # 4. index_hook set (empty / placeholder is a legibility miss)
+    hook = (fm.get("index_hook") or "").strip()
+    if not hook or hook.lower().startswith("(project node") or "set the status" in hook.lower():
+        out.append(F("reorg-index-hook", "INFO", node.name,
+                     "index_hook is empty/placeholder — set it to the Status headline"))
+
+    # 5. node ## Rules & gates ⊆ the architecture note (Invariants + Gates)
+    rules = [ln.strip().lstrip("-").strip() for ln in secs.get("Rules & gates", [])
+             if ln.strip().startswith("-")]
+    if rules:
+        arch = _note_path(memory_dir, slug, "architecture")
+        arch_text = arch.read_text(encoding="utf-8", errors="replace") if arch.exists() else ""
+        for r in rules:
+            key = re.sub(r"\W+", " ", r.split(":")[0]).strip().lower()
+            if key and key not in re.sub(r"\W+", " ", arch_text).lower():
+                out.append(F("reorg-rules-subset", "WARN", node.name,
+                             f"Rule {r[:48]!r} has no matching Invariant/Gate in the "
+                             "architecture note"))
+
+    # 6. sync-conflict copies in the project dir (mechanical: union-merge + delete)
+    for p in sorted(d.glob("*.sync-conflict-*.md")):
+        out.append(F("reorg-sync-conflict", "WARN", p.name,
+                     "Syncthing conflict copy — reorg union-merges it and deletes the copy",
+                     fix="mechanical"))
+    return out
+
+
+def _canonical_of_conflict(p: Path) -> Path:
+    """The real file a *.sync-conflict-* copy shadows."""
+    return p.with_name(_SYNC_CONFLICT_RE.sub("", p.name))
+
+
+def _merge_log_entries(canon_body: str, conflict_body: str) -> str:
+    """Union the ## Entries bullets of two copies of a log note by entry ID,
+    keeping the longer text on a clash, newest-first."""
+    def entries(b):
+        out = {}
+        order = []
+        for ln in b.split("\n"):
+            if not re.match(r"^-\s", ln):
+                continue
+            mid = _ENTRY_ID_RE.search(ln)
+            key = mid.group(1) if mid else ln.strip().lower()
+            if key not in out or len(ln) > len(out[key]):
+                out[key] = ln
+            if key not in order:
+                order.append(key)
+        return out, order
+    ca, oa = entries(canon_body)
+    cb, _ob = entries(conflict_body)
+    merged = dict(ca)
+    for k, v in cb.items():
+        if k not in merged or len(v) > len(merged[k]):
+            merged[k] = v
+
+    def datekey(ln):
+        m = re.search(r"\d{4}-\d{2}-\d{2}", ln)
+        return (m.group(0) if m else "0000-00-00", ln)
+    lines = sorted(merged.values(), key=datekey, reverse=True)
+    return "## Entries\n" + "\n".join(lines) + "\n"
+
+
+def _apply_sync_conflict(canon: Path, conflict: Path) -> str:
+    """Mechanically resolve one conflict copy.  Returns 'merged' | 'deleted' |
+    'kept' (kept = a non-log divergence that needs a human)."""
+    if not canon.exists():
+        return "kept"
+    ctext = conflict.read_text(encoding="utf-8", errors="replace")
+    ntext = canon.read_text(encoding="utf-8", errors="replace")
+    if ctext == ntext:
+        conflict.unlink()
+        return "deleted"
+    # log notes (## Entries) union-merge; anything else is a real divergence
+    fm_lines, nbody, _ = split_frontmatter(ntext)
+    _cf, cbody, _ = split_frontmatter(ctext)
+    if "## Entries" in nbody and "## Entries" in cbody:
+        head = nbody.split("## Entries")[0]
+        merged = _merge_log_entries(nbody, cbody)
+        canon.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + head + merged,
+                         encoding="utf-8")
+        conflict.unlink()
+        return "merged"
+    return "kept"
+
+
+def _fix_subnote_counts(memory_dir, slug) -> bool:
+    """Rewrite the node ## Sub-notes wikilinks with fresh ``— N`` counts."""
+    node = _node_path(memory_dir, slug)
+    text = node.read_text(encoding="utf-8")
+    fm_lines, body, _ = split_frontmatter(text)
+    lines = body.split("\n")
+    changed = False
+    for i, ln in enumerate(lines):
+        m = re.search(r"\[\[" + re.escape(PROJECT_PREFIX + slug) + r"_(\w+)\]\]", ln)
+        if not m or m.group(1) not in PROJECT_NOTES or not ln.strip().startswith("-"):
+            continue
+        want = _subnote_line_count(memory_dir, slug, m.group(1))
+        new = re.sub(r"\s*—\s*\d+\s*$", "", ln.rstrip()) + f" — {want}"
+        if new != ln:
+            lines[i] = new
+            changed = True
+    if changed:
+        node.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + "\n".join(lines),
+                        encoding="utf-8")
+    return changed
+
+
+def reorg(memory_dir, *, slug=None, sweep=False, apply=False) -> dict:
+    """Run the maintenance pass.  Report-only by default; ``apply`` runs the
+    mechanical fixes; ``sweep`` runs them headless and writes the pending file.
+    Returns {projects, findings, mechanical, content, pending_path}."""
+    memory_dir = Path(memory_dir)
+    do_fix = sweep or apply
+    findings_by_slug = {}
+    mechanical, content = [], []
+
+    dirs = [t for t in _iter_project_dirs(memory_dir) if slug is None or t[0] == slug]
+    for sl, d, node, text, fm in dirs:
+        # schema findings from check() are content (need judgment) …
+        base = [dict(f, fix="content") for f in check(memory_dir, sl)]
+        extra = _reorg_checks(memory_dir, sl, d, node, text, fm)
+        fs = base + extra
+        findings_by_slug[sl] = fs
+        for f in fs:
+            (mechanical if f.get("fix") == "mechanical" else content).append(dict(f, slug=sl))
+
+    applied = []
+    if do_fix:
+        for sl, d, node, text, fm in dirs:
+            for p in sorted(d.glob("*.sync-conflict-*.md")):
+                res = _apply_sync_conflict(_canonical_of_conflict(p), p)
+                applied.append({"slug": sl, "fix": "sync-conflict",
+                                "target": p.name, "result": res})
+            if _fix_subnote_counts(memory_dir, sl):
+                applied.append({"slug": sl, "fix": "subnote-count", "target": node.name})
+
+    pending_path = None
+    if sweep:
+        pending_path = _write_pending(memory_dir, findings_by_slug, applied)
+
+    return {"projects": len(dirs), "findings": findings_by_slug,
+            "mechanical": mechanical, "content": content,
+            "applied": applied, "pending_path": str(pending_path) if pending_path else None}
+
+
+def _write_pending(memory_dir, findings_by_slug, applied) -> Path:
+    """Persist the content findings for the next interactive /reorgmem + log it."""
+    import json
+    wdir = Path(memory_dir) / ".weights"
+    wdir.mkdir(parents=True, exist_ok=True)
+    ts = memsom.now_iso()
+    projects = {}
+    for sl, fs in findings_by_slug.items():
+        content = [f for f in fs if f.get("fix") != "mechanical"]
+        if content:
+            projects[sl] = {"findings": content}
+    payload = {"version": 1, "built_at": ts, "projects": projects,
+               "mechanical_applied": applied}
+    pending = wdir / "reorgmem_pending.json"
+    tmp = pending.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(pending)
+    logline = {"ts": ts, "mode": "sweep",
+               "projects_with_findings": len(projects),
+               "content_findings": sum(len(v["findings"]) for v in projects.values()),
+               "mechanical_applied": len(applied)}
+    with (wdir / "reorgmem_log.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(logline) + "\n")
+    return pending
+
+
 # --- show / list ------------------------------------------------------------
 
 def show(memory_dir, slug, *, note=None, status_only=False, inject=False) -> str:
@@ -935,9 +1204,27 @@ def cmd_project_check(args):
     return 1 if any(f["sev"] == "ERROR" for f in findings) else 0
 
 
+def cmd_project_reorg(args):
+    res = reorg(_memdir(args), slug=args.project, sweep=args.sweep, apply=args.apply)
+    if args.json:
+        import json
+        print(json.dumps(res, indent=2))
+        return 0
+    print(f"[memsom] reorg: {res['projects']} project(s), "
+          f"{len(res['mechanical'])} mechanical, {len(res['content'])} content")
+    for f in res["applied"]:
+        print(f"  FIXED  [{f['fix']}] {f.get('target','')} "
+              f"{f.get('result','') and '('+f['result']+')'}".rstrip())
+    for f in res["content"]:
+        print(f"  {f['sev']:5}  [{f['name']}] {f['target']} — {f['msg']}")
+    if res["pending_path"]:
+        print(f"[memsom] pending written: {res['pending_path']}")
+    return 1 if any(f["sev"] == "ERROR" for f in res["content"]) else 0
+
+
 def register(subparsers) -> None:
     """Mount `project` with nested verbs (init/log/status/feature/spec/show/
-    list/check), the same `register(sub)` contract every in-tree module uses."""
+    list/check/reorg), the same `register(sub)` contract every in-tree module uses."""
     p = subparsers.add_parser("project", help="structured project memory (node + sub-notes)")
     ps = p.add_subparsers(dest="project_command", required=True)
 
@@ -1011,6 +1298,16 @@ def register(subparsers) -> None:
     pc.add_argument("--json", action="store_true")
     _md(pc)
     pc.set_defaults(func=cmd_project_check)
+
+    pr = ps.add_parser("reorg", help="maintenance sweep: report + mechanical fixes")
+    pr.add_argument("--project", default=None, help="limit to one slug")
+    pr.add_argument("--sweep", action="store_true",
+                    help="headless: apply mechanical fixes + write reorgmem_pending.json")
+    pr.add_argument("--apply", action="store_true",
+                    help="apply the mechanical fixes now (interactive)")
+    pr.add_argument("--json", action="store_true")
+    _md(pr)
+    pr.set_defaults(func=cmd_project_reorg)
 
 
 def _md(parser) -> None:

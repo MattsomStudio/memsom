@@ -305,5 +305,106 @@ class TestDigestNotesLine(Base):
         self.assertIn("project_demo_sub", txt)
 
 
+class TestReorg(Base):
+    """`project reorg` — the deterministic /reorgmem half: check() findings tagged
+    content, the mechanical fixes (sync-conflict merge/delete + count refresh),
+    and the headless --sweep pending file."""
+
+    def setUp(self):
+        super().setUp()
+        P.init_project(self.mem, "demo")
+        # a real index_hook so the placeholder INFO doesn't cloud these tests
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "index_hook: (project node — set the Status headline)",
+            "index_hook: real hook"), encoding="utf-8")
+
+    def _conflict(self, suffix, text):
+        d = P._proj_dir(self.mem, "demo")
+        p = d / f"project_demo_{suffix}.sync-conflict-20260101-120000-ABCDEF.md"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_check_findings_are_tagged_content(self):
+        # a broken node link is a schema-independent content finding
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "## Pointers", "## Pointers\n- [[no_such_memory]]"), encoding="utf-8")
+        r = P.reorg(self.mem, slug="demo")
+        self.assertTrue(all(f.get("fix") == "content" for f in r["content"]))
+        self.assertEqual({f["name"] for f in r["content"]}, {"reorg-link-broken"})
+
+    def test_apply_deletes_identical_conflict_copy(self):
+        g = P._note_path(self.mem, "demo", "gotchas")
+        c = self._conflict("gotchas", g.read_text(encoding="utf-8"))
+        r = P.reorg(self.mem, slug="demo", apply=True)
+        self.assertFalse(c.exists())
+        self.assertTrue(any(a["fix"] == "sync-conflict" and a["result"] == "deleted"
+                            for a in r["applied"]))
+
+    def test_apply_union_merges_divergent_log_conflict(self):
+        P.log_entry(self.mem, "demo", "gotchas", "**boom**", cause="c", fix="f")
+        g = P._note_path(self.mem, "demo", "gotchas")
+        # a conflict copy carrying a DIFFERENT dated entry id
+        extra = g.read_text(encoding="utf-8").replace(
+            "## Entries\n", "## Entries\n- G-20200101-01 (2020-01-01) **older thing**\n")
+        c = self._conflict("gotchas", extra)
+        r = P.reorg(self.mem, slug="demo", apply=True)
+        merged = g.read_text(encoding="utf-8")
+        self.assertIn("G-20200101-01", merged)        # from the conflict copy
+        self.assertIn("**boom**", merged)             # from canonical
+        self.assertFalse(c.exists())
+        self.assertTrue(any(a.get("result") == "merged" for a in r["applied"]))
+
+    def test_apply_keeps_divergent_nonlog_conflict(self):
+        # a conflict copy of the NODE that differs cannot be auto-merged
+        n = self.node()
+        c = self._conflict("", n.read_text(encoding="utf-8") + "\n- extra divergence\n")
+        # name it as a node conflict, not a subnote
+        node_conflict = c.parent / "project_demo.sync-conflict-20260101-120000-ABCDEF.md"
+        c.rename(node_conflict)
+        P.reorg(self.mem, slug="demo", apply=True)
+        self.assertTrue(node_conflict.exists())       # kept for a human
+
+    def test_apply_refreshes_subnote_counts(self):
+        P.log_entry(self.mem, "demo", "gotchas", "**one**", cause="c", fix="f")
+        P.log_entry(self.mem, "demo", "gotchas", "**two**", cause="c", fix="f")
+        P.reorg(self.mem, slug="demo", apply=True)
+        body = split_frontmatter(self.node().read_text(encoding="utf-8"))[1]
+        line = next(l for l in P._sections(body)["Sub-notes"]
+                    if "project_demo_gotchas" in l)
+        self.assertTrue(line.rstrip().endswith("— 2"), line)
+
+    def test_sweep_writes_pending_and_log(self):
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "## Pointers", "## Pointers\n- [[no_such_memory]]"), encoding="utf-8")
+        r = P.reorg(self.mem, slug="demo", sweep=True)
+        import json
+        pending = json.loads(Path(r["pending_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(pending["version"], 1)
+        self.assertIn("demo", pending["projects"])
+        self.assertEqual({f["name"] for f in pending["projects"]["demo"]["findings"]},
+                         {"reorg-link-broken"})
+        log = (self.mem / ".weights" / "reorgmem_log.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"mode": "sweep"', log)
+
+    def test_sweep_touches_no_content_file(self):
+        # counts already fresh (apply once) → a second sweep with only a content
+        # finding must not rewrite any project file (RULES: mechanical-only headless)
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "## Pointers", "## Pointers\n- [[no_such_memory]]"), encoding="utf-8")
+        P.reorg(self.mem, slug="demo", apply=True)     # settle counts
+        import hashlib
+        d = P._proj_dir(self.mem, "demo")
+        before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in d.glob("*.md")}
+        P.reorg(self.mem, slug="demo", sweep=True)
+        after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in d.glob("*.md")}
+        self.assertEqual(before, after)
+
+
 if __name__ == "__main__":
     unittest.main()

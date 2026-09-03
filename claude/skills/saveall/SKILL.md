@@ -36,6 +36,12 @@ exists; create a new subproject file only for a genuinely new thread; never crea
 a sibling of an existing project at the top level.** Filenames must be unique
 across all levels. Create no other subdirectory.
 
+A project may instead be a **structured node** (`kind: project-node`): one parent
+carrying What / Status / Features / Rules / Creds / Where, six fixed sub-notes
+(spec, gotchas, decisions, interface_io, architecture, tests), and one spec note
+per feature. Never hand-write files for such a project — route through the
+`memsom project` CLI (Step 3.5).
+
 Read the current `MEMORY.md` first so you don't duplicate something already saved.
 
 ## Step 1 — Scan and bucket
@@ -100,6 +106,49 @@ salience: <0.00-1.00>
   3. surface it in the report and ask the user how to resolve. Never auto-resolve.
   - Guard: similarity ≠ contradiction. "uses tool X" and "tool X is v2.1" overlap
     but are compatible — that's an update, not a conflict.
+
+## Step 3.5 — Project routing (structured project nodes)
+
+Before you write a `project_*` file, check whether the project it belongs to is a
+**structured node**: `memsom project list` (each row is a `kind: project-node`
+project). If it is, you do NOT hand-write a file — every project fact goes through
+the `memsom project` CLI, which keeps the node, the sub-notes, the feature list and
+the spec notes in sync. (The CLI defaults `--memory-dir` to the live store.)
+
+**1 — Bind the project.** Match a session fact to a node when the conversation
+names one of its aliases (`memsom project show <slug>` → frontmatter `aliases:`) OR
+edits a path under one of its `dir_pc` / `dir_mac` / `dir_droplet`. A fact can bind
+to more than one node; route a copy to each.
+
+**2 — Bucket each fact to the right sub-note / command:**
+
+| The fact is… | Route it to |
+|---|---|
+| a bug WITH its cause | `project log <slug> gotchas "**symptom**" --cause … --fix … --where file:line` — a fix with no known cause is a `### Left` item, not a gotcha |
+| a decision (see the detector below) | `project log <slug> decisions "**decision**" --rejected "alt:why" --why … --source user\|session:<date>` |
+| an Edit/Write under `tests/**` | `project log <slug> tests "\`tests/path\`" --covers … --run "<cmd>"` |
+| an endpoint / CLI / IPC / MCP contract change | edit the `interface_io` note (`project show <slug> --note interface_io` then update) |
+| a `never …` / `always …` / `before X …` rule | the node `## Rules & gates` (`project status … ` is not it — edit the node) AND the `architecture` note Invariants/Gates |
+| a milestone reached / blocked | `project status <slug> --done "(MEASURED) …"` / `--next` / `--left` / `--ask` |
+| a feature shipped / started / dropped | `project feature <slug> <feature-id> --status implemented\|planned\|active-decision\|archived` (implemented needs `--evidence "(MEASURED) …"`) |
+| a change to what a feature DOES (signature, limit, default, contract) | `project spec <slug> <feature-id> --set behaviour "…" --why "…"` **in the same sweep** — a build that changed behaviour without touching the spec is a `/reorgmem` red |
+| >40 lines of narrative design | a vault artifact + one `## Pointers` line on the node |
+
+**3 — Decision detector (precise, to keep decisions clean):** log a `decisions`
+entry ONLY on **user commit language** — "go with", "decided", "not Y", "drop",
+"keep", "option N", or a yes to a numbered option — or an assistant proposal the
+user accepted within ~3 turns. An assistant-only recommendation is NOT a decision:
+it goes to `### Needs Matt` as a question (`project status <slug> --ask "…"`).
+
+**4 — Evidence discipline:** `### Done` bullets and `--evidence` carry a
+`(MEASURED)` / `(DERIVED)` tag. Bump `last-verified` (`project status <slug>
+--verified`) only when you actually re-checked the claim against the repo, not just
+because you touched the node.
+
+**Hard rule:** never create a loose `project_<slug>*` file for a project that has a
+node — that throws a `project check` loose-file WARN and the fact escapes the
+structured render. If the fact doesn't fit any bucket, it probably belongs in a
+flat `reference_*` / `feedback_*` file, not the project.
 
 ## Deleting a memory
 
