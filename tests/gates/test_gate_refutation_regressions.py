@@ -12,6 +12,7 @@ number nobody re-measured.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 
@@ -129,11 +130,19 @@ def test_broker_uvx_default_does_not_resolve_from_cwd(tmp_path, monkeypatch):
     up = memsom_broker.Upstream("fetch", {"command": "uvx", "args": []})
     resolved = getattr(up, "resolved_command", None) or up.command
 
-    assert resolved != "uvx", (
-        "Upstream never resolves the bare command to an absolute path at all "
-        "-- the cwd-shadowing attack is possible by construction, before cwd "
-        "even enters the picture"
-    )
+    # Only meaningful where uvx is actually installed: then a bare "uvx" left
+    # for CreateProcess to look up would search the CWD before PATH, so the
+    # broker MUST have resolved it to an absolute path. When uvx is NOT on PATH
+    # (e.g. a CI runner), resolve() correctly returns the bare name and the
+    # spawn fails with FileNotFoundError -- there is nothing in the CWD to
+    # shadow, so this assertion does not apply. The load-bearing cwd-shadow
+    # property is asserted unconditionally below.
+    if shutil.which("uvx") is not None:
+        assert resolved != "uvx", (
+            "uvx is on PATH but Upstream left the command bare -- CreateProcess "
+            "would search the CWD before PATH; it must resolve to an absolute "
+            "path"
+        )
     monkeypatch.chdir(tmp_path)
     assert resolved != str(fake_uvx), (
         f"Upstream resolved 'uvx' to {resolved}, which is the planted "
