@@ -49,6 +49,16 @@ implemented / planned / active-decision / archived, linked to its spec note) is 
 source of truth for what is left. Write them with `memsom project …`
 (init / feature / spec / status / log / check), never as new sibling files.
 
+**Reading a structured node — route the question to the right sub-note** (a
+prompt that names the project auto-injects its Status/Creds/Rules block; open a
+sub-note with `memsom project show <slug> --note <x>` for the rest): *why did we /
+should we instead* → **decisions** (check its `rejected:` before you re-propose a
+rejected option); *an error or something broken* → **gotchas**; *how A talks to B*
+(an endpoint, CLI, IPC/MCP contract) → **interface_io**; *where in the code / which
+layer* → **architecture**; *is X tested / what covers it* → **tests**; *the full
+contract for one feature* → its `project_<slug>_spec_<feature-id>` note. The node's
+`## Features` list is what is implemented vs planned vs an open decision.
+
 **But DO add the index line when you create a NEW non-project memory** — one
 `- [Title](file.md) — hook` bullet under the right `##` section. This is the one
 hand-edit that IS required: the importer reads a memory's `section` from the
