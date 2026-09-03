@@ -66,8 +66,8 @@ def fm_top_level(fm_lines) -> dict:
 # as flat and give writers a flat line list to write back.  fm_top_level itself
 # is unchanged: 14 other call sites and the forget parity tests depend on it.
 
-_FM_META_RE = re.compile(r"^metadata\s*:\s*(.*)$")
-_FM_CHILD_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s?(.*)$")   # exactly one 2-space level
+_FM_META_RE = re.compile(r"^metadata\s*:\s*(.*)\Z")           # \Z not $ (F-16)
+_FM_CHILD_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s?(.*)\Z")   # exactly one 2-space level
 _FM_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
 
 
