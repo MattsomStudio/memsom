@@ -338,6 +338,34 @@ _register("retrieval.bge_device", type=str, default="", source="env:MEMDAG_BGE_D
            doc="Force the BGE-M3 device (cuda/cpu); unset auto-selects.", feature="retrieval.bge")
 _register("retrieval.bge_unload", type=bool, default=False, source="env:MEMDAG_BGE_UNLOAD",
            doc="Unload the BGE-M3 model after a batch reindex.", feature="retrieval.bge")
+# --- BGE-M3 encode path + signal toggles (portable / opt-in) --------------
+# bge_url ships as LOCALHOST, never a mesh/host IP: memsom only ever talks to a
+# LOCAL embedding supervisor. A fresh clone with no supervisor running just
+# fails the fast /health probe and falls back to in-process torch (the `bge`
+# pip extra), and if that is not installed, to BM25 — see embed._dispatch_encode.
+_register("retrieval.bge_url", type=str, default="http://127.0.0.1:11435/embed",
+           source="env:MEMDAG_BGE_URL",
+           doc="LOCAL BGE-M3 embedding supervisor endpoint (POST /embed). Used only "
+               "when bge_encode_via allows the supervisor AND its /health answers; "
+               "otherwise memsom embeds in-process (torch) or degrades to BM25. "
+               "Localhost by default — memsom contains no mesh/cross-host logic.",
+           feature="retrieval.bge")
+_register("retrieval.bge_encode_via", type="enum",
+           choices=("auto", "supervisor", "inprocess"),
+           default="auto", source="env:MEMDAG_BGE_ENCODE_VIA",
+           doc="How bge-m3 embeds: 'auto' (prefer the local supervisor if bge_url's "
+               "/health answers, else in-process torch, else BM25), 'supervisor' "
+               "(prefer the HTTP supervisor), 'inprocess' (FlagEmbedding only, never "
+               "probe the supervisor).", feature="retrieval.bge")
+_register("retrieval.bge_dense", type=bool, default=True, source="env:MEMDAG_BGE_DENSE",
+           doc="Store + score the BGE-M3 dense vector. Off -> no dense signal on the "
+               "bge path (reindex to apply).", feature="retrieval.bge")
+_register("retrieval.bge_sparse", type=bool, default=True, source="env:MEMDAG_BGE_SPARSE",
+           doc="Store + score the BGE-M3 sparse (learned-lexical) weights. Off -> no "
+               "sparse signal on the bge path (reindex to apply).", feature="retrieval.bge")
+_register("retrieval.bge_colbert", type=bool, default=True, source="env:MEMDAG_BGE_COLBERT",
+           doc="Store + score the BGE-M3 ColBERT late-interaction vectors. Off -> no "
+               "colbert re-rank on the bge path (reindex to apply).", feature="retrieval.bge")
 
 _register("storage.sync_extra_markers", type=str, default="", source="env:MEMSOM_EXTRA_SYNC_MARKERS",
            doc="Comma-separated extra file-sync marker names, visibility only -- "

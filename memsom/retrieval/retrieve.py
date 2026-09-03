@@ -329,18 +329,26 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
     if b == "bm25":
         _clear_degraded(conn, nid)
         return True  # BM25-only by request; no vectors stored
-    if b == "bge-m3" and memsom_embed.bge_available():
-        try:
-            enc = memsom_embed.encode_doc(content)
-            if enc is not None:
-                memsom_embed.store_bge(conn, nid, enc)
-                _clear_degraded(conn, nid)
-                return True
-        # FAILOPEN: swallows and falls through -- bge failed, try the Ollama dense path next, then BM25-only if that fails too.
-        except Exception:
-            pass
+    if b == "bge-m3":
+        # bge NEVER falls back to the Ollama/nomic MODEL: a nomic row is tagged
+        # model='nomic-embed-text' and the bge reader filters WHERE model='bge-m3',
+        # so it would be unreadable dead weight. If bge can't embed (no local
+        # supervisor AND no torch, or the encode failed), stay BM25-only and TRACK
+        # it (MS-32) so a later reindex retries once a path is available.
+        if memsom_embed.bge_usable():
+            try:
+                enc = memsom_embed.encode_doc(content)
+                if enc is not None:
+                    memsom_embed.store_bge(conn, nid, enc)
+                    _clear_degraded(conn, nid)
+                    return True
+            # FAILOPEN: swallows -> falls to _record_degraded below; a bge store error must not block ingest (BM25 is already built).
+            except Exception as exc:
+                _warn_embed_fallback(exc)
+        _record_degraded(conn, nid, "bge embed unavailable; BM25-only")
+        return True
 
-    # Ollama dense path (default, or bge fall-through).
+    # Ollama dense path (backend == 'ollama').
     try:
         vec = _call_ollama_embed(content)
         blob = _vec_to_blob(vec)
@@ -516,8 +524,12 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     b = memsom_embed.backend()
     if b == "bm25":
         return []
+    if b == "bge-m3" and not memsom_embed.dense_enabled():
+        return []  # dense signal toggled off on the bge path
     try:
-        if b == "bge-m3" and memsom_embed.bge_available():
+        if b == "bge-m3":
+            if not memsom_embed.bge_usable():
+                return []  # bge selected but no encode path -> BM25-only, never a nomic mix
             enc = memsom_embed.encode_query(query)
             if enc is None:
                 return []
@@ -560,7 +572,8 @@ def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     """
     migrate(conn)
     from memsom.retrieval import embed as memsom_embed
-    if memsom_embed.backend() != "bge-m3" or not memsom_embed.bge_available():
+    if (memsom_embed.backend() != "bge-m3" or not memsom_embed.sparse_enabled()
+            or not memsom_embed.bge_usable()):
         return []
     enc = memsom_embed.encode_query(query)
     if enc is None:
@@ -605,7 +618,8 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
     if not candidate_ids:
         return []
     from memsom.retrieval import embed as memsom_embed
-    if memsom_embed.backend() != "bge-m3" or not memsom_embed.bge_available():
+    if (memsom_embed.backend() != "bge-m3" or not memsom_embed.colbert_enabled()
+            or not memsom_embed.bge_usable()):
         return [(nid, 0.0) for nid in candidate_ids]
     enc = memsom_embed.encode_query(query)
     if enc is None or not memsom_schema.table_exists(conn, "colbert_vecs"):
@@ -745,7 +759,8 @@ def retrieve(
     # top-k slice — cost is N×tokens, not corpus×tokens. No-op off the bge path,
     # where it preserves the fused order exactly.
     from memsom.retrieval import embed as memsom_embed
-    if memsom_embed.backend() == "bge-m3" and memsom_embed.bge_available():
+    if (memsom_embed.backend() == "bge-m3" and memsom_embed.colbert_enabled()
+            and memsom_embed.bge_usable()):
         cand_n = min(memsom_embed.colbert_candidates(), len(fused))
         cand_ids = [nid for nid, _ in fused[:cand_n]]
         reranked = colbert_rerank(conn, query, cand_ids)

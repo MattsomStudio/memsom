@@ -135,6 +135,37 @@ def _device():
 
 
 # ---------------------------------------------------------------------------
+# Encode path + signal toggles (portable / opt-in)
+# ---------------------------------------------------------------------------
+
+def encode_via() -> str:
+    """How bge-m3 embeds: 'auto' | 'supervisor' | 'inprocess' (default 'auto')."""
+    raw = (memsom_tuning.resolve("retrieval.bge_encode_via") or "").strip().lower()
+    return raw if raw in ("auto", "supervisor", "inprocess") else "auto"
+
+
+def _mode_on(key: str) -> bool:
+    """A bge signal toggle (bge_dense/sparse/colbert), default ON. Accepts the
+    typed bool default (unset) or a raw env string."""
+    v = memsom_tuning.resolve(key)
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def dense_enabled() -> bool:
+    return _mode_on("retrieval.bge_dense")
+
+
+def sparse_enabled() -> bool:
+    return _mode_on("retrieval.bge_sparse")
+
+
+def colbert_enabled() -> bool:
+    return _mode_on("retrieval.bge_colbert")
+
+
+# ---------------------------------------------------------------------------
 # Lazy model singleton
 # ---------------------------------------------------------------------------
 
@@ -160,6 +191,23 @@ def bge_available() -> bool:
         except Exception:
             _BGE_AVAILABLE = False
     return _BGE_AVAILABLE
+
+
+def bge_usable() -> bool:
+    """True iff bge signals can be produced by SOME path — in-process torch OR a
+    reachable local supervisor. This is the gate retrieve.py uses to decide the
+    bge branch, so a box with the supervisor but no local torch still gets bge.
+
+    Torch is checked FIRST (a cheap cached import probe, no network): when it is
+    available we never touch the network here, which keeps the test suite (which
+    patches bge_available) hermetic. Only a torch-less box probes the supervisor.
+    """
+    if bge_available():
+        return True
+    if encode_via() == "inprocess":
+        return False
+    from memsom.retrieval import bge_client
+    return bge_client.configured() and bge_client.bge_http_available()
 
 
 def _get_model():
@@ -249,14 +297,35 @@ def _warn_fallback(op: str, exc: Exception) -> None:
     )
 
 
-def encode_doc(text: str):
-    """Encode a document. Returns the signal dict, or None on any failure."""
+def _dispatch_encode(text: str, op: str):
+    """Produce {'dense','sparse','colbert'} for *text*, or None.
+
+    Path (retrieval.bge_encode_via):
+      auto / supervisor -> if bge_url's /health answers, POST /embed to the local
+                           supervisor (no torch in THIS process). On an unreachable
+                           supervisor OR an embed error, fall through to in-process.
+      any mode          -> in-process FlagEmbedding (the `bge` pip extra).
+    On any total failure (no supervisor AND torch not importable / erroring) this
+    warns once and returns None, so the caller degrades to BM25 — never raises.
+    """
+    if encode_via() in ("auto", "supervisor"):
+        from memsom.retrieval import bge_client
+        if bge_client.configured() and bge_client.bge_http_available():
+            enc = bge_client.encode_http(text)
+            if enc is not None:
+                return enc
+            # supervisor reachable but the embed itself failed -> try in-process.
     try:
         return _encode(text)
-    # FAILOPEN: warns once and returns None -- document encoding failure degrades this doc to the sparse-only path, never crashes ingest.
+    # FAILOPEN: warns once and returns None -- no bge encode path (supervisor down/unset AND FlagEmbedding not importable or erroring) degrades this to BM25, never crashes ingest/retrieval.
     except Exception as exc:
-        _warn_fallback("document encoding", exc)
+        _warn_fallback(op, exc)
         return None
+
+
+def encode_doc(text: str):
+    """Encode a document. Returns the signal dict, or None on any failure."""
+    return _dispatch_encode(text, "document encoding")
 
 
 def encode_query(text: str):
@@ -265,12 +334,7 @@ def encode_query(text: str):
     Separate from encode_doc so a future asymmetric-query instruction can land
     here without touching the doc path.
     """
-    try:
-        return _encode(text)
-    # FAILOPEN: warns once and returns None -- query encoding failure degrades this query to the sparse-only path, never crashes retrieval.
-    except Exception as exc:
-        _warn_fallback("query encoding", exc)
-        return None
+    return _dispatch_encode(text, "query encoding")
 
 
 # ---------------------------------------------------------------------------
@@ -340,31 +404,43 @@ def store_bge(conn: sqlite3.Connection, nid: int, enc: dict) -> None:
     migrate(conn)
     from memsom.retrieval import retrieve as memsom_retrieve
 
-    dense = enc["dense"]
-    dense_blob = memsom_retrieve._vec_to_blob(dense)
     import json
-    weights_json = json.dumps(enc["sparse"])
-    colbert = enc["colbert"]
-    n_tokens = len(colbert)
-    dim = len(colbert[0]) if n_tokens else BGE_DENSE_DIM
-    colbert_blob = colbert_to_blob(colbert)
-
     with conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO embeddings(node_id, model, dim, vec)"
-            " VALUES (?, ?, ?, ?)",
-            (nid, BGE_MODEL_NAME, len(dense), dense_blob),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO sparse_vecs(node_id, model, weights_json)"
-            " VALUES (?, ?, ?)",
-            (nid, BGE_MODEL_NAME, weights_json),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO colbert_vecs(node_id, model, n_tokens, dim, vecs)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (nid, BGE_MODEL_NAME, n_tokens, dim, colbert_blob),
-        )
+        # Each signal is written ONLY when its toggle is on; when off, any existing
+        # row for this node is PURGED so toggling a signal off + reindex removes it
+        # (leaving a stale disabled vector would keep scoring against it).
+        if dense_enabled():
+            dense = enc["dense"]
+            conn.execute(
+                "INSERT OR REPLACE INTO embeddings(node_id, model, dim, vec)"
+                " VALUES (?, ?, ?, ?)",
+                (nid, BGE_MODEL_NAME, len(dense),
+                 memsom_retrieve._vec_to_blob(dense)),
+            )
+        else:
+            conn.execute("DELETE FROM embeddings WHERE node_id = ? AND model = ?",
+                         (nid, BGE_MODEL_NAME))
+        if sparse_enabled():
+            conn.execute(
+                "INSERT OR REPLACE INTO sparse_vecs(node_id, model, weights_json)"
+                " VALUES (?, ?, ?)",
+                (nid, BGE_MODEL_NAME, json.dumps(enc["sparse"])),
+            )
+        else:
+            conn.execute("DELETE FROM sparse_vecs WHERE node_id = ? AND model = ?",
+                         (nid, BGE_MODEL_NAME))
+        if colbert_enabled():
+            colbert = enc["colbert"]
+            n_tokens = len(colbert)
+            dim = len(colbert[0]) if n_tokens else BGE_DENSE_DIM
+            conn.execute(
+                "INSERT OR REPLACE INTO colbert_vecs(node_id, model, n_tokens, dim, vecs)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (nid, BGE_MODEL_NAME, n_tokens, dim, colbert_to_blob(colbert)),
+            )
+        else:
+            conn.execute("DELETE FROM colbert_vecs WHERE node_id = ? AND model = ?",
+                         (nid, BGE_MODEL_NAME))
 
 
 def deindex_bge(conn: sqlite3.Connection, nid: int) -> None:

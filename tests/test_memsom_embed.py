@@ -150,46 +150,48 @@ class TestPrimitives(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Degradation: bge unavailable / encoder fails -> Ollama -> BM25
+# Degradation: bge unavailable / encoder fails -> BM25-only (NEVER nomic/Ollama)
+#
+# Single-backend contract: when backend=bge-m3, memsom must never store a
+# nomic (Ollama) vector as a "fallback" — it is tagged model='nomic-embed-text'
+# and the bge reader filters WHERE model='bge-m3', so it would be unreadable
+# dead weight. A bge node that can't embed stays BM25-only and is TRACKED in the
+# MS-32 re-index queue so a later reindex retries once a path exists.
 # ---------------------------------------------------------------------------
 
 class TestBgeDegradation(Base):
     def _fake_ollama(self, vec):
-        def _f(text, timeout=10):
+        def _f(text, timeout=None):
             return list(vec)
         return _f
 
-    def test_unavailable_falls_back_to_ollama(self):
-        """backend=bge-m3 but FlagEmbedding absent: index_node stores the Ollama
-        dense embedding (model=nomic), and NO sparse/colbert rows."""
+    def test_unavailable_degrades_to_bm25(self):
+        """backend=bge-m3 but no bge path (FlagEmbedding absent AND no supervisor):
+        index_node builds BM25 only — NO embeddings/sparse/colbert rows — and
+        records the node as degraded. It must NOT store a nomic (Ollama) vector."""
         os.environ["MEMDAG_EMBED_BACKEND"] = "bge-m3"
+        os.environ["MEMDAG_BGE_ENCODE_VIA"] = "inprocess"  # never probe the supervisor
+        self.addCleanup(os.environ.pop, "MEMDAG_BGE_ENCODE_VIA", None)
         nid = self.add("nebula overlay mesh", "user")
-        with patch.object(memsom_embed, "bge_available", lambda: False), \
-             patch.object(memsom_retrieve, "_call_ollama_embed",
-                          self._fake_ollama([1.0, 0.0, 0.0])):
+        with patch.object(memsom_embed, "bge_available", lambda: False):
             memsom_retrieve.index_node(self.conn, nid)
-        # BM25 present, ollama dense present, bge tables empty.
-        self.assertGreater(self.count("docstats", nid), 0)
-        row = self.conn.execute(
-            "SELECT model FROM embeddings WHERE node_id = ?", (nid,)).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(row[0], memsom_retrieve._embed_model())
+        self.assertGreater(self.count("docstats", nid), 0)   # BM25 built
+        self.assertEqual(self.count("embeddings", nid), 0)   # no dense at all (no nomic mix)
         self.assertEqual(self.count("sparse_vecs", nid), 0)
         self.assertEqual(self.count("colbert_vecs", nid), 0)
+        self.assertIn(nid, memsom_retrieve.degraded_nodes(self.conn))
 
-    def test_encoder_failure_falls_back_to_ollama(self):
-        """bge available but encode_doc returns None -> Ollama path taken."""
+    def test_encoder_failure_degrades_to_bm25(self):
+        """bge usable but encode_doc returns None -> BM25-only + degraded, no
+        vectors of any model."""
         os.environ["MEMDAG_EMBED_BACKEND"] = "bge-m3"
         nid = self.add("lighthouse network", "user")
         with patch.object(memsom_embed, "bge_available", lambda: True), \
-             patch.object(memsom_embed, "encode_doc", lambda t: None), \
-             patch.object(memsom_retrieve, "_call_ollama_embed",
-                          self._fake_ollama([0.0, 1.0, 0.0])):
+             patch.object(memsom_embed, "encode_doc", lambda t: None):
             memsom_retrieve.index_node(self.conn, nid)
-        row = self.conn.execute(
-            "SELECT model FROM embeddings WHERE node_id = ?", (nid,)).fetchone()
-        self.assertEqual(row[0], memsom_retrieve._embed_model())
+        self.assertEqual(self.count("embeddings", nid), 0)
         self.assertEqual(self.count("colbert_vecs", nid), 0)
+        self.assertIn(nid, memsom_retrieve.degraded_nodes(self.conn))
 
     def test_bm25_backend_stores_no_vectors(self):
         os.environ["MEMDAG_EMBED_BACKEND"] = "bm25"
@@ -433,9 +435,13 @@ class TestRrfNary(unittest.TestCase):
 class TestBgeFallbackWarning(unittest.TestCase):
     def setUp(self):
         memsom_embed._WARNED_FALLBACK = False
+        # Pin the in-process path so the dispatcher never probes a (possibly live)
+        # local supervisor — this test is specifically about the torch encode path.
+        os.environ["MEMDAG_BGE_ENCODE_VIA"] = "inprocess"
 
     def tearDown(self):
         memsom_embed._WARNED_FALLBACK = False
+        os.environ.pop("MEMDAG_BGE_ENCODE_VIA", None)
 
     def test_encode_failure_warns_exactly_once(self):
         import contextlib
