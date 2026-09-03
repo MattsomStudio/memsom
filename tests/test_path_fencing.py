@@ -234,6 +234,18 @@ ALLOWED: dict[str, str] = {
     "retrieval/embed.py::colbert_candidates":
         "NOT A PATH - memsom_tuning.resolve(\"retrieval.colbert_candidates\") "
         "reads a config knob. Same attribute name, unrelated call.",
+    "retrieval/bge_client.py::_url":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_url\") reads a "
+        "config knob. Same attribute name, unrelated call.",
+    "retrieval/embed.py::_mode_on":
+        "NOT A PATH - memsom_tuning.resolve(key) reads a boolean config knob by "
+        "key. Same attribute name, unrelated call.",
+    "retrieval/embed.py::encode_via":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_encode_via\") reads "
+        "a config knob. Same attribute name, unrelated call.",
+    "retrieval/retrieve.py::_call_ollama_embed":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.embed_timeout\") reads a "
+        "config knob. Same attribute name, unrelated call.",
     "retrieval/llm.py::_cite_overlap_floor":
         "NOT A PATH - memsom_tuning.resolve(\"llm.cite_overlap\") reads a "
         "config knob. Same attribute name, unrelated call.",
