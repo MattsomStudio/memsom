@@ -14,13 +14,13 @@ adds 80+ tests across 13 modules + CLI + MCP.
 | quarantine            | memsom/integrity/quarantine.py     | Consolidation gate; manual quarantine; promote with gate check | test_memsom_quarantine.py     | 10    |
 | confid                | memsom/integrity/confid.py         | Bell-LaPadula conf axis (MAX high-water-mark); classify        | test_memsom_confid.py         | 10    |
 | trust                 | memsom/integrity/trust.py          | Integrity lattice (meet/join); audited manual elevation        | test_memsom_trust.py          | 10    |
-| blame                 | memsom/interface/blame.py          | Git-blame: trace any node to its root sources                  | test_memsom_blame.py          | 8     |
+| blame                 | memsom/integrity/blame.py          | Git-blame: trace any node to its root sources                  | test_memsom_blame.py          | 8     |
 | federation            | memsom/federation/federation.py     | Cross-machine sync; first-death-wins monotonic; UUID backfill  | test_memsom_federation.py     | 10    |
 | relate                | memsom/retrieval/relate.py         | Associative rel_edges; BFS neighborhood with integrity floor   | test_memsom_relate.py         | 10    |
 | anticipatory          | memsom/lifecycle/anticipatory.py   | Surprise-gating (Jaccard novelty); query_log; prefetch         | test_memsom_anticipatory.py   | 10    |
 | distill               | memsom/distill/distill.py        | Provenance-filtered JSONL export; distill_plan runner stub     | test_memsom_distill.py        | 10    |
 | heal                  | memsom/lifecycle/heal.py           | Invariant check (5 violation kinds); rebuild-derived           | test_memsom_heal.py           | 10    |
-| llm                   | memsom/distill/llm.py            | Opt-in Ollama LLM path; citation firewall; LlmUnavailable      | test_memsom_llm.py            | 10    |
+| llm                   | memsom/retrieval/llm.py            | Opt-in Ollama LLM path; citation firewall; LlmUnavailable      | test_memsom_llm.py            | 10    |
 | **CLI**               | **memsom/interface/cli.py**        | **Unified 38-subcommand CLI; enhanced ask**                    | **test_memsom_cli.py**        | **10**|
 | **MCP server**        | **memsom/interface/mcp.py**        | **stdio JSON-RPC 2.0 MCP server; 12 tools; --selfcheck**       | **test_memsom_mcp.py**        | **9** |
 

@@ -1,4 +1,9 @@
-"""memsom_retrieve — hybrid BM25 + optional Ollama-vector retrieval.
+"""memsom.retrieval.retrieve — hybrid BM25 + optional dense-vector retrieval.
+
+Backend is pluggable via `embed.backend` / MEMDAG_EMBED_BACKEND
+(ollama | bge-m3 | bm25). The opt-in bge-m3 backend fuses dense (1024-dim)
++ learned-sparse + ColBERT late-interaction rerank, degrading to Ollama then
+BM25 when absent.
 
 BM25 runs on pure stdlib (no external deps).
 Ollama vectors are optional: unreachable or missing embeddings degrade

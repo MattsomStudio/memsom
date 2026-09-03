@@ -450,83 +450,83 @@ Measured on the standard workload; source cited here.
 | `add`            | memsom/interface/cli.py      | Inject a new source node |
 | `migrate`        | memsom/interface/cli.py      | Run all schema migrations (idempotent) |
 | `init`           | memsom/interface/cli.py      | Create the data dir + DB and run all migrations (idempotent) |
-| `recompute`      | memsom_recompute   | Multi-hop integrity label recompute |
-| `redact`         | memsom_redact      | Destroy payload; preserve row/edges/dates |
-| `consolidate`    | memsom_quarantine  | Gate: quarantine externally-tainted derived nodes |
-| `quarantine`     | memsom_quarantine  | Manually quarantine a node |
-| `promote`        | memsom_quarantine  | Promote quarantined node (requires endorsed ancestor chain) |
-| `quarantine-list`| memsom_quarantine  | List all quarantined nodes |
-| `classify`       | memsom_confid      | Set confidentiality label on a node |
-| `conf-recompute` | memsom_confid      | Recompute Bell-LaPadula conf labels |
-| `export`         | memsom_federation  | Export changeset for cross-machine sync |
-| `import`         | memsom_federation  | Import changeset (first-death-wins monotonic) |
-| `register-origin`| memsom_federation  | Trust a federation origin (default-deny) |
-| `origins-list`   | memsom_federation  | List trusted federation origins |
-| `blame`          | memsom_blame       | Git-blame: trace node to root sources |
-| `relate`         | memsom_relate      | Create associative rel_edge between nodes |
-| `neighborhood`   | memsom_relate      | BFS over rel_edges with integrity-floor propagation |
-| `observe`        | memsom_anticipatory| Log a query to the anticipatory query log |
-| `prefetch`       | memsom_anticipatory| Warm the k most-asked answers |
-| `anticipate-status`| memsom_anticipatory| Show query log + prefetch cache state |
-| `export-training`| memsom_distill     | Export provenance-filtered JSONL training set |
-| `distill-plan`   | memsom_distill     | Write distill_config.json + distill.ps1 runner stub |
-| `export-reflex`  | memsom_reflex      | Export reflex/schema-shaped chat pairs from untainted consolidated memory (experimental) |
-| `check`          | memsom_heal        | Detect invariant violations |
-| `rebuild-derived`| memsom_heal        | Deterministic rebuild of derived state |
-| `elevate`        | memsom_trust       | Manually raise integrity label (audited) |
-| `meet`           | memsom_trust       | Lattice meet (min) of two integrity labels |
-| `join`           | memsom_trust       | Lattice join (max) of two integrity labels |
-| `elevations`     | memsom_trust       | Show elevation audit history for a node |
-| `llm-check`      | memsom_llm         | Check whether local Ollama is reachable |
-| `profile`        | memsom_profile     | Leaf-origin provenance histogram (display-only; floor gates, profile never does) |
-| `check-action`   | memsom_gate        | Action-time integrity gate: allow/deny by floor (the ONLY gate; audited in gate_log) |
-| `gate-log`       | memsom_gate        | Show recent gate decisions (audit log) |
-| `register-root`  | memsom_corroborate | Register an independence root for corroboration |
-| `assert-claim`   | memsom_corroborate | Assert a structured claim under a registered root |
-| `corroborate`    | memsom_corroborate | Mint a lift node when k independent roots agree |
-| `claims-list`    | memsom_corroborate | List all claims and their corroboration status |
-| `roots-list`     | memsom_corroborate | List all registered independence roots |
-| `ingest`         | memsom_ingest      | Ingest a single file (channel stamped by caller; SHA-256 dedup; auto-chunked) |
-| `ingest-dir`     | memsom_ingest      | Ingest all `*.md` (or `--glob`) files under a directory tree |
-| `ingest-url`     | memsom_ingest      | Fetch a URL (GET) and ingest the body (channel always `external`) |
-| `ingest-text`    | memsom_ingest      | Ingest raw text at a declared channel |
-| `ingest-chats`   | memsom_chats       | Seed from your own local chat history, opt-in (channel=user) |
-| `retrieve`       | memsom_retrieve    | Hybrid BM25 + optional-Ollama-vector ranked retrieval |
-| `reindex`        | memsom_retrieve    | Rebuild BM25 postings for all live source nodes |
-| `compact`        | memsom_compact     | Consolidate related episodes into a semantic node (edge-preserving, archived) |
-| `archived-list`  | memsom_compact     | List all archived (compacted) episodes |
-| `doctor`         | memsom_doctor      | Print a paste-ready diagnostic report for bug reports |
-| `wire-config`    | memsom_config      | Merge memsom into an MCP client's config (backup + idempotent) |
-| `obsidian-sync`  | memsom_obsidian    | Sync an Obsidian vault into the DAG (`[[wikilinks]]` -> rel_edges) |
-| `obsidian-export`| memsom_obsidian    | Write an answer back to the vault as a memsom-stamped note |
-| `obsidian-watch` | memsom_obsidian    | Watch a vault and live-sync on change |
-| `bridge-render`  | memsom_bridge_render | Regenerate MEMORY.md from the store (the Stop-hook command; fail-safe) |
-| `claude-sync`    | memsom_claude      | Seed/refresh the memsom-managed memory block in CLAUDE.md |
-| `wire-claude`    | memsom_wire_claude | Install the Claude Code memory loop (skills + Stop hook + prompt hook + CLAUDE.md) |
-| `hook-prompt`    | prompt_hook        | UserPromptSubmit hook: top-3 memories above the floor as added context (off/log/inject) |
-| `hook-query`     | prompt_hook        | Fast retrieval for hooks: warm MCP endpoint, BM25 fallback, hard deadline (silent on timeout) |
-| `hook-stats`     | prompt_hook        | Summarise the prompt-hook log: inject rate, top stems, score histogram, floor sweep |
-| `session-log`    | memsom_session     | Recent session taint-floor transitions (opt-in Gate #3 audit) |
-| `capability-log` | memsom_capgate     | Recent capability-gate decisions (opt-in Gate #3 audit) |
-| `broker-init`    | memsom_broker      | Write default Gate #3 broker config + policy |
-| `policy-check`   | memsom_broker      | Show a tool's required floor under the Gate #3 policy |
-| `hook-pre`       | memsom_hook        | PreToolUse hook: deny consequential tools on a tainted session |
-| `hook-post`      | memsom_hook        | PostToolUse hook: taint the session after untrusted ingress |
-| `hook-print-config`| memsom_hook      | Print the settings.json hooks block for Gate #3 |
-| `stale-cascade`  | memsom_stale       | Mark a node + descendants stale (source changed) |
-| `freshen`        | memsom_stale       | Repoint a stale node at the fresh source + regenerate |
-| `stale-status`   | memsom_stale       | Show staleness of a node |
-| `unstale`        | memsom_stale       | Clear the stale flag on one node |
-| `verify-stale`   | memsom_verify_stale| Flag state-bearing memory notes whose verification age has gone stale |
-| `audit`          | memsom_audit       | Structural integrity audit of the flat memory store (read-only; per-section counts vs budgets) |
-| `index-stats`    | memsom_index_stats | Per-section line/byte counts of MEMORY.md against `section_budgets` + last shed receipt |
-| `consolidate-feedback` | memsom_consolidate | Propose (`--apply`: perform) merging aged feedback files into `feedback_cluster_*` bodies (BM25; dry-run default) |
-| `consolidate-projects` | memsom_consolidate | Propose (`--apply`: perform) folding closed/cold subprojects into the parent overview, `index: false` |
+| `recompute`      | memsom/integrity/recompute.py   | Multi-hop integrity label recompute |
+| `redact`         | memsom/integrity/redact.py      | Destroy payload; preserve row/edges/dates |
+| `consolidate`    | memsom/integrity/quarantine.py  | Gate: quarantine externally-tainted derived nodes |
+| `quarantine`     | memsom/integrity/quarantine.py  | Manually quarantine a node |
+| `promote`        | memsom/integrity/quarantine.py  | Promote quarantined node (requires endorsed ancestor chain) |
+| `quarantine-list`| memsom/integrity/quarantine.py  | List all quarantined nodes |
+| `classify`       | memsom/integrity/confid.py      | Set confidentiality label on a node |
+| `conf-recompute` | memsom/integrity/confid.py      | Recompute Bell-LaPadula conf labels |
+| `export`         | memsom/federation/federation.py  | Export changeset for cross-machine sync |
+| `import`         | memsom/federation/federation.py  | Import changeset (first-death-wins monotonic) |
+| `register-origin`| memsom/federation/federation.py  | Trust a federation origin (default-deny) |
+| `origins-list`   | memsom/federation/federation.py  | List trusted federation origins |
+| `blame`          | memsom/integrity/blame.py       | Git-blame: trace node to root sources |
+| `relate`         | memsom/retrieval/relate.py      | Create associative rel_edge between nodes |
+| `neighborhood`   | memsom/retrieval/relate.py      | BFS over rel_edges with integrity-floor propagation |
+| `observe`        | memsom/lifecycle/anticipatory.py| Log a query to the anticipatory query log |
+| `prefetch`       | memsom/lifecycle/anticipatory.py| Warm the k most-asked answers |
+| `anticipate-status`| memsom/lifecycle/anticipatory.py| Show query log + prefetch cache state |
+| `export-training`| memsom/distill/distill.py     | Export provenance-filtered JSONL training set |
+| `distill-plan`   | memsom/distill/distill.py     | Write distill_config.json + distill.ps1 runner stub |
+| `export-reflex`  | memsom/lifecycle/reflex.py      | Export reflex/schema-shaped chat pairs from untainted consolidated memory (experimental) |
+| `check`          | memsom/lifecycle/heal.py        | Detect invariant violations |
+| `rebuild-derived`| memsom/lifecycle/heal.py        | Deterministic rebuild of derived state |
+| `elevate`        | memsom/integrity/trust.py       | Manually raise integrity label (audited) |
+| `meet`           | memsom/integrity/trust.py       | Lattice meet (min) of two integrity labels |
+| `join`           | memsom/integrity/trust.py       | Lattice join (max) of two integrity labels |
+| `elevations`     | memsom/integrity/trust.py       | Show elevation audit history for a node |
+| `llm-check`      | memsom/retrieval/llm.py         | Check whether local Ollama is reachable |
+| `profile`        | memsom/interface/profile.py     | Leaf-origin provenance histogram (display-only; floor gates, profile never does) |
+| `check-action`   | memsom/integrity/gate.py        | Action-time integrity gate: allow/deny by floor (the ONLY gate; audited in gate_log) |
+| `gate-log`       | memsom/integrity/gate.py        | Show recent gate decisions (audit log) |
+| `register-root`  | memsom/lifecycle/corroborate.py | Register an independence root for corroboration |
+| `assert-claim`   | memsom/lifecycle/corroborate.py | Assert a structured claim under a registered root |
+| `corroborate`    | memsom/lifecycle/corroborate.py | Mint a lift node when k independent roots agree |
+| `claims-list`    | memsom/lifecycle/corroborate.py | List all claims and their corroboration status |
+| `roots-list`     | memsom/lifecycle/corroborate.py | List all registered independence roots |
+| `ingest`         | memsom/integrity/ingest.py      | Ingest a single file (channel stamped by caller; SHA-256 dedup; auto-chunked) |
+| `ingest-dir`     | memsom/integrity/ingest.py      | Ingest all `*.md` (or `--glob`) files under a directory tree |
+| `ingest-url`     | memsom/integrity/ingest.py      | Fetch a URL (GET) and ingest the body (channel always `external`) |
+| `ingest-text`    | memsom/integrity/ingest.py      | Ingest raw text at a declared channel |
+| `ingest-chats`   | memsom/bridge/chats.py       | Seed from your own local chat history, opt-in (channel=user) |
+| `retrieve`       | memsom/retrieval/retrieve.py    | Hybrid BM25 + optional-Ollama-vector ranked retrieval |
+| `reindex`        | memsom/retrieval/retrieve.py    | Rebuild BM25 postings for all live source nodes |
+| `compact`        | memsom/lifecycle/compact.py     | Consolidate related episodes into a semantic node (edge-preserving, archived) |
+| `archived-list`  | memsom/lifecycle/compact.py     | List all archived (compacted) episodes |
+| `doctor`         | memsom/lifecycle/doctor.py      | Print a paste-ready diagnostic report for bug reports |
+| `wire-config`    | memsom/interface/config.py      | Merge memsom into an MCP client's config (backup + idempotent) |
+| `obsidian-sync`  | memsom/bridge/obsidian.py    | Sync an Obsidian vault into the DAG (`[[wikilinks]]` -> rel_edges) |
+| `obsidian-export`| memsom/bridge/obsidian.py    | Write an answer back to the vault as a memsom-stamped note |
+| `obsidian-watch` | memsom/bridge/obsidian.py    | Watch a vault and live-sync on change |
+| `bridge-render`  | memsom/bridge/bridge_render.py | Regenerate MEMORY.md from the store (the Stop-hook command; fail-safe) |
+| `claude-sync`    | memsom/bridge/claude.py      | Seed/refresh the memsom-managed memory block in CLAUDE.md |
+| `wire-claude`    | memsom/bridge/wire_claude.py | Install the Claude Code memory loop (skills + Stop hook + prompt hook + CLAUDE.md) |
+| `hook-prompt`    | memsom/interface/prompt_hook.py | UserPromptSubmit hook: top-3 memories above the floor as added context (off/log/inject) |
+| `hook-query`     | memsom/interface/prompt_hook.py | Fast retrieval for hooks: warm MCP endpoint, BM25 fallback, hard deadline (silent on timeout) |
+| `hook-stats`     | memsom/interface/prompt_hook.py | Summarise the prompt-hook log: inject rate, top stems, score histogram, floor sweep |
+| `session-log`    | memsom/storage/session.py     | Recent session taint-floor transitions (opt-in Gate #3 audit) |
+| `capability-log` | memsom/integrity/capgate.py     | Recent capability-gate decisions (opt-in Gate #3 audit) |
+| `broker-init`    | memsom/federation/broker.py      | Write default Gate #3 broker config + policy |
+| `policy-check`   | memsom/federation/broker.py      | Show a tool's required floor under the Gate #3 policy |
+| `hook-pre`       | memsom/bridge/hook.py        | PreToolUse hook: deny consequential tools on a tainted session |
+| `hook-post`      | memsom/bridge/hook.py        | PostToolUse hook: taint the session after untrusted ingress |
+| `hook-print-config`| memsom/bridge/hook.py      | Print the settings.json hooks block for Gate #3 |
+| `stale-cascade`  | memsom/lifecycle/stale.py       | Mark a node + descendants stale (source changed) |
+| `freshen`        | memsom/lifecycle/stale.py       | Repoint a stale node at the fresh source + regenerate |
+| `stale-status`   | memsom/lifecycle/stale.py       | Show staleness of a node |
+| `unstale`        | memsom/lifecycle/stale.py       | Clear the stale flag on one node |
+| `verify-stale`   | memsom/lifecycle/verify_stale.py| Flag state-bearing memory notes whose verification age has gone stale |
+| `audit`          | memsom/interface/audit.py       | Structural integrity audit of the flat memory store (read-only; per-section counts vs budgets) |
+| `index-stats`    | memsom/interface/index_stats.py | Per-section line/byte counts of MEMORY.md against `section_budgets` + last shed receipt |
+| `consolidate-feedback` | memsom/bridge/consolidate.py | Propose (`--apply`: perform) merging aged feedback files into `feedback_cluster_*` bodies (BM25; dry-run default) |
+| `consolidate-projects` | memsom/bridge/consolidate.py | Propose (`--apply`: perform) folding closed/cold subprojects into the parent overview, `index: false` |
 | `panel`          | memsom_panel       | Live tuning + telemetry panel (external `memsom_panel` plugin package): loopback-only web UI over runtime params (canonical.json), JSON/env-file knobs, scheduled-task cadences, and system telemetry — bounds-validated writes, JSONL audit log (`--profile <host-profile.json>`) |
-| `tombstone`      | memsom_tombstone   | Sanctioned delete path: revoke a memory's node + remove its file |
-| `tombstone-list` | memsom_tombstone   | List tombstoned memory nodes |
-| `fact-set`       | memsom_facts       | Update a fact file's value + last-verified (the file is the store-of-record) |
-| `fact-log`       | memsom_facts       | Print a fact's value history from the supersede chain |
+| `tombstone`      | memsom/integrity/tombstone.py   | Sanctioned delete path: revoke a memory's node + remove its file |
+| `tombstone-list` | memsom/integrity/tombstone.py   | List tombstoned memory nodes |
+| `fact-set`       | memsom/bridge/facts.py       | Update a fact file's value + last-verified (the file is the store-of-record) |
+| `fact-log`       | memsom/bridge/facts.py       | Print a fact's value history from the supersede chain |
 
 ## Concepts
 
