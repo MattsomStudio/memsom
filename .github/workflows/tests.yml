@@ -160,6 +160,14 @@ jobs:
           memsom bridge-render "$MEMDAG_HOME/render" && \
           memsom doctor --json
 
+      # MF-8: the distribution-name contract can only be checked where the
+      # package is actually installed with metadata. The stdlib-only
+      # `unittest`/`coverage` jobs skip it (no .dist-info); this job has
+      # `pip install -e .`, so it is the real enforcement point, on every OS.
+      - name: MF-8 distribution-name contract (metadata present)
+        shell: bash
+        run: python -m unittest tests.test_panel_contract.DistributionContract -v
+
   # ---------------------------------------------------------------------
   # Architectural contracts. `.importlinter` documents itself as ENFORCED
   # ("a break is a bug"). `memsom-layers` (the strict 9-rank total order,
