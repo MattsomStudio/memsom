@@ -62,7 +62,7 @@ import memsom
 from memsom.kernel import events as memsom_events
 from memsom.storage import schema as memsom_schema
 from memsom.kernel.frontmatter import parse_index_entries, parse_primary_index
-from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
+from memsom.kernel.frontmatter import split_frontmatter, fm_flat
 from memsom.kernel.paths import default_memory_dir
 from memsom.lifecycle import forget as _forget
 from memsom import tuning as memsom_tuning
@@ -268,7 +268,9 @@ def _rows(conn):
 
 def _entry(content, channel, sref, tier, rs, stale=0, stale_reason=None, born=None):
     fm_lines, body, _ = split_frontmatter(content or "")
-    fm = fm_top_level(fm_lines)
+    # fm_flat: a file Claude Code's stamper nested under metadata: still yields
+    # its kind/section/index_* keys, so it never drops out of the render.
+    fm = fm_flat(fm_lines)
     is_literal = (sref.startswith("memory:literal:")
                   or str(fm.get("literal", "")).lower() in ("true", "1", "yes"))
     section = fm.get("section") or None

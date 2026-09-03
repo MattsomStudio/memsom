@@ -42,7 +42,7 @@ import memsom
 from memsom.kernel.paths import default_memory_dir
 from memsom.kernel import chunking as memsom_chunking
 from memsom.kernel.frontmatter import (
-    split_frontmatter, fm_top_level, memory_type, stamp_fm, stamp_section,
+    split_frontmatter, fm_top_level, fm_flat, memory_type, stamp_fm, stamp_section,
     parse_primary_index, parse_index_entries, section_map, index_hooks,
 )
 from memsom.integrity import ingest as memsom_ingest
@@ -526,7 +526,8 @@ def relate_fact_deps(conn, memory_dir, *, dry_run: bool = True) -> dict:
     # Pass A: parse every file's depends_on (comma/space-separated stems).
     fact_deps = {}
     for path in files:
-        fm = fm_top_level(split_frontmatter(path.read_text(encoding="utf-8"))[0])
+        # fm_flat: a depends_on the Claude Code stamper nested under metadata: still counts
+        fm = fm_flat(split_frontmatter(path.read_text(encoding="utf-8"))[0])
         raw = (fm.get("depends_on") or "").strip()
         if not raw:
             continue
@@ -781,7 +782,9 @@ def import_memory_dir(conn, memory_dir, *, dry_run: bool = True, params=None) ->
             rel = path.name                      # bridge_path key, e.g. user_adhd.md
             stem = path.stem
             raw = path.read_text(encoding="utf-8")
-            fm = fm_top_level(split_frontmatter(raw)[0])
+            # fm_flat: type/section/index_*/salience/pin nested under metadata: by
+            # the Claude Code stamper are read as if flat (the file is NOT rewritten)
+            fm = fm_flat(split_frontmatter(raw)[0])
             channel = CHANNEL_BY_TYPE.get(memory_type(stem, fm), DEFAULT_CHANNEL)
             title, hook, section = primary.get(rel, (None, None, None))
             # MEMORY.md is the CURATED source for index metadata — but it must not

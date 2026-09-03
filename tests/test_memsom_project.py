@@ -7,6 +7,7 @@ only a tmp memory dir.
 Run:  python -m unittest discover -s . -p test_memsom_project.py
 """
 
+import os
 import tempfile
 import unittest
 import warnings
@@ -15,7 +16,7 @@ from pathlib import Path
 warnings.simplefilter("error", DeprecationWarning)
 
 from memsom.bridge import project as P
-from memsom.kernel.frontmatter import split_frontmatter
+from memsom.kernel.frontmatter import split_frontmatter, fm_top_level
 from memsom.distill import digest
 
 
@@ -24,13 +25,40 @@ def _sec(node_path, h2):
     return P._sections(body).get(h2, [])
 
 
+def _harness_nest(text, *, session="abc"):
+    """Rewrite a flat memory file into the shape Claude Code's memory stamper
+    emits (2.1.259 `stampNewMemoryContent`): name/description stay top-level,
+    EVERY other key is folded under ``metadata:`` behind ``node_type: memory``,
+    then ``originSessionId`` + ``modified`` are appended inside the block."""
+    fm_lines, body, _ = split_frontmatter(text)
+    top, rest = [], []
+    for ln in fm_lines:
+        key = ln.split(":", 1)[0].strip()
+        (top if key in ("name", "description") else rest).append(ln)
+    block = ["metadata:", "  node_type: memory"] + ["  " + ln for ln in rest] + [
+        f"  originSessionId: {session}", "  modified: 2026-09-03T19:19:46.961Z"]
+    return "---\n" + "\n".join(top + block) + "\n---\n" + body
+
+
+def _fm(path):
+    return fm_top_level(split_frontmatter(path.read_text(encoding="utf-8"))[0])
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.mem = Path(self.tmp.name) / "memory"
         self.mem.mkdir(parents=True)
+        # the log high-water-mark file lives beside the DB (memsom.db_path().parent),
+        # so every test pins MEMDAG_DB into the tmp dir — never the live store.
+        self._env_db = os.environ.get("MEMDAG_DB")
+        os.environ["MEMDAG_DB"] = str(Path(self.tmp.name) / "t.db")
 
     def tearDown(self):
+        if self._env_db is None:
+            os.environ.pop("MEMDAG_DB", None)
+        else:
+            os.environ["MEMDAG_DB"] = self._env_db
         self.tmp.cleanup()
 
     def node(self, slug="demo"):
@@ -304,6 +332,26 @@ class TestDigestNotesLine(Base):
         self.assertNotIn("notes:", txt)
         self.assertIn("project_demo_sub", txt)
 
+    def test_harness_nested_node_still_renders_notes_line(self):
+        # 3b: digest._entry reads the node through fm_flat, so a node the Claude
+        # Code stamper nested under metadata: still carries kind=project-node and
+        # the group renders as ONE notes: line (not as a legacy group).
+        P.init_project(self.mem, "demo")
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "index_hook: (project node — set the Status headline)",
+            "index_hook: h\nmemory_subdir: projects/demo"), encoding="utf-8")
+        nested = _harness_nest(n.read_text(encoding="utf-8"))
+        e = digest._entry(nested, "user", "memory:project_demo", "hot", 1.0)
+        self.assertEqual(e["node_kind"], "project-node")
+        subs = self._entries([
+            ("project_demo_spec", None), ("project_demo_gotchas", None),
+            ("project_demo_decisions", None), ("project_demo_interface_io", None),
+            ("project_demo_architecture", None), ("project_demo_tests", None)])
+        txt = digest.render_projects_index([e] + subs, title="# Projects")
+        self.assertEqual(txt.count("\n  notes: "), 1)
+        self.assertNotIn("  - [project_demo_gotchas]", txt)
+
 
 class TestReorg(Base):
     """`project reorg` — the deterministic /reorgmem half: check() findings tagged
@@ -467,6 +515,200 @@ class TestCache(Base):
         (self.mem / ".weights" / "project_aliases.json").write_text("{ not json",
                                                                     encoding="utf-8")
         self.assertIsNone(P.load_cache(self.mem))
+
+
+class TestFlatFrontmatter(Base):
+    """flat-node-fm: Claude Code's memory stamper (2.1.259 stampNewMemoryContent)
+    re-serialises every key except name/description under ``metadata:`` whenever
+    it writes a memory file that carries no ``originSessionId``.  memsom must
+    READ that shape as flat (fm_flat) and WRITE flat on every node/sub-note
+    write while KEEPING the harness keys (originSessionId/modified/node_type)
+    flat — stripping them is what re-triggers the stamp on the next Claude edit."""
+
+    def setUp(self):
+        super().setUp()
+        P.init_project(self.mem, "demo")
+        n = self.node()
+        n.write_text(n.read_text(encoding="utf-8").replace(
+            "index_hook: (project node — set the Status headline)",
+            "index_hook: real hook"), encoding="utf-8")
+
+    def _nest(self, path):
+        path.write_text(_harness_nest(path.read_text(encoding="utf-8")), encoding="utf-8")
+        self.assertIn("metadata:", path.read_text(encoding="utf-8"))
+
+    def _assert_flat_with_harness_keys(self, path, kind):
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("metadata:", text, path.name)
+        fm = _fm(path)
+        self.assertEqual(fm.get("kind"), kind, path.name)
+        self.assertEqual(fm.get("originSessionId"), "abc", path.name)
+        self.assertEqual(fm.get("node_type"), "memory", path.name)
+        self.assertTrue(fm.get("modified"), path.name)
+
+    # 1. node writers
+    def test_node_write_flattens_nested_frontmatter(self):
+        for writer in (lambda: P.set_status(self.mem, "demo", done="x"),
+                       lambda: P.set_feature(self.mem, "demo", "f-one", name="F",
+                                             status="planned")):
+            self._nest(self.node())
+            writer()
+            self._assert_flat_with_harness_keys(self.node(), "project-node")
+
+    # 2. sub-note writers
+    def test_subnote_writers_flatten(self):
+        P.set_feature(self.mem, "demo", "f-one", name="F", status="planned")
+        g = P._note_path(self.mem, "demo", "gotchas")
+        self._nest(g)
+        P.log_entry(self.mem, "demo", "gotchas", "**boom**", cause="c", fix="f")
+        self._assert_flat_with_harness_keys(g, "project-log")
+        self.assertIn("**boom**", g.read_text(encoding="utf-8"))
+
+        fp = P._feature_path(self.mem, "demo", "f-one")
+        self._nest(fp)
+        P.set_spec(self.mem, "demo", "f-one", section="purpose", value="p", why="w")
+        self._assert_flat_with_harness_keys(fp, "project-ref")
+
+        self._nest(fp)
+        P._apply_feature_change(fp, status_line="planned", change="- 2026-09-03 x")
+        self._assert_flat_with_harness_keys(fp, "project-ref")
+
+        idx = P._note_path(self.mem, "demo", "spec")
+        self._nest(idx)
+        P._upsert_spec_index(self.mem, "demo", {"f-one": {
+            "id": "f-one", "name": "F", "status": "planned",
+            "link": "project_demo_spec_f-one"}})
+        self._assert_flat_with_harness_keys(idx, "project-ref")
+
+    # 3. order + top-level wins + unknown keys kept
+    def test_flatten_preserves_order_and_topline_wins(self):
+        n = self.node()
+        text = _harness_nest(n.read_text(encoding="utf-8"))
+        # a flat status: line ABOVE the block, and a clashing one inside it
+        text = text.replace("metadata:\n", "status: active\nmetadata:\n  status: parked\n"
+                            "  zzz_unknown: kept\n", 1)
+        n.write_text(text, encoding="utf-8")
+        P.set_status(self.mem, "demo", done="x")
+        fm = _fm(n)
+        self.assertEqual(fm["status"], "active")          # top-level wins
+        self.assertEqual(fm["zzz_unknown"], "kept")        # unknown key retained
+        self.assertEqual(fm["originSessionId"], "abc")
+        keys = [ln.split(":", 1)[0] for ln in
+                split_frontmatter(n.read_text(encoding="utf-8"))[0] if ":" in ln]
+        self.assertEqual(keys.count("status"), 1)
+        contract = [k for k in keys if k in P._FM_CONTRACT_KEYS]
+        other = [k for k in keys if k not in P._FM_CONTRACT_KEYS]
+        # every contract key precedes every non-contract key, contract order kept
+        self.assertEqual(keys, contract + other)
+        self.assertEqual(contract, [k for k in P._FM_CONTRACT_KEYS if k in contract])
+        self.assertEqual(keys[:2], ["name", "description"])
+
+    # 4. fail closed on anything deeper than one level
+    def test_flatten_fails_closed_on_deep_nesting(self):
+        from memsom.kernel.frontmatter import fm_flatten_lines
+        lines = ["name: project_demo", "metadata:", "  deep:", "    x: 1",
+                 "  kind: project-node"]
+        self.assertEqual(fm_flatten_lines(lines), lines)
+        lines2 = ["name: project_demo", "metadata:", "  - item", "  kind: project-node"]
+        self.assertEqual(fm_flatten_lines(lines2), lines2)
+        # a node in that shape is not flattened by a writer and check() still WARNs
+        n = self.node()
+        n.write_text("---\n" + "\n".join(lines) + "\n---\n" +
+                     split_frontmatter(n.read_text(encoding="utf-8"))[1], encoding="utf-8")
+        names = [f["name"] for f in P.check(self.mem, "demo")]
+        self.assertIn("project-nested-frontmatter", names)
+        self.assertIn("metadata:", n.read_text(encoding="utf-8"))
+
+    # 5. a harness-nested node is still a node everywhere
+    def test_nested_node_is_still_iterated(self):
+        self._nest(self.node())
+        self.assertIn("demo", [r["slug"] for r in P.list_projects(self.mem)])
+        found = [f for f in P.check(self.mem, "demo") if f["name"] == "project-nested-frontmatter"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["sev"], "WARN")
+        self.assertIn("self-heals", found[0]["msg"])
+        # a whole-store check (no slug) sees it too — the old special case only
+        # fired for a named slug
+        self.assertIn("project-nested-frontmatter", [f["name"] for f in P.check(self.mem)])
+        P.write_cache(self.mem, project_bytes=1024, max_n=2)
+        self.assertIn("demo", P.load_cache(self.mem)["projects"])
+
+    # 6. reorg: mechanical flatten of node + fixed sub-notes + spec notes
+    def test_reorg_apply_flattens_nested_files(self):
+        P.set_feature(self.mem, "demo", "f-one", name="F", status="planned")
+        targets = [self.node(), P._note_path(self.mem, "demo", "architecture"),
+                   P._feature_path(self.mem, "demo", "f-one")]
+        for t in targets:
+            self._nest(t)
+        self.assertIn("reorg-nested-frontmatter", P.REORG_MECHANICAL)
+        # report-only touches nothing
+        import hashlib
+        d = P._proj_dir(self.mem, "demo")
+        before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in d.glob("*.md")}
+        r = P.reorg(self.mem, slug="demo")
+        after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in d.glob("*.md")}
+        self.assertEqual(before, after)
+        mech = [f for f in r["mechanical"] if f["name"] == "reorg-nested-frontmatter"]
+        self.assertEqual(sorted(f["target"] for f in mech), sorted(t.name for t in targets))
+        # --apply flattens all three, keeping the harness keys
+        r = P.reorg(self.mem, slug="demo", apply=True)
+        self.assertEqual(sorted(a["target"] for a in r["applied"] if a["fix"] == "nested-frontmatter"),
+                         sorted(t.name for t in targets))
+        self._assert_flat_with_harness_keys(self.node(), "project-node")
+        self._assert_flat_with_harness_keys(targets[1], "project-ref")
+        self._assert_flat_with_harness_keys(targets[2], "project-ref")
+        self.assertEqual([f for f in P.reorg(self.mem, slug="demo")["mechanical"]
+                          if f["name"] == "reorg-nested-frontmatter"], [])
+        # --sweep applies it headless too
+        self._nest(self.node())
+        r = P.reorg(self.mem, slug="demo", sweep=True)
+        self.assertTrue(any(a["fix"] == "nested-frontmatter" for a in r["applied"]))
+        self._assert_flat_with_harness_keys(self.node(), "project-node")
+
+    # 10. GREEN counterpart of test_nested_frontmatter_is_warn
+    def test_flat_node_no_nested_warn(self):
+        self.assertNotIn("project-nested-frontmatter",
+                         [f["name"] for f in P.check(self.mem, "demo")])
+        P.set_status(self.mem, "demo", done="x")
+        self.assertNotIn("project-nested-frontmatter",
+                         [f["name"] for f in P.check(self.mem, "demo")])
+
+
+class TestLogHwm(Base):
+    """3d: revert-proof log IDs.  A concurrent session's SessionStart pull can
+    robocopy an OLDER mirror copy over a log note (measured 2026-09-03: the first
+    G-20260903-07 line vanished and the ID was minted again).  The high-water
+    mark lives OUTSIDE the synced memory dir (beside the DB), so the ID still
+    advances after an external revert."""
+
+    def setUp(self):
+        super().setUp()
+        P.init_project(self.mem, "demo")
+
+    def test_log_id_unique_after_external_revert(self):
+        g = P._note_path(self.mem, "demo", "gotchas")
+        r1 = P.log_entry(self.mem, "demo", "gotchas", "**one**", cause="c", fix="f")
+        pre02 = g.read_text(encoding="utf-8")
+        r2 = P.log_entry(self.mem, "demo", "gotchas", "**two**", cause="c", fix="f")
+        self.assertTrue(r1["id"].endswith("-01") and r2["id"].endswith("-02"))
+        g.write_text(pre02, encoding="utf-8")          # simulated robocopy revert
+        r3 = P.log_entry(self.mem, "demo", "gotchas", "**three**", cause="c", fix="f")
+        self.assertTrue(r3["id"].endswith("-03"), r3["id"])
+        text = g.read_text(encoding="utf-8")
+        self.assertEqual(text.count(r3["id"]), 1)
+        self.assertNotIn(r2["id"], text)               # the reverted entry is gone, not overwritten
+        hwm = Path(os.environ["MEMDAG_DB"]).parent / "project_log_hwm.json"
+        self.assertTrue(hwm.exists())
+        self.assertFalse((self.mem / "project_log_hwm.json").exists())
+
+    def test_log_write_asserts_single_id_line(self):
+        orig = P._prepend_entry
+        P._prepend_entry = lambda body, line: orig(orig(body, line), line)
+        try:
+            with self.assertRaises(P.ProjectError):
+                P.log_entry(self.mem, "demo", "gotchas", "**dup**", cause="c", fix="f")
+        finally:
+            P._prepend_entry = orig
 
 
 if __name__ == "__main__":

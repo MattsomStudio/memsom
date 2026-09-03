@@ -36,9 +36,10 @@ from pathlib import Path
 
 import memsom
 from memsom.bridge.bridge_import import (
-    split_frontmatter, fm_top_level, default_memory_dir, memory_subdir,
+    split_frontmatter, default_memory_dir, memory_subdir,
     iter_memory_files, PROJECTS_SUBDIR,
 )
+from memsom.kernel.frontmatter import fm_flat, fm_flatten_lines, fm_is_nested
 from memsom.distill.digest import PROJECT_NOTES, _is_project_note, PROJECT_PREFIX
 from memsom.paths import safe_join
 
@@ -293,21 +294,69 @@ def init_project(memory_dir, slug, *, aliases=None, repo=None,
     return out
 
 
+# --- the one serialiser every node / sub-note writer goes through -----------
+#
+# Claude Code's memory stamper (2.1.259 `stampNewMemoryContent`) re-serialises a
+# memory file it Writes/Edits WITHOUT an `originSessionId` as name / description /
+# metadata: { node_type, ...every other key..., originSessionId, modified } — the
+# nested shape fm_top_level cannot see.  It takes a lossless path (rewrites only
+# the `modified:` line) when `originSessionId` IS present, flat or nested.  So the
+# self-heal is: every write flattens (fm_flatten_lines) and KEEPS the harness keys
+# flat — never drop `originSessionId` / `modified` / `node_type`, that is exactly
+# the edit that re-triggers the stamp — and never fabricate an `originSessionId`
+# when absent (the harness stamps once on the next Claude edit, the next memsom
+# write flattens it again, then it is stable).
+
+# memsom's contract keys, written first in this order; everything else (the
+# harness keys, anything unknown) follows in its original order, kept verbatim.
+_FM_CONTRACT_KEYS = (
+    "name", "description", "type", "kind", "status", "aliases", "repo",
+    "dir_pc", "dir_mac", "dir_droplet", "depends_on", "last-verified",
+    "index_title", "index_hook", "section", "index", "absorbed_into", "absorbed_on",
+)
+_FM_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
+
+
+def _order_fm_lines(fm_lines) -> list:
+    """Flatten, then contract keys first (in _FM_CONTRACT_KEYS order), then every
+    other line in original order.  A line that is not a top-level key (an
+    indented continuation, a comment, a fail-closed metadata: block child) stays
+    attached to the key line before it, so nothing is torn apart."""
+    groups = []                                   # [(key|None, [lines])]
+    for ln in fm_flatten_lines(fm_lines):
+        m = _FM_KEY_RE.match(ln)
+        if m or not groups:
+            groups.append((m.group(1) if m else None, [ln]))
+        else:
+            groups[-1][1].append(ln)
+    first = [g for k in _FM_CONTRACT_KEYS for g in groups if g[0] == k]
+    rest = [g for g in groups if g[0] not in _FM_CONTRACT_KEYS]
+    return [ln for _k, ls in first + rest for ln in ls]
+
+
+def _write_note(path: Path, fm_lines, body: str) -> None:
+    """Write ``---\\n<flat, ordered frontmatter>\\n---\\n<body>``."""
+    path.write_text("---\n" + "\n".join(_order_fm_lines(fm_lines)) + "\n---\n" + body,
+                    encoding="utf-8")
+
+
 def _require_node(memory_dir, slug) -> tuple:
+    """(node_path, flattened fm_lines, body, flat fm dict) — writers get the
+    flat shape whatever is on disk."""
     node = _node_path(memory_dir, slug)
     if not node.exists():
         raise ProjectError(f"no project node for {slug!r} — run `memsom project init {slug}`")
     text = node.read_text(encoding="utf-8")
-    fm = fm_top_level(split_frontmatter(text)[0])
-    return node, text, fm
+    fm_lines, body, _ = split_frontmatter(text)
+    fm_lines = fm_flatten_lines(fm_lines)
+    return node, fm_lines, body, fm_flat(fm_lines)
 
 
 def set_status(memory_dir, slug, *, done=None, next_=None, left=None, ask=None,
                cred=None, verified=None) -> dict:
     """Append a bullet under the right ``### `` H3, or a ``## Creds`` pointer, or
     bump ``last-verified``.  Refuses a secret-shaped cred value."""
-    node, text, _fm = _require_node(memory_dir, slug)
-    fm_lines, body, _ = split_frontmatter(text)
+    node, fm_lines, body, _fm = _require_node(memory_dir, slug)
     if cred is not None:
         if _looks_secret(cred):
             raise ProjectError("that Creds value looks like a secret — Creds is "
@@ -319,7 +368,7 @@ def set_status(memory_dir, slug, *, done=None, next_=None, left=None, ask=None,
     if verified is not None:
         fm_lines = _stamp_line(fm_lines, "last-verified",
                                verified if verified is not True else _today())
-    node.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body, encoding="utf-8")
+    _write_note(node, fm_lines, body)
     return {"node": node.name}
 
 
@@ -334,8 +383,7 @@ def set_feature(memory_dir, slug, feat, *, name=None, status=None,
         raise ProjectError(f"bad status {status!r} (one of {', '.join(FEATURE_STATUSES)})")
     if status == "implemented" and not evidence:
         raise ProjectError("--status implemented needs --evidence \"(MEASURED) …\"")
-    node, text, _fm = _require_node(memory_dir, slug)
-    fm_lines, body, _ = split_frontmatter(text)
+    node, fm_lines, body, _fm = _require_node(memory_dir, slug)
     secs = _sections(body)
     feats = {f["id"]: f for f in _parse_features(secs.get("Features", []))}
     prev = feats.get(feat)
@@ -348,7 +396,7 @@ def set_feature(memory_dir, slug, feat, *, name=None, status=None,
     feats[feat] = {"id": feat, "name": fname, "status": fstatus,
                    "link": f"{PROJECT_PREFIX}{slug}_spec_{feat}"}
     body = _rewrite_features(body, slug, feats)
-    node.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body, encoding="utf-8")
+    _write_note(node, fm_lines, body)
     # spec index line
     _upsert_spec_index(memory_dir, slug, feats)
     # the feature note itself
@@ -379,7 +427,7 @@ def set_spec(memory_dir, slug, feat, *, section, value, why) -> dict:
     fm_lines, body, _ = split_frontmatter(text)
     body = _set_h2(body, canon[section], value)
     body = _append_under_h2(body, "Changes", f"- {_today()} {section}: {why}")
-    fp.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body, encoding="utf-8")
+    _write_note(fp, fm_lines, body)
     return {"feature": feat, "section": canon[section]}
 
 
@@ -404,9 +452,14 @@ def log_entry(memory_dir, slug, note, entry, *, why=None, rejected=None,
     dup = _find_dup(existing, note, entry)
     if dup is not None:
         body2 = _annotate_dup(existing, note, dup, today)
-        p.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body2, encoding="utf-8")
+        _write_note(p, fm_lines, body2)
         return {"id": dup, "status": "reaffirmed"}
-    seq = _next_seq(existing, prefix, today)
+    # Revert-proof ID: the note itself can be rolled back under us (a concurrent
+    # session's SessionStart pull robocopied an older mirror copy over it on
+    # 2026-09-03 and G-20260903-07 was minted twice), so the sequence is the max
+    # of what the file shows and a high-water mark kept OUTSIDE the synced dir.
+    hwm_key = f"{slug}/{note}/{today.replace('-', '')}"
+    seq = max(_next_seq(existing, prefix, today), _hwm_read().get(hwm_key, 0) + 1)
     eid = f"{prefix}-{today.replace('-', '')}-{seq:02d}"
     line = _render_log_line(note, eid, today, entry, why=why, rejected=rejected,
                             cause=cause, fix=fix, where=where, covers=covers,
@@ -417,8 +470,57 @@ def log_entry(memory_dir, slug, note, entry, *, why=None, rejected=None,
         raise ProjectError(f"{note} note would exceed its {cap}-line cap — run "
                            "`/reorgmem` to fold superseded entries into ## History",
                            code=2)
-    p.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body2, encoding="utf-8")
+    _hwm_bump(hwm_key, seq)            # BEFORE the note write: a revert cannot undo it
+    _write_note(p, fm_lines, body2)
+    # post-write assert: exactly one line carries the new ID
+    n_lines = len(re.findall(r"^-\s*" + re.escape(eid) + r"\b",
+                             p.read_text(encoding="utf-8"), re.M))
+    if n_lines != 1:
+        raise ProjectError(f"{p.name}: expected exactly one {eid} line after the "
+                           f"write, found {n_lines}")
     return {"id": eid, "status": "added"}
+
+
+# --- log-ID high-water mark (beside the DB, never inside the synced memory dir) --
+
+HWM_NAME = "project_log_hwm.json"
+
+
+def _hwm_path() -> Path:
+    # Same placement as retrieval/code_index.py's code_rag.json: beside the DB
+    # file (honours MEMDAG_DB / MEMDAG_HOME), so tests pointed at a temp DB never
+    # touch the live mark, and neither robocopy nor Syncthing can roll it back.
+    return Path(memsom.db_path()).parent / HWM_NAME
+
+
+def _hwm_read() -> dict:
+    """{"<slug>/<note>/<YYYYMMDD>": max seq}; {} when absent/unreadable.
+    FAILOPEN on read: a corrupt mark degrades to file-max, never blocks a log."""
+    import json
+    try:
+        data = json.loads(_hwm_path().read_text(encoding="utf-8"))
+        return {k: int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _hwm_bump(key: str, seq: int) -> None:
+    """Record *seq* for *key* atomically (tmp + replace).  Fails CLOSED: if the
+    mark cannot be written the ID is not trusted and the log is refused."""
+    import json
+    import os
+    data = _hwm_read()
+    if data.get(key, 0) >= seq:
+        return
+    data[key] = seq
+    path = _hwm_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise ProjectError(f"cannot record the log-ID high-water mark at {path}: {exc}")
 
 
 # --- small text helpers -----------------------------------------------------
@@ -499,7 +601,7 @@ def _upsert_spec_index(memory_dir, slug, feats) -> None:
     lines = [_feature_line(slug, f["id"], f["name"], f["status"])
              for f in sorted(feats.values(), key=lambda x: x["id"])]
     body = _set_h2(body, "Features", "\n".join(lines))
-    p.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body, encoding="utf-8")
+    _write_note(p, fm_lines, body)
 
 
 def _apply_feature_change(fp: Path, *, status_line, change) -> None:
@@ -507,7 +609,7 @@ def _apply_feature_change(fp: Path, *, status_line, change) -> None:
     fm_lines, body, _ = split_frontmatter(text)
     body = _set_h2(body, "Status", status_line)
     body = _append_under_h2(body, "Changes", change)
-    fp.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body, encoding="utf-8")
+    _write_note(fp, fm_lines, body)
 
 
 def _is_decision_status(new, old) -> bool:
@@ -618,7 +720,8 @@ def _iter_project_dirs(memory_dir):
         node = d / f"{PROJECT_PREFIX}{slug}.md"
         if node.exists():
             text = node.read_text(encoding="utf-8", errors="replace")
-            fm = fm_top_level(split_frontmatter(text)[0])
+            # fm_flat: a node the Claude Code stamper nested is still a node here
+            fm = fm_flat(split_frontmatter(text)[0])
             if (fm.get("kind") or "").strip() == "project-node":
                 yield slug, d, node, text, fm
 
@@ -629,7 +732,7 @@ def _is_absorbed(path) -> bool:
     loose file (kept on disk to preserve detail, withdrawn from the render), so the
     checker must not keep flagging it."""
     try:
-        fm = fm_top_level(split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))[0])
+        fm = fm_flat(split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))[0])
     # FAILOPEN: an unreadable/garbled loose file is treated as not-absorbed (it still WARNs)
     except Exception:
         return False
@@ -644,28 +747,35 @@ def check(memory_dir, slug=None) -> list:
     findings = []
     alias_owner = {}
     dirs = [t for t in _iter_project_dirs(memory_dir) if slug is None or t[0] == slug]
-    # detect a node dir whose parent frontmatter is nested (flat keys invisible)
-    if slug is not None and not dirs:
-        d = memory_dir / PROJECTS_SUBDIR / slug
-        np = d / f"{PROJECT_PREFIX}{slug}.md"
-        if np.exists():
-            raw = np.read_text(encoding="utf-8", errors="replace")
-            if "metadata:" in raw and not fm_top_level(split_frontmatter(raw)[0]).get("kind"):
-                findings.append(_F("project-nested-frontmatter", "WARN", np.name,
-                                   "frontmatter is nested under metadata: — the importer "
-                                   "sees no flat keys; flatten it"))
     for sl, d, node, text, fm in dirs:
         findings += _check_one(memory_dir, sl, d, node, text, fm, alias_owner)
+    # A node whose metadata: block fm_flatten_lines refuses (deeper than one
+    # level) is NOT iterated (no visible kind:) — still a finding, never silence.
+    seen = {t[0] for t in dirs}
+    root = memory_dir / PROJECTS_SUBDIR
+    if root.is_dir():
+        for d in sorted(x for x in root.iterdir() if x.is_dir()):
+            if d.name in seen or (slug is not None and d.name != slug):
+                continue
+            np = d / f"{PROJECT_PREFIX}{d.name}.md"
+            if np.exists() and fm_is_nested(
+                    split_frontmatter(np.read_text(encoding="utf-8", errors="replace"))[0]):
+                findings.append(_F("project-nested-frontmatter", "WARN", np.name,
+                                   "frontmatter nested under metadata: deeper than one "
+                                   "level — memsom cannot flatten it; flatten by hand, "
+                                   "keeping originSessionId/modified/node_type"))
     return findings
 
 
 def _check_one(memory_dir, slug, d, node, text, fm, alias_owner) -> list:
     out = []
     fm_lines, body, _had = split_frontmatter(text)
-    # nested frontmatter (flat keys missing but a metadata: block present)
-    if "metadata:" in text and not fm.get("name"):
+    # nested frontmatter: a metadata: block (the Claude Code memory stamper)
+    if fm_is_nested(fm_lines):
         out.append(_F("project-nested-frontmatter", "WARN", node.name,
-                      "frontmatter is nested under metadata: — flatten it"))
+                      "frontmatter nested under metadata: (Claude Code stamp) — "
+                      "self-heals on the next project write; `memsom project reorg "
+                      "--apply` flattens now"))
     # H2 order
     secs = _sections(body)
     got = [s for s in secs if s in NODE_SECTIONS]
@@ -857,8 +967,10 @@ def _age_days(iso_date: str) -> float:
 # the ONLY project writer allowed to touch a file it did not just scaffold, so it
 # is conservative: content-bearing edits are proposed, never applied unattended.
 
-# The two fixes that carry ZERO judgment — safe to apply on the headless sweep.
-REORG_MECHANICAL = {"reorg-sync-conflict", "reorg-subnote-count"}
+# The fixes that carry ZERO judgment — safe to apply on the headless sweep.
+# reorg-nested-frontmatter only moves keys (metadata: children -> top level).
+REORG_MECHANICAL = {"reorg-sync-conflict", "reorg-subnote-count",
+                    "reorg-nested-frontmatter"}
 _SYNC_CONFLICT_RE = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+", re.I)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:[#|][^\]]*)?\]\]")
 _ENTRY_ID_RE = re.compile(r"\b([GDT]-\d{8}-\d{2})\b")
@@ -903,7 +1015,7 @@ def _reorg_checks(memory_dir, slug, d, node, text, fm) -> list:
                          f"fixed sub-note {suffix!r} is missing — run "
                          f"`memsom project init {slug}`"))
             continue
-        nfm = fm_top_level(split_frontmatter(p.read_text(encoding="utf-8"))[0])
+        nfm = fm_flat(split_frontmatter(p.read_text(encoding="utf-8"))[0])
         if (nfm.get("kind") or "").strip() != NOTE_KIND[suffix]:
             out.append(F("reorg-subnote-kind", "WARN", p.name,
                          f"kind {nfm.get('kind')!r} should be {NOTE_KIND[suffix]!r}"))
@@ -966,7 +1078,47 @@ def _reorg_checks(memory_dir, slug, d, node, text, fm) -> list:
         out.append(F("reorg-sync-conflict", "WARN", p.name,
                      "Syncthing conflict copy — reorg union-merges it and deletes the copy",
                      fix="mechanical"))
+
+    # 7. frontmatter nested under metadata: (Claude Code stamp) anywhere in the
+    #    project dir — node, fixed sub-notes, spec notes, absorbed legacy files.
+    #    Mechanical when fm_flatten_lines can lift it (zero judgment: keys only
+    #    move); content when it is deeper than one level (fail closed).
+    for p, flattenable in _nested_files(d):
+        if flattenable:
+            out.append(F("reorg-nested-frontmatter", "WARN", p.name,
+                         "frontmatter nested under metadata: (Claude Code stamp) — "
+                         "reorg lifts the keys to the top level, harness keys kept",
+                         fix="mechanical"))
+        else:
+            out.append(F("reorg-nested-frontmatter", "WARN", p.name,
+                         "frontmatter nested under metadata: deeper than one level — "
+                         "flatten by hand, keeping originSessionId/modified/node_type"))
     return out
+
+
+def _nested_files(d: Path) -> list:
+    """[(path, flattenable)] for every project file in *d* with a metadata: block."""
+    out = []
+    for p in sorted(d.glob("*.md")):
+        if _SYNC_CONFLICT_RE.search(p.name):
+            continue
+        fm_lines, _body, had = split_frontmatter(p.read_text(encoding="utf-8", errors="replace"))
+        if had and fm_is_nested(fm_lines):
+            out.append((p, fm_flatten_lines(fm_lines) != fm_lines))
+    return out
+
+
+def _fix_nested_frontmatter(d: Path) -> list:
+    """Rewrite every flattenable nested file in *d* through _write_note.
+    Returns the names rewritten."""
+    done = []
+    for p, flattenable in _nested_files(d):
+        if not flattenable:
+            continue
+        fm_lines, body, _ = split_frontmatter(p.read_text(encoding="utf-8"))
+        _write_note(p, fm_lines, body)
+        done.append(p.name)
+    return done
 
 
 def _canonical_of_conflict(p: Path) -> Path:
@@ -1020,8 +1172,7 @@ def _apply_sync_conflict(canon: Path, conflict: Path) -> str:
     if "## Entries" in nbody and "## Entries" in cbody:
         head = nbody.split("## Entries")[0]
         merged = _merge_log_entries(nbody, cbody)
-        canon.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + head + merged,
-                         encoding="utf-8")
+        _write_note(canon, fm_lines, head + merged)
         conflict.unlink()
         return "merged"
     return "kept"
@@ -1044,8 +1195,7 @@ def _fix_subnote_counts(memory_dir, slug) -> bool:
             lines[i] = new
             changed = True
     if changed:
-        node.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + "\n".join(lines),
-                        encoding="utf-8")
+        _write_note(node, fm_lines, "\n".join(lines))
     return changed
 
 
@@ -1071,6 +1221,8 @@ def reorg(memory_dir, *, slug=None, sweep=False, apply=False) -> dict:
     applied = []
     if do_fix:
         for sl, d, node, text, fm in dirs:
+            for name in _fix_nested_frontmatter(d):
+                applied.append({"slug": sl, "fix": "nested-frontmatter", "target": name})
             for p in sorted(d.glob("*.sync-conflict-*.md")):
                 res = _apply_sync_conflict(_canonical_of_conflict(p), p)
                 applied.append({"slug": sl, "fix": "sync-conflict",

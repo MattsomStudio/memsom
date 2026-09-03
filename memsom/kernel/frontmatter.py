@@ -55,6 +55,73 @@ def fm_top_level(fm_lines) -> dict:
     return out
 
 
+# --- harness-nested frontmatter (Claude Code's memory stamper) ---------------
+#
+# Claude Code (measured on 2.1.259, `stampNewMemoryContent`) rewrites every
+# memory .md it Writes/Edits that carries no `originSessionId` into
+#   name / description / metadata: { node_type: memory, ...every other key...,
+#   originSessionId, modified }
+# so a flat memsom file comes back with its contract keys one level down, where
+# fm_top_level() (deliberately) cannot see them.  These helpers read that shape
+# as flat and give writers a flat line list to write back.  fm_top_level itself
+# is unchanged: 14 other call sites and the forget parity tests depend on it.
+
+_FM_META_RE = re.compile(r"^metadata\s*:\s*(.*)$")
+_FM_CHILD_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s?(.*)$")   # exactly one 2-space level
+_FM_KEY_RE = re.compile(r"^([A-Za-z0-9_-]+)\s*:")
+
+
+def fm_is_nested(fm_lines) -> bool:
+    """True when the frontmatter carries a top-level ``metadata:`` line."""
+    return any(_FM_META_RE.match(ln) for ln in fm_lines)
+
+
+def fm_flatten_lines(fm_lines) -> list:
+    """Lift the children of a top-level ``metadata:`` block to the top level.
+
+    Each 2-space-indented ``key: value`` child is dedented VERBATIM (quoting
+    kept, never re-serialised) in place of the ``metadata:`` line; on a key
+    clash the existing top-level line wins and the child is dropped.  Fails
+    CLOSED — returns the lines unchanged — on anything that is not exactly one
+    level of scalar children (a deeper block, a list item, a comment, a tab, an
+    inline ``metadata: {...}`` value), so a shape this parser does not model is
+    never half-rewritten.  Idempotent on flat input (no ``metadata:`` line).
+    """
+    lines = list(fm_lines)
+    start = next((i for i, ln in enumerate(lines) if _FM_META_RE.match(ln)), None)
+    if start is None:
+        return lines
+    if _FM_META_RE.match(lines[start]).group(1).strip():
+        return lines                       # inline mapping/scalar: not modelled
+    end = start + 1
+    children = []
+    while end < len(lines) and (lines[end][:1] in (" ", "\t")):
+        m = _FM_CHILD_RE.match(lines[end])
+        if not m or lines[end].startswith("   "):
+            return lines                   # deeper / list / comment / tab -> fail closed
+        children.append((m.group(1), lines[end][2:]))
+        end += 1
+    if any(_FM_META_RE.match(ln) for ln in lines[end:]):
+        return lines                       # two metadata: blocks: not modelled
+    top_keys = set()
+    for ln in lines[:start] + lines[end:]:
+        m = _FM_KEY_RE.match(ln)
+        if m:
+            top_keys.add(m.group(1))
+    lifted, seen = [], set()
+    for key, raw in children:
+        if key in top_keys or key in seen:
+            continue                       # top-level wins; first child wins
+        seen.add(key)
+        lifted.append(raw)
+    return lines[:start] + lifted + lines[end:]
+
+
+def fm_flat(fm_lines) -> dict:
+    """fm_top_level() over the flattened lines: nested-as-flat for readers."""
+    return fm_top_level(fm_flatten_lines(fm_lines))
+
+
 def memory_type(stem: str, fm: dict) -> str:
     """Type from frontmatter `type:` if present, else the filename prefix."""
     t = (fm.get("type") or "").strip()
