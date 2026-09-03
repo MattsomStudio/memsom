@@ -623,6 +623,20 @@ def _iter_project_dirs(memory_dir):
                 yield slug, d, node, text, fm
 
 
+def _is_absorbed(path) -> bool:
+    """True when a file has been deliberately folded into a node — ``index: false``
+    AND an ``absorbed_into:`` pointer.  That is the plan's RESOLVED state for a
+    loose file (kept on disk to preserve detail, withdrawn from the render), so the
+    checker must not keep flagging it."""
+    try:
+        fm = fm_top_level(split_frontmatter(path.read_text(encoding="utf-8", errors="replace"))[0])
+    # FAILOPEN: an unreadable/garbled loose file is treated as not-absorbed (it still WARNs)
+    except Exception:
+        return False
+    idx = str(fm.get("index", "")).strip().lower()
+    return idx == "false" and bool((fm.get("absorbed_into") or "").strip())
+
+
 def check(memory_dir, slug=None) -> list:
     """Audit-shaped findings ({name,sev,target,msg}) for every project node (or
     just *slug*).  Fails CLOSED: a parse problem is a finding, not a crash."""
@@ -722,6 +736,8 @@ def _check_one(memory_dir, slug, d, node, text, fm, alias_owner) -> list:
         if _SYNC_CONFLICT_RE.search(p.name):   # Syncthing conflict copy — reorg's domain
             continue
         if _is_project_note(stem, slug):   # a per-feature spec note is fine
+            continue
+        if _is_absorbed(p):   # already folded (index:false + absorbed_into) — the resolved state, not a WARN
             continue
         if stem.startswith(f"{PROJECT_PREFIX}{slug}_") or stem == f"{PROJECT_PREFIX}{slug}":
             out.append(_F("project-loose-file", "WARN", p.name,

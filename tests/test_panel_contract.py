@@ -208,6 +208,7 @@ class ForgetContract(unittest.TestCase):
     LIVE_KEYS = {
         "memory_budget", "memory_max_lines", "prompt_hook_mode",
         "prompt_hook_floor", "prompt_hook_deadline_ms", "prompt_hook_log_max_mb",
+        "prompt_hook_project_bytes", "prompt_hook_project_max",
         "feedback_born_unindexed", "section_budgets",
     }
 

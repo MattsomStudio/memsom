@@ -46,6 +46,21 @@ def test_creds_value_flips_project_creds_value(tmp_path):
     assert _errors(mem, "demo") == {"project-creds-value"}
 
 
+def test_absorbed_loose_file_is_not_flagged_but_a_plain_one_is(tmp_path):
+    mem = _scaffold(tmp_path)
+    d = P._proj_dir(mem, "demo")
+    stray = d / "project_demo_stray.md"
+    # a plain loose file in the node dir WARNs (the check works) …
+    stray.write_text("---\nname: project_demo_stray\n---\nx\n", encoding="utf-8")
+    warns = {f["name"] for f in P.check(mem, "demo") if f["sev"] == "WARN"}
+    assert "project-loose-file" in warns
+    # … but once folded (index:false + absorbed_into) it is the resolved state.
+    stray.write_text("---\nname: project_demo_stray\nindex: false\n"
+                     "absorbed_into: project_demo\n---\nx\n", encoding="utf-8")
+    warns = {f["name"] for f in P.check(mem, "demo") if f["sev"] == "WARN"}
+    assert "project-loose-file" not in warns
+
+
 def test_alias_clash_flips_project_alias_clash(tmp_path):
     mem = _scaffold(tmp_path)
     P.init_project(mem, "beta")
