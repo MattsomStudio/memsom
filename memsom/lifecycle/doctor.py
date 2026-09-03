@@ -48,7 +48,7 @@ def _node_count():
 
 
 def _ollama_status():
-    embed_url = memsom_tuning.resolve("retrieval.embed_url") or "http://127.0.0.1:11434/api/embeddings"
+    embed_url = memsom_tuning.resolve("retrieval.embed_url") or "http://127.0.0.1:11434/api/embed"
     parts = urlsplit(embed_url)
     root = f"{parts.scheme}://{parts.netloc}"
     model = memsom_tuning.resolve("retrieval.embed_model") or "nomic-embed-text"

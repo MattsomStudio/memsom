@@ -177,9 +177,10 @@ class TestEmbeddingsCarriesKeepAlive(EnvIsolation):
 
     def _body_for_embed(self):
         captured = {}
+        # /api/embed reply shape: {"embeddings": [[...]]}, vector at [0].
         with patch("urllib.request.urlopen",
                    side_effect=_capture_urlopen(captured,
-                                                {"embedding": [0.1, 0.2]})):
+                                                {"embeddings": [[0.1, 0.2]]})):
             vec = memsom_retrieve._call_ollama_embed("probe text")
         self.assertEqual(vec, [0.1, 0.2])  # reply still parsed correctly
         return json.loads(captured["req"].data.decode("utf-8"))
@@ -205,6 +206,61 @@ class TestEmbeddingsCarriesKeepAlive(EnvIsolation):
                    side_effect=urllib.error.URLError("connection refused")):
             with self.assertRaises(Exception):
                 memsom_retrieve._call_ollama_embed("probe text")
+
+
+# ---------------------------------------------------------------------------
+# 3b. /api/embed migration: server-side truncate + timeout knob
+# ---------------------------------------------------------------------------
+
+class TestEmbedApiAndTimeout(EnvIsolation):
+    """The /api/embed switch: the body must carry truncate:true (so a long node
+    is truncated server-side instead of 500ing) and the HTTP timeout must come
+    from the MEMDAG_EMBED_TIMEOUT knob (default 60), not a hard-coded 10s."""
+
+    def setUp(self):
+        super().setUp()
+        self._old_to = os.environ.pop("MEMDAG_EMBED_TIMEOUT", None)
+
+    def tearDown(self):
+        os.environ.pop("MEMDAG_EMBED_TIMEOUT", None)
+        if self._old_to is not None:
+            os.environ["MEMDAG_EMBED_TIMEOUT"] = self._old_to
+        super().tearDown()
+
+    def _capture(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["req"] = req
+            captured["timeout"] = timeout
+            return FakeResponse({"embeddings": [[0.1, 0.2]]})
+
+        return captured, fake_urlopen
+
+    def test_posts_to_api_embed_with_truncate(self):
+        captured, fake = self._capture()
+        with patch("urllib.request.urlopen", side_effect=fake):
+            vec = memsom_retrieve._call_ollama_embed("probe text")
+        self.assertEqual(vec, [0.1, 0.2])
+        req = captured["req"]
+        self.assertTrue(req.full_url.endswith("/api/embed"))
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["input"], "probe text")
+        self.assertIs(body["truncate"], True)
+        self.assertNotIn("prompt", body)  # legacy key must be gone
+
+    def test_default_timeout_is_60(self):
+        captured, fake = self._capture()
+        with patch("urllib.request.urlopen", side_effect=fake):
+            memsom_retrieve._call_ollama_embed("probe text")
+        self.assertEqual(captured["timeout"], 60)
+
+    def test_custom_timeout_flows_through(self):
+        os.environ["MEMDAG_EMBED_TIMEOUT"] = "42"
+        captured, fake = self._capture()
+        with patch("urllib.request.urlopen", side_effect=fake):
+            memsom_retrieve._call_ollama_embed("probe text")
+        self.assertEqual(captured["timeout"], 42)
 
 
 # ---------------------------------------------------------------------------

@@ -307,6 +307,12 @@ _register("retrieval.embed_url", type=str, default="", source="env:MEMDAG_EMBED_
            doc="Ollama embeddings endpoint, used by doctor and retrieve.")
 _register("retrieval.embed_model", type=str, default="", source="env:MEMDAG_EMBED_MODEL",
            doc="Ollama embeddings model, used by doctor and retrieve.")
+_register("retrieval.embed_timeout", type=int, default=60, bounds=(1, 3600),
+           source="env:MEMDAG_EMBED_TIMEOUT",
+           doc="Timeout (seconds) for one Ollama embedding HTTP call. The old "
+               "hard-coded 10s was too short for a cold model load under "
+               "KEEP_ALIVE=0 (every call reloads the model).",
+           feature="retrieval.dense")
 _register("lifecycle.verify_stale_days", type=int, default=21, bounds=(0, 36500),
            source="env:MEMDAG_VERIFY_STALE_DAYS",
            doc="Staleness threshold in days (int); 0 turns the pass off "

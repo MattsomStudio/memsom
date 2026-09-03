@@ -53,7 +53,13 @@ DEFAULT_EMBED_MODEL = "nomic-embed-text"
 # to IPv4 (instant-refuse on Linux, seconds per call on Windows). Ollama binds
 # 127.0.0.1 by default, so this is also the more reliable target. Override with
 # MEMDAG_EMBED_URL if your Ollama listens elsewhere.
-DEFAULT_EMBED_URL = "http://127.0.0.1:11434/api/embeddings"
+#
+# /api/embed (current API), NOT the legacy /api/embeddings: the legacy endpoint
+# NEVER truncates and 500s "input too large" on any node past the model context
+# window; /api/embed with `truncate: true` truncates server-side instead. An
+# explicit MEMDAG_EMBED_URL ending in /api/embeddings still uses the legacy
+# body/parse (_call_ollama_embed switches on the resolved path).
+DEFAULT_EMBED_URL = "http://127.0.0.1:11434/api/embed"
 
 # BM25 tuning
 K1 = 1.2
@@ -139,17 +145,43 @@ def _embed_url():
     return memsom_tuning.resolve("retrieval.embed_url") or DEFAULT_EMBED_URL
 
 
-def _call_ollama_embed(text: str, timeout: int = 10):
-    """POST to Ollama /api/embeddings.  Returns list[float] or raises."""
+def _call_ollama_embed(text: str, timeout: int = None):
+    """POST to Ollama's embedding endpoint. Returns list[float] or raises.
+
+    Default endpoint is /api/embed (the current API): the body carries `input`
+    plus `truncate: true`, so a node longer than the model's context window is
+    truncated server-side rather than 500ing ("input too large"), and the vector
+    is read from `embeddings[0]`.
+
+    If MEMDAG_EMBED_URL is explicitly overridden to the LEGACY /api/embeddings
+    endpoint, fall back to that endpoint's contract (`prompt` in the body,
+    `embedding` in the reply) so an existing override keeps working.
+
+    `timeout` defaults to the retrieval.embed_timeout knob (MEMDAG_EMBED_TIMEOUT,
+    default 60s) -- the old hard-coded 10s was too short for a cold model load
+    under KEEP_ALIVE=0 (every call reloads the model).
+    """
+    if timeout is None:
+        timeout = int(memsom_tuning.resolve("retrieval.embed_timeout"))
     model = _embed_model()
     url = _embed_url()
+    if url.rstrip("/").endswith("/api/embeddings"):
+        # Legacy single-input endpoint (explicit MEMDAG_EMBED_URL override only).
+        payload = json.dumps(memsom_llm._with_keep_alive(
+            {"model": model, "prompt": text}
+        )).encode("utf-8")
+        raw = memsom_net.fetch(url, data=payload,
+                             headers={"Content-Type": "application/json"}, timeout=timeout)
+        data = json.loads(raw)
+        return data["embedding"]  # list of floats
+    # Current /api/embed endpoint: truncate server-side, read embeddings[0].
     payload = json.dumps(memsom_llm._with_keep_alive(
-        {"model": model, "prompt": text}
+        {"model": model, "input": text, "truncate": True}
     )).encode("utf-8")
     raw = memsom_net.fetch(url, data=payload,
                          headers={"Content-Type": "application/json"}, timeout=timeout)
     data = json.loads(raw)
-    return data["embedding"]  # list of floats
+    return data["embeddings"][0]  # list of floats
 
 
 def _vec_to_blob(vec: list) -> bytes:
