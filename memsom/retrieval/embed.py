@@ -65,16 +65,64 @@ DEFAULT_COLBERT_CANDIDATES = 100   # ColBERT re-rank window (see memsom_retrieve
 # Backend selection
 # ---------------------------------------------------------------------------
 
-def backend() -> str:
-    """Active embedding backend from MEMDAG_EMBED_BACKEND.
+_WARNED_PIN_MISMATCH = False
 
-    Unknown / unset -> 'ollama' (back-compat: the historical default path).
+
+def _warn_pin_mismatch(env_backend: str, pinned: str) -> None:
+    """ONE stderr warning per process when an explicit MEMDAG_EMBED_BACKEND /
+    --embed-backend disagrees with the backend the store was embedded under.
+    The explicit setting still wins (an operator switching on purpose), but
+    silently it would split the store again -- the 2026-09 bug."""
+    global _WARNED_PIN_MISMATCH
+    if _WARNED_PIN_MISMATCH:
+        return
+    _WARNED_PIN_MISMATCH = True
+    import sys
+    print(
+        f"[memsom] embed.backend={env_backend!r} but this store is pinned to "
+        f"{pinned!r}: vectors written now will be invisible to the pinned "
+        f"reader (and vice versa). Run `memsom reindex` under the backend you "
+        f"want to make it the store's. This warning shows once.",
+        file=sys.stderr,
+    )
+
+
+def backend(conn=None) -> str:
+    """Active embedding backend.
+
+    Resolution: in-process override (`--embed-backend`) > MEMDAG_EMBED_BACKEND
+    > the STORE's pinned backend (retrieval_meta, via *conn*) > 'ollama'.
+
+    The pin is the split fix: a process launched without the env var (the
+    Stop-hook importer, an interactive shell) used to fall to the compiled-in
+    default and write nomic rows into a bge-m3 store, which the reader's
+    `WHERE model = ?` then never saw. With *conn* it now adopts whatever the
+    store was embedded under. Without *conn* (display/CLI paths) the old
+    env-or-default answer stands.
     """
     raw = (memsom_tuning.resolve("embed.backend") or "").strip().lower()
-    return raw if raw in VALID_BACKENDS else DEFAULT_BACKEND
+    pinned = None
+    if conn is not None:
+        try:
+            from memsom.retrieval import retrieve as memsom_retrieve
+            pinned = memsom_retrieve.pinned_backend(conn)
+        # FAILOPEN: allowed -- an unreadable pin (closed/locked conn) means "unpinned", never a crash on the read path.
+        except Exception:
+            pinned = None
+        if pinned not in VALID_BACKENDS:
+            pinned = None
+    if raw in VALID_BACKENDS:
+        # bm25 writes no vectors, so it can never split the store: the prompt
+        # hook pins itself to bm25 on purpose (no model load) and must not warn.
+        if pinned is not None and pinned != raw and raw != "bm25":
+            _warn_pin_mismatch(raw, pinned)
+        return raw
+    if pinned is not None:
+        return pinned
+    return DEFAULT_BACKEND
 
 
-def active_model_name() -> str:
+def active_model_name(conn=None) -> str:
     """The `model` tag the active backend writes/reads in the vector tables.
 
     This is the load-bearing key for the dim-collision fix: vector_search filters
@@ -83,7 +131,7 @@ def active_model_name() -> str:
 
     bm25 -> '' (no model) so a `WHERE model=''` matches nothing -> BM25-only.
     """
-    b = backend()
+    b = backend(conn)
     if b == "bge-m3":
         return BGE_MODEL_NAME
     if b == "bm25":

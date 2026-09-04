@@ -24,6 +24,10 @@ bm25(conn, query, k) -> [(nid, score)]
 vector_search(conn, query, k) -> [(nid, score)]
 retrieve(conn, query, k=8, clearance="topsecret", min_integrity=None,
          exclude_quarantined=True, exclude_redacted=True) -> list[tuple]
+pinned_backend(conn) / pin_backend(conn, name)   # the store's own backend
+embedding_coverage(conn) -> dict                 # dense reach over live nodes
+retrieval_warnings(conn) -> list[str]            # the AI-facing degraded signal
+last_query_fallback(conn) -> dict | None         # query-encoder fallback trail
 
 CLI
 ---
@@ -106,7 +110,26 @@ CREATE TABLE IF NOT EXISTS retrieval_degraded (
   reason      TEXT NOT NULL,
   recorded_at TEXT NOT NULL
 );
+-- The store's OWN embedding backend (key='embed_backend'). Written by the
+-- first vector write and by every full `reindex`; read by embed.backend()
+-- when neither a CLI override nor MEMDAG_EMBED_BACKEND is set. Closes the
+-- 2026-08-31..09-04 split: processes launched without the env var (the
+-- Stop-hook importer) silently wrote nomic rows into a bge-m3 store, and
+-- `WHERE model = active` then hid every one of them from dense retrieval.
+CREATE TABLE IF NOT EXISTS retrieval_meta (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
+
+# retrieval_degraded row that records the LAST time a query-side encode fell
+# back to BM25 (encoder unreachable). Negative so it can never collide with a
+# nodes.id and is excluded from the re-index queue (degraded_nodes).
+QUERY_DEGRADED_NID = -1
+# A query-encode fallback older than this is a trail, not a live warning.
+QUERY_DEGRADED_RECENT_S = 900
+PIN_KEY = "embed_backend"
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -253,10 +276,159 @@ def _clear_degraded(conn: sqlite3.Connection, nid: int) -> None:
 def degraded_nodes(conn: sqlite3.Connection) -> list:
     """Node ids indexed BM25-only because their vector embed failed -- the
     MS-32 re-index queue. `index_all`/`reindex` can pass this to a follow-up
-    pass once the embedder is back."""
+    pass once the embedder is back. The query-side sentinel row (negative
+    id) is a trail, not a node, and is never queued."""
     migrate(conn)
     return [r[0] for r in
-            conn.execute("SELECT node_id FROM retrieval_degraded ORDER BY node_id")]
+            conn.execute("SELECT node_id FROM retrieval_degraded WHERE node_id > 0"
+                         " ORDER BY node_id")]
+
+
+# ---------------------------------------------------------------------------
+# Query-side degradation trail + store-level health (the AI-facing signal)
+# ---------------------------------------------------------------------------
+
+_LAST_QUERY_FALLBACK = None   # reason str for THIS process's last vector_search, or None
+
+
+def _record_query_degraded(conn: sqlite3.Connection, reason: str) -> None:
+    """Best-effort trail: the active backend's QUERY encoder was unreachable and
+    this search ran BM25-only. One sentinel row (INSERT OR REPLACE), so the
+    table always shows the most recent fallback. Never raises: a read-only
+    connection (features/doctor/warm) just skips the write -- the in-process
+    `_LAST_QUERY_FALLBACK` still carries the signal to the caller."""
+    global _LAST_QUERY_FALLBACK
+    _LAST_QUERY_FALLBACK = reason
+    try:
+        if not memsom_schema.table_exists(conn, "retrieval_degraded"):
+            return
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO retrieval_degraded(node_id, reason, recorded_at)"
+                " VALUES (?, ?, ?)",
+                (QUERY_DEGRADED_NID, reason, memsom.now_iso()),
+            )
+    # FAILOPEN: allowed -- a telemetry write must never break a read path (read-only conn, locked db).
+    except Exception:
+        pass
+
+
+def last_query_fallback_reason():
+    """This process's most recent vector_search fallback reason, or None when
+    the last search encoded its query normally."""
+    return _LAST_QUERY_FALLBACK
+
+
+def last_query_fallback(conn: sqlite3.Connection):
+    """The stored trail: {'reason', 'recorded_at', 'age_s'} of the most recent
+    query-encode fallback on this store, or None. Read-only (no migrate)."""
+    if not memsom_schema.table_exists(conn, "retrieval_degraded"):
+        return None
+    row = conn.execute(
+        "SELECT reason, recorded_at FROM retrieval_degraded WHERE node_id = ?",
+        (QUERY_DEGRADED_NID,)).fetchone()
+    if row is None:
+        return None
+    age = None
+    try:
+        from datetime import datetime, timezone
+        then = datetime.fromisoformat(row[1])
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - then).total_seconds()
+    # FAILOPEN: allowed -- an unparsable timestamp just reports age unknown.
+    except Exception:
+        pass
+    return {"reason": row[0], "recorded_at": row[1], "age_s": age}
+
+
+def pinned_backend(conn: sqlite3.Connection):
+    """The backend this store was embedded under ('ollama'|'bge-m3'|'bm25'),
+    or None when nothing has pinned it yet. Read-only (no migrate) so it is
+    safe on the read-only connections features/doctor/the hook open."""
+    if not memsom_schema.table_exists(conn, "retrieval_meta"):
+        return None
+    row = conn.execute("SELECT value FROM retrieval_meta WHERE key = ?",
+                       (PIN_KEY,)).fetchone()
+    return row[0] if row else None
+
+
+def pin_backend(conn: sqlite3.Connection, name: str) -> None:
+    """Record *name* as the store's backend. Called by the first vector write
+    (a fresh store adopts whatever first embedded into it) and by every full
+    `reindex` (a deliberate switch). A later process that lacks the env var
+    then resolves to THIS, not to embed.py's compiled-in default."""
+    migrate(conn)
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO retrieval_meta(key, value, updated_at) VALUES (?, ?, ?)",
+            (PIN_KEY, name, memsom.now_iso()))
+
+
+def _embeddable_clauses(conn: sqlite3.Connection) -> str:
+    """The WHERE body naming exactly the nodes index_node gives a vector to:
+    live source nodes that are not agent-derived, redacted or archived. Kept
+    next to index_node's own skip rules so coverage can't drift from them."""
+    clauses = ["tombstoned = 0", "channel != 'agent-derived'"]
+    if memsom_schema.column_exists(conn, "nodes", "redacted"):
+        clauses.append("redacted = 0")
+    if memsom_schema.column_exists(conn, "nodes", "archived"):
+        clauses.append("archived = 0")
+    return " AND ".join(clauses)
+
+
+def embedding_coverage(conn: sqlite3.Connection) -> dict:
+    """How much of the embeddable store dense retrieval can actually reach.
+
+    Returns {backend, active_model, total, by_model, covered, dark, split}:
+      total     embeddable live nodes (index_node's own rules)
+      by_model  {model: rows} counting ONLY rows on those nodes
+      covered   rows under the active backend's model (what vector_search reads)
+      dark      total - covered: nodes dense retrieval cannot see (stale-model
+                rows OR no row at all); 0 on the bm25 backend, where none is expected
+      split     more than one model over live nodes -- the 2026-09 bug shape
+    Read-only: two indexed SELECTs, no migrate, no model load, no network.
+    """
+    from memsom.retrieval import embed as memsom_embed
+    b = memsom_embed.backend(conn)
+    active = memsom_embed.active_model_name(conn)
+    if not memsom_schema.table_exists(conn, "nodes"):
+        return {"backend": b, "active_model": active, "total": 0, "by_model": {},
+                "covered": 0, "dark": 0, "split": False}
+    where = _embeddable_clauses(conn)
+    total = conn.execute(f"SELECT COUNT(*) FROM nodes WHERE {where}").fetchone()[0]
+    by_model = {}
+    if memsom_schema.table_exists(conn, "embeddings"):
+        for model, n in conn.execute(
+                "SELECT e.model, COUNT(*) FROM embeddings e JOIN nodes n ON n.id = e.node_id"
+                f" WHERE {where} GROUP BY e.model"):
+            by_model[model] = n
+    covered = by_model.get(active, 0) if b != "bm25" else 0
+    dark = (total - covered) if b != "bm25" else 0
+    return {"backend": b, "active_model": active, "total": total, "by_model": by_model,
+            "covered": covered, "dark": max(0, dark), "split": len(by_model) > 1}
+
+
+def retrieval_warnings(conn: sqlite3.Connection) -> list:
+    """Short, plain lines for an AI/operator surface (prompt hook, features,
+    doctor, the retrieve CLI/MCP tool). Empty on a healthy single-backend
+    store whose query encoder answered recently. Read-only and cheap."""
+    out = []
+    cov = embedding_coverage(conn)
+    # bm25 expects no vectors at all: leftover rows under any number of models
+    # are inert there, not a degradation.
+    if cov["dark"] or (cov["split"] and cov["backend"] != "bm25"):
+        stored = ", ".join(f"{m}={n}" for m, n in sorted(cov["by_model"].items())) or "none"
+        out.append(
+            f"⚠️ RETRIEVAL DEGRADED: {cov['dark']}/{cov['total']} memory nodes are "
+            f"dense-dark (active backend {cov['backend']} reads model="
+            f"{cov['active_model'] or 'none'}; stored: {stored}); run `memsom reindex`")
+    last = last_query_fallback(conn)
+    if last and (last["age_s"] is None or last["age_s"] <= QUERY_DEGRADED_RECENT_S):
+        out.append(
+            f"⚠️ RETRIEVAL DEGRADED: query encoder unreachable at "
+            f"{last['recorded_at']} → BM25-only ({last['reason']})")
+    return out
 
 
 def index_node(conn: sqlite3.Connection, nid: int) -> bool:
@@ -330,7 +502,11 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
     # which is the contract index_all counts on -- the degradation is
     # tracked separately, not folded into the boolean.
     from memsom.retrieval import embed as memsom_embed
-    b = memsom_embed.backend()
+    # conn-aware: a process with no MEMDAG_EMBED_BACKEND (the Stop-hook
+    # importer) resolves to the STORE's pinned backend, not the compiled-in
+    # default -- writing under a different model than the reader filters on
+    # is exactly the silent split this closes.
+    b = memsom_embed.backend(conn)
     if b == "bm25":
         _clear_degraded(conn, nid)
         return True  # BM25-only by request; no vectors stored
@@ -346,6 +522,7 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
                 if enc is not None:
                     memsom_embed.store_bge(conn, nid, enc)
                     _clear_degraded(conn, nid)
+                    _pin_if_unpinned(conn, b)
                     return True
             # FAILOPEN: swallows -> falls to _record_degraded below; a bge store error must not block ingest (BM25 is already built).
             except Exception as exc:
@@ -366,11 +543,23 @@ def index_node(conn: sqlite3.Connection, nid: int) -> bool:
                 (nid, model, dim, blob),
             )
         _clear_degraded(conn, nid)
+        _pin_if_unpinned(conn, b)
     # FAILOPEN: warns once and records the node as degraded -- Ollama down/model not pulled/network error (MS-32: the DEFAULT backend) must not block ingest; a later recovery pass can find it via _record_degraded.
     except Exception as exc:
         _warn_embed_fallback(exc)
         _record_degraded(conn, nid, f"ollama embed failed: {exc}")
     return True
+
+
+def _pin_if_unpinned(conn: sqlite3.Connection, b: str) -> None:
+    """First vector write adopts the backend for the store (see pin_backend).
+    A pinned store is left alone: switching is `reindex`'s job, not ingest's."""
+    try:
+        if pinned_backend(conn) is None:
+            pin_backend(conn, b)
+    # FAILOPEN: allowed -- the pin is a safety net around the write that just succeeded, never a reason to fail it.
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -524,31 +713,41 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     embeddings table; without this filter _cosine() silently scores every
     mismatched-dim row as 0.0, corrupting ranking after a backend switch.
     """
+    global _LAST_QUERY_FALLBACK
     migrate(conn)
     from memsom.retrieval import embed as memsom_embed
-    b = memsom_embed.backend()
+    b = memsom_embed.backend(conn)
     if b == "bm25":
         return []
     if b == "bge-m3" and not memsom_embed.dense_enabled():
         return []  # dense signal toggled off on the bge path
+    # Every fallback below is RECORDED (sentinel row + in-process reason), so a
+    # dead encoder is never again a silent "BM25 felt worse for weeks".
     try:
         if b == "bge-m3":
             if not memsom_embed.bge_usable():
-                return []  # bge selected but no encode path -> BM25-only, never a nomic mix
+                # bge selected but no encode path -> BM25-only, never a nomic mix
+                _record_query_degraded(
+                    conn, "bge-m3 has no encode path (supervisor down, FlagEmbedding "
+                          "not importable)")
+                return []
             enc = memsom_embed.encode_query(query)
             if enc is None:
+                _record_query_degraded(conn, "bge-m3 query encode failed")
                 return []
             q_vec = enc["dense"]
         else:
             q_vec = _call_ollama_embed(query)
-    # FAILOPEN: swallows and returns [] -- embedder down, caller's fusion falls back to BM25-only.
-    except Exception:
+    # FAILOPEN: swallows and returns [] -- embedder down, caller's fusion falls back to BM25-only (recorded).
+    except Exception as exc:
+        _record_query_degraded(conn, f"{b} query encode raised {type(exc).__name__}: {exc}")
         return []
+    _LAST_QUERY_FALLBACK = None
 
     # Load this backend's stored embeddings ONLY (dim-collision fix).
     rows = conn.execute(
         "SELECT node_id, vec FROM embeddings WHERE model = ?",
-        (memsom_embed.active_model_name(),),
+        (memsom_embed.active_model_name(conn),),
     ).fetchall()
     if not rows:
         return []
@@ -577,7 +776,7 @@ def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     """
     migrate(conn)
     from memsom.retrieval import embed as memsom_embed
-    if (memsom_embed.backend() != "bge-m3" or not memsom_embed.sparse_enabled()
+    if (memsom_embed.backend(conn) != "bge-m3" or not memsom_embed.sparse_enabled()
             or not memsom_embed.bge_usable()):
         return []
     enc = memsom_embed.encode_query(query)
@@ -588,7 +787,7 @@ def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
         return []
     rows = conn.execute(
         "SELECT node_id, weights_json FROM sparse_vecs WHERE model = ?",
-        (memsom_embed.active_model_name(),),
+        (memsom_embed.active_model_name(conn),),
     ).fetchall()
     scored = []
     for nid, wj in rows:
@@ -623,7 +822,7 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
     if not candidate_ids:
         return []
     from memsom.retrieval import embed as memsom_embed
-    if (memsom_embed.backend() != "bge-m3" or not memsom_embed.colbert_enabled()
+    if (memsom_embed.backend(conn) != "bge-m3" or not memsom_embed.colbert_enabled()
             or not memsom_embed.bge_usable()):
         return [(nid, 0.0) for nid in candidate_ids]
     enc = memsom_embed.encode_query(query)
@@ -634,7 +833,7 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
     rows = conn.execute(
         "SELECT node_id, n_tokens, dim, vecs FROM colbert_vecs"
         f" WHERE model = ? AND node_id IN ({placeholders})",
-        [memsom_embed.active_model_name()] + list(candidate_ids),
+        [memsom_embed.active_model_name(conn)] + list(candidate_ids),
     ).fetchall()
     have = {}
     for nid, n_tokens, dim, blob in rows:
@@ -764,7 +963,7 @@ def retrieve(
     # top-k slice — cost is N×tokens, not corpus×tokens. No-op off the bge path,
     # where it preserves the fused order exactly.
     from memsom.retrieval import embed as memsom_embed
-    if (memsom_embed.backend() == "bge-m3" and memsom_embed.colbert_enabled()
+    if (memsom_embed.backend(conn) == "bge-m3" and memsom_embed.colbert_enabled()
             and memsom_embed.bge_usable()):
         cand_n = min(memsom_embed.colbert_candidates(), len(fused))
         cand_ids = [nid for nid, _ in fused[:cand_n]]
@@ -914,6 +1113,10 @@ def _cmd_retrieve(args):
             k=args.k,
             clearance=args.clearance,
         )
+        # AI-facing degraded signal on the surface Claude actually reads (the
+        # MCP `retrieve` tool runs this command and returns its stdout).
+        for line in _retrieve_warnings_after_query(conn):
+            print(line)
         if not results:
             print("[memsom-retrieve] no results")
             return
@@ -943,10 +1146,23 @@ def _cmd_retrieve(args):
         conn.close()
 
 
+def _retrieve_warnings_after_query(conn: sqlite3.Connection) -> list:
+    """retrieval_warnings() plus THIS query's own fallback (which the stored
+    trail already reflects when the write succeeded; the in-process reason
+    covers a read-only connection where it could not be written)."""
+    lines = retrieval_warnings(conn)
+    reason = last_query_fallback_reason()
+    if reason and not any("query encoder unreachable" in l for l in lines):
+        lines.append(f"⚠️ RETRIEVAL DEGRADED: query encoder unreachable → "
+                     f"BM25-only for this query ({reason})")
+    return lines
+
+
 def _cmd_reindex(args):
     conn = memsom.get_connection()
     try:
         migrate(conn)
+        from memsom.retrieval import embed as memsom_embed
         n = index_all(conn)
         degraded = degraded_nodes(conn)
         # MS-32: index_all's old line printed identically whether every
@@ -958,6 +1174,17 @@ def _cmd_reindex(args):
                   f"reindex)")
         else:
             print(f"indexed {n} source node(s)")
+        # A full pass under backend X makes X the store's backend: pin it so a
+        # process without the env var keeps writing X (the split fix), then
+        # report what dense retrieval can now reach.
+        b = memsom_embed.backend(conn)
+        pin_backend(conn, b)
+        cov = embedding_coverage(conn)
+        stored = ", ".join(f"{m}={c}" for m, c in sorted(cov["by_model"].items())) or "none"
+        print(f"backend pinned: {b}; dense coverage {cov['covered']}/{cov['total']} "
+              f"(stored: {stored})")
+        for line in retrieval_warnings(conn):
+            print(line)
     finally:
         conn.close()
     # VRAM hygiene: a batch reindex is the canonical place a 2.2GB bge model gets

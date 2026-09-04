@@ -63,6 +63,27 @@ def _ollama_status():
         return {"reachable": False, "model": model, "error": str(exc)}
 
 
+def _retrieval_status():
+    """Dense coverage + the degraded lines, read-only. The store-level view
+    `memsom features` also reports, here in the paste-ready dump so a bug
+    report carries "N/M nodes dense-dark" instead of "recall feels bad"."""
+    try:
+        conn = memsom.get_connection(read_only=True)
+    # FAILOPEN: swallows -- no store means nothing to measure, not a doctor crash.
+    except Exception as exc:
+        return {"coverage": None, "warnings": [], "error": str(exc)}
+    try:
+        from memsom.retrieval import retrieve as memsom_retrieve
+        cov = memsom_retrieve.embedding_coverage(conn)
+        return {"coverage": cov, "warnings": memsom_retrieve.retrieval_warnings(conn),
+                "pinned": memsom_retrieve.pinned_backend(conn)}
+    # FAILOPEN: swallows and reports the failure as a doctor field.
+    except Exception as exc:
+        return {"coverage": None, "warnings": [], "error": str(exc)}
+    finally:
+        conn.close()
+
+
 def _selfcheck():
     try:
         # encoding pinned: text=True alone decodes with the locale codec (cp1252
@@ -86,9 +107,22 @@ def gather(features=None):
         "db_path": str(memsom.db_path()),
         "node_count": _node_count(),
         "ollama": _ollama_status(),
+        "retrieval": _retrieval_status(),
         "selfcheck": _selfcheck(),
         "features": features,
     }
+
+
+def _format_retrieval(r):
+    if not r or r.get("coverage") is None:
+        return f"(unmeasured: {r.get('error', 'no store') if r else 'no store'})"
+    cov = r["coverage"]
+    stored = ", ".join(f"{m}={n}" for m, n in sorted(cov["by_model"].items())) or "none"
+    line = (f"backend={cov['backend']} pinned={r.get('pinned')!r} dense coverage "
+            f"{cov['covered']}/{cov['total']} (stored: {stored})")
+    for w in r.get("warnings") or []:
+        line += "\n                 " + w
+    return line
 
 
 def _format(report):
@@ -108,6 +142,7 @@ def _format(report):
         f"DB path        : {report['db_path']}",
         f"nodes          : {nodes}",
         f"ollama         : {ol}",
+        f"retrieval      : {_format_retrieval(report.get('retrieval'))}",
         "",
         f"selfcheck (rc={report['selfcheck']['returncode']}):",
         report["selfcheck"]["output"] or "(no output)",

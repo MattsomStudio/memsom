@@ -80,6 +80,10 @@ class _StoreCase(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        # query_hits' BM25 fallback pins the PROCESS to bm25 (tuning.override);
+        # left in place it leaks into every later test module that reads the
+        # backend from env (test_memsom_embed: 11 failures under this ordering).
+        tuning.clear_override("embed.backend")
         self.tmp.cleanup()
 
 

@@ -31,7 +31,7 @@ def test_a_failed_embed_is_queued_and_warned(conn, monkeypatch, capsys):
     monkeypatch.setattr(memsom_retrieve, "_call_ollama_embed", _boom)
     # Force the default/no-bge path deterministically.
     from memsom.retrieval import embed as memsom_embed
-    monkeypatch.setattr(memsom_embed, "backend", lambda: "ollama")
+    monkeypatch.setattr(memsom_embed, "backend", lambda conn=None: "ollama")
 
     ok = memsom_retrieve.index_node(conn, nid)
     assert ok is True, "BM25 half must still succeed despite the vector failure"
@@ -51,7 +51,7 @@ def test_recovery_clears_the_queue(conn, monkeypatch):
     conn.commit()
 
     from memsom.retrieval import embed as memsom_embed
-    monkeypatch.setattr(memsom_embed, "backend", lambda: "ollama")
+    monkeypatch.setattr(memsom_embed, "backend", lambda conn=None: "ollama")
 
     def fails_once(text, _state={"n": 0}):
         _state["n"] += 1
@@ -76,7 +76,7 @@ def test_control_a_clean_embed_never_touches_the_queue(conn, monkeypatch):
     conn.commit()
 
     from memsom.retrieval import embed as memsom_embed
-    monkeypatch.setattr(memsom_embed, "backend", lambda: "ollama")
+    monkeypatch.setattr(memsom_embed, "backend", lambda conn=None: "ollama")
     monkeypatch.setattr(memsom_retrieve, "_call_ollama_embed",
                         lambda text: [0.1, 0.2, 0.3])
 

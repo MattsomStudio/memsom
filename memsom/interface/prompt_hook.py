@@ -300,8 +300,47 @@ def _now_iso():
 # hook-prompt (pure core + CLI shell)
 # ---------------------------------------------------------------------------
 
+_WARM_DOWN_SOURCES = frozenset({"bm25", "timeout", "error"})
+
+
+def store_health(db_path=None):
+    """(configured_backend, degraded_lines) for the store, read-only, ~ms.
+
+    Runs BEFORE the query so it sees the backend the store is configured for
+    (env or pin), not the bm25 override `_bm25_hits` installs for the process.
+    Any failure (no store yet, locked, odd schema) is ('', []): the hook must
+    never block a prompt on its own health check."""
+    try:
+        import memsom
+        from memsom.retrieval import embed as memsom_embed
+        from memsom.retrieval import retrieve as memsom_retrieve
+        conn = memsom.get_connection(db_path, read_only=True)
+    # FAILOPEN: allowed -- a missing/locked store is "unknown", never a hook failure.
+    except Exception:
+        return "", []
+    try:
+        return memsom_embed.backend(conn), list(memsom_retrieve.retrieval_warnings(conn))
+    # FAILOPEN: allowed -- same contract as above.
+    except Exception:
+        return "", []
+    finally:
+        conn.close()
+
+
+def degraded_lines(source: str, configured_backend: str, store_lines) -> list:
+    """The one-line warnings Claude reads. Store-level lines (a model split,
+    a recent query-encoder fallback) pass through; a warm-endpoint miss adds
+    one line ONLY when the store is configured for dense retrieval -- on a
+    bm25 store BM25-only is the design, not a degradation."""
+    out = list(store_lines or [])
+    if source in _WARM_DOWN_SOURCES and configured_backend not in ("", "bm25"):
+        out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint down → BM25-only for this "
+                   "prompt (no dense recall; reconnect the memsom MCP server)")
+    return out
+
+
 def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="topsecret",
-                    query_fn=None, now=_now_iso) -> str | None:
+                    query_fn=None, now=_now_iso, health_fn=None) -> str | None:
     """The whole hook as a function: returns the stdout text to emit (a JSON
     document) or None for silence. Logging happens here in log/inject modes.
 
@@ -312,6 +351,8 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
     fixture stem, red on CI's empty one)."""
     if query_fn is None:
         query_fn = query_hits
+    if health_fn is None:
+        health_fn = store_health
     prompt = data.get("prompt") if isinstance(data, dict) else None
     # A slash command is never a query — skip entirely. The 12-char floor is NOT
     # applied here anymore: it gates BM25 only, so an alias ("mspanel?") still
@@ -341,21 +382,29 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
     matched_stems = {f"project_{s}" for s in primary}
 
     # 2. BM25 retrieval — only when the prompt clears the 12-char floor.
+    #    The store's health is read FIRST (before any backend override lands)
+    #    so the degraded signal reflects what the store is configured for.
     t0 = time.perf_counter()
+    warnings = []
     if too_short_for_bm25(prompt):
         hits, source = [], "short"
     else:
+        configured, store_lines = health_fn()
         hits, source = query_fn(prompt, k=HOOK_K, clearance=clearance,
                                 deadline_ms=params["deadline_ms"])
+        warnings = degraded_lines(source, configured, store_lines)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     kept = apply_floor(hits, params["floor"])
     # a retrieval hit that IS a matched project node is redundant with the block;
     # its sub-notes (project_<slug>_*) are not and stay.
     kept = [h for h in kept if (h.get("label") or h.get("stem")) not in matched_stems]
     mem_block = render_block(kept) if kept else ""
+    warn_block = "\n".join(warnings)
 
-    # 3. assemble — the project block precedes the retrieval block.
-    block = "\n\n".join(x for x in (project_block, mem_block) if x)
+    # 3. assemble — the project block precedes the retrieval block; a degraded
+    #    warning rides last and is injected even when nothing else matched
+    #    (that silence is exactly what let the 2026-09 split go unnoticed).
+    block = "\n\n".join(x for x in (project_block, mem_block, warn_block) if x)
     would_inject = bool(block)
     injected = would_inject and mode == "inject"
 
@@ -374,6 +423,7 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
             "project_bytes": len(project_block.encode("utf-8")),
             "would_inject": would_inject,
             "injected": injected,
+            "degraded": warnings,
         }, params["log_max_mb"])
 
     if not injected:

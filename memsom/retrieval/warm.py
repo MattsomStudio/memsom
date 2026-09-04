@@ -341,10 +341,7 @@ class WarmServer:
         self._thread = threading.Thread(target=self._serve_loop, args=(self._server,),
                                         name="memsom-warm", daemon=True)
         self._thread.start()
-        body = {"host": self.host, "port": self.port, "token": self.token,
-                "pid": os.getpid(), "db": str(self.db_path), "version": 1}
-        self.file.parent.mkdir(parents=True, exist_ok=True)
-        _write_private(self.file, json.dumps(body))
+        self._write_endpoint()
         clear_backoff(self.db_path)          # a fresh listener starts with a clean slate
         return self
 
@@ -378,6 +375,39 @@ class WarmServer:
     def alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive() and self._server is not None
 
+    def _write_endpoint(self) -> None:
+        body = {"host": self.host, "port": self.port, "token": self.token,
+                "pid": os.getpid(), "db": str(self.db_path), "version": 1}
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        _write_private(self.file, json.dumps(body))
+
+    def ensure_endpoint_file(self) -> bool:
+        """Re-adopt the endpoint file when nobody live owns it. Returns True
+        when this server (re)wrote it.
+
+        MEASURED 2026-09-04: six MCP servers (one per Claude session) were all
+        listening, but the LAST one to start had written `<db>.warm.json` and
+        on exit removed it (correctly -- its own pid). The survivors never
+        rewrote it, so the prompt hook found no endpoint and ran BM25-only
+        for every one of 1,913 logged prompts since 08-20. The watchdog calls
+        this each tick: our own intact file -> nothing; a file whose endpoint
+        still answers a ping -> leave it (another live server owns it);
+        missing/unreadable/dead -> ours.
+        """
+        if not self.alive():
+            return False
+        try:
+            data = json.loads(self.file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            if data.get("token") == self.token:
+                return False
+            if endpoint_answers(data):
+                return False
+        self._write_endpoint()
+        return True
+
     def ping(self, timeout_s: float = PING_TIMEOUT_S) -> bool:
         """Round-trip a `ping` through the real socket with our own token.
         True iff the listener accepted, read and answered within *timeout_s*."""
@@ -408,8 +438,15 @@ class WarmWatchdog:
 
     def check_once(self) -> bool:
         """True when the endpoint answered; False when it did not and a
-        restart was attempted."""
+        restart was attempted. A healthy server also re-adopts the endpoint
+        file if the sibling that wrote it has exited (see ensure_endpoint_file)."""
         if self.server.ping(self.ping_timeout_s):
+            try:
+                if self.server.ensure_endpoint_file():
+                    _log(f"watchdog: re-adopted endpoint file on port {self.server.port}")
+            # FAILOPEN: allowed, a failed re-adopt is retried next tick.
+            except Exception as exc:
+                _log(f"watchdog: endpoint file re-adopt failed: {exc!r}")
             return True
         self.failures += 1
         _log(f"watchdog: ping failed ({self.failures}), restarting endpoint")
@@ -443,6 +480,23 @@ class WarmWatchdog:
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
+def endpoint_answers(ep: dict, budget_s: float = None) -> bool:
+    """Does the endpoint described by *ep* (an endpoint-file dict) answer a
+    ping with its own token? Cheap loopback roundtrip; False on any failure."""
+    if not isinstance(ep, dict) or not isinstance(ep.get("port"), int) \
+            or not isinstance(ep.get("token"), str):
+        return False
+    if ep.get("host", "127.0.0.1") not in LOOPBACK_PEERS:
+        return False
+    try:
+        resp = _roundtrip(ep.get("host", "127.0.0.1"), ep["port"],
+                          {"token": ep["token"], "method": "ping"},
+                          budget_s if budget_s is not None else PING_TIMEOUT_S)
+        return bool(resp.get("pong"))
+    except (WarmUnavailable, OSError, ValueError):
+        return False
+
 
 class WarmUnavailable(Exception):
     """No usable endpoint file / connection refused / timed out / bad reply —

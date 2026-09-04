@@ -59,30 +59,68 @@ def _degraded_count(conn) -> int:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retrieval_degraded'"
     ).fetchone():
         return 0
-    return conn.execute("SELECT COUNT(*) FROM retrieval_degraded").fetchone()[0]
+    # node_id > 0: the negative sentinel is the query-encoder trail, not a node.
+    return conn.execute(
+        "SELECT COUNT(*) FROM retrieval_degraded WHERE node_id > 0").fetchone()[0]
+
+
+def _coverage_degradation(conn):
+    """The 2026-09 split shape, as a detail string or None: live nodes whose
+    vector is under a model the active backend never reads (dense-dark), or a
+    recent query-encode fallback. Read-only, two indexed SELECTs."""
+    if conn is None:
+        return None
+    from memsom.retrieval import retrieve as memsom_retrieve
+    cov = memsom_retrieve.embedding_coverage(conn)
+    parts = []
+    if cov["split"] or cov["dark"]:
+        stored = ", ".join(f"{m}={n}" for m, n in sorted(cov["by_model"].items())) or "none"
+        parts.append(f"{cov['dark']}/{cov['total']} live node(s) dense-dark "
+                     f"(reads model={cov['active_model'] or 'none'}; stored: {stored})"
+                     " -- run `memsom reindex`")
+    last = memsom_retrieve.last_query_fallback(conn)
+    if last and (last["age_s"] is None
+                 or last["age_s"] <= memsom_retrieve.QUERY_DEGRADED_RECENT_S):
+        parts.append(f"query encoder unreachable at {last['recorded_at']}: {last['reason']}")
+    return "; ".join(parts) or None
+
+
+def _pin_note(conn):
+    if conn is None:
+        return ""
+    from memsom.retrieval import retrieve as memsom_retrieve
+    try:
+        pinned = memsom_retrieve.pinned_backend(conn)
+    # FAILOPEN: allowed -- status() must report, never raise, on an odd store.
+    except Exception:
+        pinned = None
+    return f"; store pinned to {pinned!r}" if pinned else "; store not yet pinned"
 
 
 def _retrieval_dense(conn):
     from memsom.retrieval import embed as memsom_embed
-    backend = memsom_embed.backend()
+    backend = memsom_embed.backend(conn)
     if backend != "ollama":
         return _status("retrieval.dense", "disabled",
                        f"embed.backend={backend!r} (ollama not selected)",
                        knobs=["embed.backend"])
+    knobs = ["embed.backend", "retrieval.embed_url", "retrieval.embed_model"]
     n = _degraded_count(conn)
     if n:
         return _status("retrieval.dense", "degraded",
                        f"{n} node(s) BM25-only -- vector embed failing "
-                       "(see retrieval_degraded)",
-                       knobs=["embed.backend", "retrieval.embed_url", "retrieval.embed_model"])
+                       "(see retrieval_degraded)", knobs=knobs)
+    cov = _coverage_degradation(conn)
+    if cov:
+        return _status("retrieval.dense", "degraded", cov, knobs=knobs)
     return _status("retrieval.dense", "active",
-                   "ollama selected; reachability is checked live by `memsom doctor`",
-                   knobs=["embed.backend", "retrieval.embed_url", "retrieval.embed_model"])
+                   "ollama selected; reachability is checked live by `memsom doctor`"
+                   + _pin_note(conn), knobs=knobs)
 
 
 def _retrieval_bge(conn):
     from memsom.retrieval import embed as memsom_embed
-    backend = memsom_embed.backend()
+    backend = memsom_embed.backend(conn)
     if backend != "bge-m3":
         return _status("retrieval.bge", "disabled",
                        f"embed.backend={backend!r} (bge-m3 not selected)",
@@ -91,14 +129,17 @@ def _retrieval_bge(conn):
         return _status("retrieval.bge", "absent",
                        "FlagEmbedding/torch/numpy not importable",
                        required=False, knobs=["embed.backend", "retrieval.bge_device"])
+    knobs = ["embed.backend", "retrieval.bge_device"]
     n = _degraded_count(conn)
     if n:
         return _status("retrieval.bge", "degraded",
                        f"{n} node(s) BM25-only -- bge encode (and Ollama "
-                       "fall-through) failing (see retrieval_degraded)",
-                       knobs=["embed.backend", "retrieval.bge_device"])
-    return _status("retrieval.bge", "active", "bge-m3 selected and importable",
-                   knobs=["embed.backend", "retrieval.bge_device"])
+                       "fall-through) failing (see retrieval_degraded)", knobs=knobs)
+    cov = _coverage_degradation(conn)
+    if cov:
+        return _status("retrieval.bge", "degraded", cov, knobs=knobs)
+    return _status("retrieval.bge", "active",
+                   "bge-m3 selected and importable" + _pin_note(conn), knobs=knobs)
 
 
 def _retrieval_colbert():
