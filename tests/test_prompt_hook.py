@@ -472,8 +472,24 @@ class TestHookPrompt(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.mem = Path(self.tmp.name)
         self.params = {"mode": "inject", "floor": 0.35, "deadline_ms": 800, "log_max_mb": 20}
+        # Isolate store health for every test in this class: under `unittest
+        # discover` an earlier module can leave MEMDAG_DB pointing at a
+        # dense-pinned store, whose warm-down then injects the RETRIEVAL DEGRADED
+        # line and breaks these silence/floor contracts (order-dependent: green
+        # under pytest / one OS's discover order, red under another's). Point
+        # MEMDAG_DB at a fresh absent store so store_health() fails open to
+        # ("", []) -- neutral -- regardless of what ran before.
+        self._saved_env = {k: os.environ.get(k)
+                           for k in ("MEMDAG_DB", "MEMDAG_EMBED_BACKEND")}
+        os.environ["MEMDAG_DB"] = str(self.mem / "isolated_store.db")
+        os.environ.pop("MEMDAG_EMBED_BACKEND", None)
 
     def tearDown(self):
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         self.tmp.cleanup()
 
     def _log(self):
