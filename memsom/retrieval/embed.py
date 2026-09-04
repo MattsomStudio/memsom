@@ -502,8 +502,7 @@ def cold_start_encode_query(text: str, timeout_s: float = None):
     def _run():
         try:
             box["enc"] = encode_query(text)
-        # FAILOPEN: any encode error becomes None -> the caller degrades to BM25;
-        # a raise here would only die on this daemon thread anyway.
+        # FAILOPEN: any encode error becomes None -> caller degrades to BM25; a raise here would only die on this daemon thread anyway.
         except Exception:
             box["enc"] = None
 
