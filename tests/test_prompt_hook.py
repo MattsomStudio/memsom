@@ -536,8 +536,13 @@ class TestHookPrompt(unittest.TestCase):
     def test_timeout_emits_nothing(self):
         def q(prompt, k=3, clearance="topsecret", deadline_ms=800):
             return [], "timeout"
+        # neutral store health: a timeout on a store PINNED to a dense backend
+        # now injects the degraded line on purpose (test_retrieval_coverage);
+        # this test is the timeout contract, and the suite's shared isolated.db
+        # may carry a pin from an earlier module.
         out = ph.run_prompt_hook({"prompt": "why does my piped command report success?"},
-                                 memory_dir=self.mem, params=self.params, query_fn=q)
+                                 memory_dir=self.mem, params=self.params, query_fn=q,
+                                 health_fn=lambda: ("", []))
         self.assertIsNone(out)
         self.assertEqual(self._log()[0]["source"], "timeout")
 
