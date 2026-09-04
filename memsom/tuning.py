@@ -491,6 +491,14 @@ _register("retrieval.colbert_candidates", type=int, default=30, bounds=(1, 1_000
                "query; 30 costs ~0.26 s and fits. Raise it for batch/CLI quality, "
                "not for the hook.",
            feature="retrieval.colbert")
+_register("retrieval.hook_colbert_candidates", type=int, default=8, bounds=(0, 1_000_000),
+           source="env:MEMDAG_HOOK_COLBERT_CANDIDATES",
+           doc="ColBERT re-rank window for the PROMPT-HOOK path only (the warm "
+               "endpoint's top-3 injection). MEASURED 2026-09-04: ~8.5 ms per "
+               "candidate (I/O), and the hook's whole warm budget is 0.6 s, so the "
+               "CLI/MCP window (colbert_candidates) does not fit there; 8 costs "
+               "~70 ms. 0 skips ColBERT in the hook (dense+sparse+BM25 fusion order).",
+           feature="retrieval.colbert")
 _register("retrieval.colbert_maxlen", type=int, default=512, bounds=(1, 1_000_000),
            source="env:MEMDAG_COLBERT_MAXLEN",
            doc="ColBERT passage/query token cap (int).", feature="retrieval.colbert")

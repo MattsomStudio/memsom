@@ -140,7 +140,13 @@ def hits_for(conn, query: str, k: int = 3, clearance: str = DEFAULT_CLEARANCE) -
     k = max(0, min(int(k), MAX_K))
     if k == 0 or not (query or "").strip():
         return []
-    rows = memsom_retrieve.retrieve(conn, query, k=k, clearance=clearance)
+    # Hook-sized ColBERT window: the CLI/MCP window (30) is I/O bound at
+    # ~8.5 ms per candidate and alone overran the 0.6 s warm budget on a cold
+    # page cache (MEASURED 2026-09-04); the hook injects three hits, so it
+    # reranks a handful (retrieval.hook_colbert_candidates, default 8).
+    from memsom.retrieval import embed as memsom_embed
+    rows = memsom_retrieve.retrieve(conn, query, k=k, clearance=clearance,
+                                    colbert_window=memsom_embed.hook_colbert_candidates())
     if not rows:
         return []
     scores = coverage_scores(conn, query, [r[0] for r in rows])

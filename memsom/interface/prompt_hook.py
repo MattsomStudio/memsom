@@ -107,17 +107,21 @@ def query_hits(query, k=HOOK_K, clearance="topsecret", deadline_ms=800,
     """Returns (hits, source). source in {'warm', 'bm25', 'timeout', 'error'}.
     Never raises; never exceeds the deadline by more than a scheduler tick."""
     from memsom.retrieval import warm
+    global _LAST_WARM_REASON
+    _LAST_WARM_REASON = None
     t_end = time.monotonic() + max(0.05, deadline_ms / 1000.0)
 
     # 1. warm endpoint (the long-lived MCP server). Its budget is capped at
-    #    warm.WARM_BUDGET_S (~250 ms) INCLUDING the read: a slow or wedged
-    #    endpoint is treated as down and we fall back, never wait it out.
+    #    warm.WARM_BUDGET_S INCLUDING the read: a slow or wedged endpoint is
+    #    treated as down and we fall back, never wait it out. WHY it failed is
+    #    kept for the degraded line: "timed out"/"backoff" is a slow-but-alive
+    #    server (an encoder cold start, a cold-cache query), not a dead one.
     try:
         hits = warm.warm_query(query, k=k, clearance=clearance,
                                deadline_s=t_end - time.monotonic(), db_path=db_path)
         return hits, "warm"
-    except warm.WarmUnavailable:
-        pass
+    except warm.WarmUnavailable as exc:
+        _LAST_WARM_REASON = str(exc)
     # FAILOPEN: allowed, any other warm-path failure falls back to BM25, never crashes.
     except Exception:
         pass
@@ -301,6 +305,8 @@ def _now_iso():
 # ---------------------------------------------------------------------------
 
 _WARM_DOWN_SOURCES = frozenset({"bm25", "timeout", "error"})
+_WARM_SLOW_REASONS = frozenset({"timed out", "backoff", "short read"})
+_LAST_WARM_REASON = None   # str(WarmUnavailable) of THIS process's last warm miss, or None
 
 
 def store_health(db_path=None):
@@ -334,15 +340,16 @@ def degraded_lines(source: str, configured_backend: str, store_lines) -> list:
     bm25 store BM25-only is the design, not a degradation."""
     out = list(store_lines or [])
     if source in _WARM_DOWN_SOURCES and configured_backend not in ("", "bm25"):
-        if source == "timeout":
-            # The endpoint accepted but did not answer inside the hook budget:
-            # with cold-start-on-demand (2026-09-04) that is usually the bge
-            # supervisor booting its encoder for THIS query, which keeps loading
-            # after we gave up — the next prompt is served dense. Say that, not
-            # "down", so the reader does not reconnect a healthy server.
-            out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint timed out (encoder "
-                       "cold-starting or busy) → BM25-only for this prompt; dense "
-                       "recall resumes on the next prompt once it is warm")
+        if source == "timeout" or _LAST_WARM_REASON in _WARM_SLOW_REASONS:
+            # The endpoint accepted but did not answer inside the hook budget
+            # (or is in the short backoff that follows): with cold-start-on-
+            # demand (2026-09-04) that is usually the bge supervisor booting its
+            # encoder for THIS query, which keeps loading after we gave up — the
+            # next prompt is served dense. Say that, not "down", so the reader
+            # does not reconnect a healthy server.
+            out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint slow (encoder "
+                       "cold-starting or a cold-cache query) → BM25-only for this "
+                       "prompt; dense recall resumes once it is warm")
         else:
             out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint down → BM25-only for this "
                        "prompt (no dense recall; reconnect the memsom MCP server)")
@@ -396,6 +403,8 @@ def run_prompt_hook(data: dict, *, memory_dir=None, params=None, clearance="tops
     #    so the degraded signal reflects what the store is configured for.
     t0 = time.perf_counter()
     warnings = []
+    global _LAST_WARM_REASON
+    _LAST_WARM_REASON = None   # only THIS call's warm miss may colour the wording
     if too_short_for_bm25(prompt):
         hits, source = [], "short"
     else:

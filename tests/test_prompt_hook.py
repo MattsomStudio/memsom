@@ -936,5 +936,78 @@ class TestPluginPackaging(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
 
 
+class TestHookColbertWindow(_StoreCase):
+    """The warm/hook path reranks a hook-sized ColBERT window, never the
+    CLI/MCP one (MEASURED 2026-09-04: ~8.5 ms per candidate, 0.6 s budget)."""
+
+    def test_hits_for_passes_the_hook_window(self):
+        from memsom.retrieval import embed as memsom_embed
+        seen = {}
+
+        def fake_retrieve(conn, query, k=8, clearance="topsecret", **kw):
+            seen.update(kw)
+            return []
+        conn = memsom.get_connection()
+        try:
+            with mock.patch.object(memsom_retrieve, "retrieve", fake_retrieve),                     mock.patch.object(memsom_embed, "hook_colbert_candidates", return_value=5):
+                warm.hits_for(conn, "nebula mesh firewall", k=3)
+        finally:
+            conn.close()
+        self.assertEqual(seen.get("colbert_window"), 5)
+
+    def test_window_zero_means_no_colbert_call(self):
+        conn = memsom.get_connection()
+        try:
+            with mock.patch.object(memsom_retrieve, "colbert_rerank",
+                                   side_effect=AssertionError("colbert must not run")),                     mock.patch("memsom.retrieval.embed.backend", return_value="bge-m3"),                     mock.patch("memsom.retrieval.embed.colbert_enabled", return_value=True),                     mock.patch("memsom.retrieval.embed.bge_usable", return_value=True):
+                rows = memsom_retrieve.retrieve(conn, "nebula mesh firewall ufw", k=2,
+                                                colbert_window=0)
+        finally:
+            conn.close()
+        self.assertTrue(rows)
+
+    def test_hook_window_default_and_env(self):
+        from memsom.retrieval import embed as memsom_embed
+        os.environ.pop("MEMDAG_HOOK_COLBERT_CANDIDATES", None)
+        self.assertEqual(memsom_embed.hook_colbert_candidates(), 8)
+        os.environ["MEMDAG_HOOK_COLBERT_CANDIDATES"] = "0"
+        try:
+            self.assertEqual(memsom_embed.hook_colbert_candidates(), 0)
+        finally:
+            os.environ.pop("MEMDAG_HOOK_COLBERT_CANDIDATES", None)
+
+
+class TestSlowWarmWording(unittest.TestCase):
+    """A warm miss that was a timeout/backoff (alive but slow: an encoder cold
+    start, a cold-cache query) must not tell the reader to reconnect."""
+
+    def tearDown(self):
+        ph._LAST_WARM_REASON = None
+
+    def test_slow_reason_says_slow_not_down(self):
+        ph._LAST_WARM_REASON = "timed out"
+        lines = ph.degraded_lines("bm25", "bge-m3", [])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("slow", lines[0])
+        self.assertNotIn("reconnect", lines[0])
+        ph._LAST_WARM_REASON = "backoff"
+        self.assertIn("slow", ph.degraded_lines("bm25", "bge-m3", [])[0])
+
+    def test_connect_failure_still_says_down(self):
+        ph._LAST_WARM_REASON = "connect failed"
+        lines = ph.degraded_lines("bm25", "bge-m3", [])
+        self.assertIn("down", lines[0])
+        self.assertIn("reconnect", lines[0])
+        ph._LAST_WARM_REASON = None
+        self.assertIn("down", ph.degraded_lines("bm25", "bge-m3", [])[0])
+
+    def test_query_hits_records_the_reason(self):
+        with mock.patch("memsom.retrieval.warm.warm_query",
+                        side_effect=warm.WarmUnavailable("timed out")),                 mock.patch.object(ph, "_bm25_hits", return_value=[]):
+            hits, source = ph.query_hits("nebula mesh", deadline_ms=500)
+        self.assertEqual((hits, source), ([], "bm25"))
+        self.assertEqual(ph._LAST_WARM_REASON, "timed out")
+
+
 if __name__ == "__main__":
     unittest.main()

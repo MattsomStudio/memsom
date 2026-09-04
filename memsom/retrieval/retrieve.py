@@ -1014,6 +1014,7 @@ def retrieve(
     min_integrity=None,
     exclude_quarantined: bool = True,
     exclude_redacted: bool = True,
+    colbert_window=None,
 ) -> list:
     """Hybrid BM25+vector retrieve with v1 pool filters.
 
@@ -1021,6 +1022,10 @@ def retrieve(
     ranked by RRF-fused BM25 + vector scores, filtered to the live pool.
 
     Ollama down -> BM25-only, no crash.
+
+    *colbert_window* overrides retrieval.colbert_candidates for this call
+    (the prompt hook passes its own hook-sized window; 0 = no ColBERT rerank,
+    fused order stands).
     """
     migrate(conn)
     # RETRIEVE-1: a negative k makes len(pool)+k shrink the candidate window and
@@ -1065,9 +1070,12 @@ def retrieve(
     from memsom.retrieval import embed as memsom_embed
     if (memsom_embed.backend(conn) == "bge-m3" and memsom_embed.colbert_enabled()
             and memsom_embed.bge_usable()):
-        cand_n = min(memsom_embed.colbert_candidates(), len(fused))
+        window = (memsom_embed.colbert_candidates() if colbert_window is None
+                  else max(0, int(colbert_window)))
+        cand_n = min(window, len(fused))
         cand_ids = [nid for nid, _ in fused[:cand_n]]
-        reranked = colbert_rerank(conn, query, cand_ids)
+        # window 0 (the hook's opt-out) = fused order, no colbert I/O at all.
+        reranked = colbert_rerank(conn, query, cand_ids) if cand_ids else []
         top_nids = [nid for nid, _ in reranked[:k]]
         # The window is a RE-RANK bound, not a result cap: if it is narrower
         # than k, backfill from the fused tail in fused order so the caller

@@ -157,6 +157,20 @@ def colbert_candidates() -> int:
     return max(1, v)
 
 
+def hook_colbert_candidates() -> int:
+    """ColBERT window for the prompt-hook (warm endpoint) path only, from
+    retrieval.hook_colbert_candidates (default 8; 0 = no rerank there)."""
+    raw = memsom_tuning.resolve("retrieval.hook_colbert_candidates")
+    if isinstance(raw, int):
+        return max(0, raw)
+    if raw is None or not str(raw).strip():
+        return 8
+    try:
+        return max(0, int(str(raw).strip()))
+    except ValueError:
+        return 8
+
+
 def _maxlen() -> int:
     """Token truncation cap from MEMDAG_COLBERT_MAXLEN (default 512).
 
