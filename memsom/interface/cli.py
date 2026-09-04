@@ -265,6 +265,7 @@ def cmd_ask(args):
             memsom_tuning.override("embed.backend", args.embed_backend)
             uses_retrieval = getattr(args, "retrieve", False) or getattr(args, "graph", False)
             if (args.embed_backend == "bge-m3" and uses_retrieval
+                    and memsom_embed.encode_via() != "supervisor"
                     and memsom_embed.bge_available()):
                 print("[memsom] bge-m3: cold-loading the model (~2.2GB) for a "
                       "single query; prefer a warm reindex/server for repeated use.",

@@ -31,6 +31,122 @@ class RegistryEnv(unittest.TestCase):
         tuning._overrides.clear()
 
 
+class TestPersistedOverrides(RegistryEnv):
+    """`<store dir>/tuning.json` sits between the in-process override and the
+    env: what `memsom tuning set` writes and every process on the store reads."""
+
+    KEY = "retrieval.bge_idle_ttl"
+    ENV = "MEMDAG_BGE_IDLE_TTL"
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        from pathlib import Path
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "store" / "x.db"
+        os.environ["MEMDAG_DB"] = str(self.db)
+        tuning._invalidate_persisted()
+
+    def tearDown(self):
+        tuning._invalidate_persisted()
+        self.tmp.cleanup()
+        super().tearDown()
+
+    def test_path_follows_the_store(self):
+        self.assertEqual(tuning.persisted_path(), self.db.parent / "tuning.json")
+        os.environ.pop("MEMDAG_DB")
+        os.environ["MEMDAG_HOME"] = self.tmp.name
+        from pathlib import Path
+        self.assertEqual(tuning.persisted_path(), Path(self.tmp.name) / "tuning.json")
+
+    def test_absent_file_means_env_then_default(self):
+        self.assertEqual(tuning.resolve(self.KEY), 60)
+        os.environ[self.ENV] = "9"
+        self.assertEqual(tuning.resolve(self.KEY), "9")
+
+    def test_set_beats_env_and_returns_the_native_type(self):
+        os.environ[self.ENV] = "9"
+        path = tuning.set_persisted(self.KEY, "7")
+        self.assertTrue(path.exists())
+        self.assertEqual(tuning.resolve(self.KEY), 7)
+        self.assertEqual(tuning.persisted()[self.KEY], 7)
+        self.assertEqual(tuning.as_json()[self.KEY]["persisted"], 7)
+
+    def test_override_beats_the_file(self):
+        tuning.set_persisted(self.KEY, "7")
+        tuning.override(self.KEY, 5)
+        self.assertEqual(tuning.resolve(self.KEY), 5)
+
+    def test_unset_restores_env(self):
+        os.environ[self.ENV] = "9"
+        tuning.set_persisted(self.KEY, "7")
+        tuning.unset_persisted(self.KEY)
+        self.assertEqual(tuning.resolve(self.KEY), "9")
+
+    def test_enum_and_str_knobs(self):
+        tuning.set_persisted("retrieval.bge_encode_via", "supervisor")
+        self.assertEqual(tuning.resolve("retrieval.bge_encode_via"), "supervisor")
+        tuning.set_persisted("retrieval.bge_spawn_cmd", 'cscript //B "x.vbs"')
+        self.assertEqual(tuning.resolve("retrieval.bge_spawn_cmd"), 'cscript //B "x.vbs"')
+        with self.assertRaises(ValueError):
+            tuning.set_persisted("retrieval.bge_encode_via", "carrier-pigeon")
+        with self.assertRaises(KeyError):
+            tuning.set_persisted("no.such.knob", "1")
+
+    def test_set_refuses_out_of_bounds(self):
+        with self.assertRaises(ValueError):
+            tuning.set_persisted(self.KEY, "999999")
+        with self.assertRaises(ValueError):
+            tuning.set_persisted(self.KEY, "seven")
+
+    def test_bad_file_value_falls_through_with_one_warning(self):
+        import json
+        p = tuning.persisted_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({self.KEY: 999999, "retrieval.bge_encode_via": 3}),
+                     encoding="utf-8")
+        os.environ[self.ENV] = "9"
+        with self.assertLogs("memsom.tuning", level="WARNING") as cm:
+            self.assertEqual(tuning.resolve(self.KEY), "9")
+            self.assertEqual(tuning.resolve(self.KEY), "9")
+        self.assertEqual(len(cm.output), 1)
+        self.assertEqual(tuning.resolve("retrieval.bge_encode_via"), "auto")
+
+    def test_malformed_file_is_ignored(self):
+        p = tuning.persisted_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{not json", encoding="utf-8")
+        self.assertEqual(tuning.resolve(self.KEY), 60)
+        p.write_text("[1, 2]", encoding="utf-8")
+        tuning._invalidate_persisted()
+        self.assertEqual(tuning.resolve(self.KEY), 60)
+
+    def test_an_external_write_is_seen_without_a_restart(self):
+        import json
+        import time
+        self.assertEqual(tuning.resolve(self.KEY), 60)
+        p = tuning.persisted_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({self.KEY: 8}), encoding="utf-8")
+        time.sleep(tuning._FILE_STAT_TTL_S + 0.05)
+        self.assertEqual(tuning.resolve(self.KEY), 8)
+
+    def test_cli_set_and_unset(self):
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tuning._cmd_tuning_set(argparse.Namespace(key=self.KEY, value="11"))
+        self.assertIn("persisted in", buf.getvalue())
+        self.assertEqual(tuning.resolve(self.KEY), 11)
+        with self.assertRaises(SystemExit):
+            tuning._cmd_tuning_set(argparse.Namespace(key=self.KEY, value="nope"))
+        with redirect_stdout(io.StringIO()):
+            tuning._cmd_tuning_unset(argparse.Namespace(key=self.KEY))
+        self.assertEqual(tuning.resolve(self.KEY), 60)
+
+
 class TestEveryKnobHasAType(unittest.TestCase):
     def test_every_registered_knob_has_a_type(self):
         self.assertGreater(len(tuning.REGISTRY), 0)

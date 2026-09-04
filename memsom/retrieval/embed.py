@@ -241,21 +241,43 @@ def bge_available() -> bool:
     return _BGE_AVAILABLE
 
 
-def bge_usable() -> bool:
-    """True iff bge signals can be produced by SOME path — in-process torch OR a
-    reachable local supervisor. This is the gate retrieve.py uses to decide the
-    bge branch, so a box with the supervisor but no local torch still gets bge.
+def _supervisor_possible() -> bool:
+    """True iff the supervisor path can produce bge signals: bge_url set AND
+    (its /health answers now OR a spawn_cmd is configured to bring it up).
+    An idle/down supervisor with a spawn_cmd is NOT "no path" — the encode
+    will cold-start it. Never imports torch."""
+    from memsom.retrieval import bge_client
+    if not bge_client.configured():
+        return False
+    if bge_client.supervisor_reachable():
+        return True
+    return bool(bge_client.spawn_cmd())
 
-    Torch is checked FIRST (a cheap cached import probe, no network): when it is
-    available we never touch the network here, which keeps the test suite (which
-    patches bge_available) hermetic. Only a torch-less box probes the supervisor.
+
+def bge_usable() -> bool:
+    """True iff bge signals can be produced by SOME path — in-process torch OR
+    the local supervisor (reachable, or spawnable via bge_spawn_cmd). This is
+    the gate retrieve.py uses to decide the bge branch, so a box with the
+    supervisor but no local torch still gets bge.
+
+    Mode rules (retrieval.bge_encode_via):
+      inprocess  -> torch only, never probes the network.
+      supervisor -> supervisor only, NEVER imports torch into this process
+                    (the MCP server is a Claude Code child; torch must not
+                    load there — that is the whole point of the mode).
+      auto       -> torch is checked FIRST (a cheap cached import probe, no
+                    network): when it is available we never touch the network
+                    here, which keeps the test suite (which patches
+                    bge_available) hermetic. Only a torch-less box probes.
     """
+    via = encode_via()
+    if via == "inprocess":
+        return bge_available()
+    if via == "supervisor":
+        return _supervisor_possible()
     if bge_available():
         return True
-    if encode_via() == "inprocess":
-        return False
-    from memsom.retrieval import bge_client
-    return bge_client.configured() and bge_client.bge_http_available()
+    return _supervisor_possible()
 
 
 def _get_model():
@@ -280,10 +302,16 @@ def unload() -> None:
     """Drop the model singleton and free VRAM (keep-alive analog).
 
     Wired to post-`reindex` when MEMDAG_BGE_UNLOAD=1 and to MCP/broker shutdown.
-    Safe to call when nothing is loaded.
+    Safe to call when nothing is loaded. Touches torch ONLY if this process
+    already imported it — a supervisor-mode process must never import torch
+    just to discover it has nothing to free.
     """
-    global _MODEL
+    global _MODEL, _QUERY_MEMO
     _MODEL = None
+    _QUERY_MEMO = (None, None)
+    import sys
+    if "torch" not in sys.modules:
+        return
     try:
         import torch
         if torch.cuda.is_available():
@@ -345,24 +373,57 @@ def _warn_fallback(op: str, exc: Exception) -> None:
     )
 
 
+_WARNED_SUPERVISOR = False
+
+
+def _warn_supervisor(op: str) -> None:
+    """ONE stderr warning per process when bge_encode_via=supervisor and the
+    supervisor could not serve (down and not spawnable / spawn never came up /
+    embed failed). In this mode in-process torch is deliberately never tried,
+    so the operator must hear that the supervisor path itself is broken."""
+    global _WARNED_SUPERVISOR
+    if _WARNED_SUPERVISOR:
+        return
+    _WARNED_SUPERVISOR = True
+    import sys
+    print(
+        f"[memsom] BGE-M3 {op} FAILED: bge_encode_via=supervisor but the local "
+        f"supervisor (retrieval.bge_url) did not serve — down and no "
+        f"bge_spawn_cmd, spawn never became healthy within bge_spawn_timeout, or "
+        f"its /embed errored. In-process torch is disabled in this mode; this "
+        f"query degrades to BM25. This warning shows once.",
+        file=sys.stderr,
+    )
+
+
 def _dispatch_encode(text: str, op: str):
     """Produce {'dense','sparse','colbert'} for *text*, or None.
 
     Path (retrieval.bge_encode_via):
-      auto / supervisor -> if bge_url's /health answers, POST /embed to the local
-                           supervisor (no torch in THIS process). On an unreachable
-                           supervisor OR an embed error, fall through to in-process.
-      any mode          -> in-process FlagEmbedding (the `bge` pip extra).
-    On any total failure (no supervisor AND torch not importable / erroring) this
+      auto / supervisor -> ensure_supervisor(): if bge_url's /health answers —
+                           spawning the DETACHED supervisor first when it is down
+                           and bge_spawn_cmd is set, and waiting for it — POST
+                           /embed to it (no torch in THIS process).
+      supervisor        -> that is the ONLY path: on failure warn once, return
+                           None (never load torch into this process).
+      auto              -> on an unreachable/unspawnable supervisor OR an embed
+                           error, fall through to in-process FlagEmbedding.
+      inprocess         -> in-process FlagEmbedding (the `bge` pip extra) only.
+    The in-process load is SYNCHRONOUS on the calling thread, never a worker
+    thread the caller abandons (the 50a5bac shape). On any total failure this
     warns once and returns None, so the caller degrades to BM25 — never raises.
     """
-    if encode_via() in ("auto", "supervisor"):
+    via = encode_via()
+    if via in ("auto", "supervisor"):
         from memsom.retrieval import bge_client
-        if bge_client.configured() and bge_client.bge_http_available():
+        if bge_client.configured() and bge_client.ensure_supervisor():
             enc = bge_client.encode_http(text)
             if enc is not None:
                 return enc
-            # supervisor reachable but the embed itself failed -> try in-process.
+            # supervisor reachable but the embed itself failed.
+        if via == "supervisor":
+            _warn_supervisor(op)
+            return None
     try:
         return _encode(text)
     # FAILOPEN: warns once and returns None -- no bge encode path (supervisor down/unset AND FlagEmbedding not importable or erroring) degrades this to BM25, never crashes ingest/retrieval.
@@ -376,13 +437,31 @@ def encode_doc(text: str):
     return _dispatch_encode(text, "document encoding")
 
 
+# One-entry memo for the query encoder: retrieve() asks for the SAME query's
+# signals up to three times (dense, sparse, colbert). Over the supervisor that
+# was three HTTP round trips — and three spawn/cold-start attempts when it was
+# down. A failed encode (None) is never memoised, so a retry is a real retry.
+_QUERY_MEMO = (None, None)
+
+
+def _reset_query_memo() -> None:
+    """Test-isolation escape hatch."""
+    global _QUERY_MEMO
+    _QUERY_MEMO = (None, None)
+
+
 def encode_query(text: str):
     """Encode a query. Returns the signal dict, or None on any failure.
 
     Separate from encode_doc so a future asymmetric-query instruction can land
     here without touching the doc path.
     """
-    return _dispatch_encode(text, "query encoding")
+    global _QUERY_MEMO
+    if _QUERY_MEMO[0] == text and _QUERY_MEMO[1] is not None:
+        return _QUERY_MEMO[1]
+    enc = _dispatch_encode(text, "query encoding")
+    _QUERY_MEMO = (text, enc)
+    return enc
 
 
 # ---------------------------------------------------------------------------
@@ -523,18 +602,22 @@ def sparse_dot(q_sparse: dict, d_sparse: dict) -> float:
 def colbert_maxsim(q_colbert, d_colbert) -> float:
     """ColBERT late-interaction score: sum over query tokens of the max dot
     product against any doc token. Vectors are L2-normalized by BGE-M3, so a dot
-    is a cosine. Uses torch if available (one batched matmul), else pure Python.
+    is a cosine. Uses numpy if available (one matmul), else pure Python.
+
+    NEVER torch: this runs on the QUERY path of every process — the MCP server
+    (a Claude Code child) included — and a torch import there is exactly what
+    the supervisor design exists to avoid (2026-09-04). numpy is a cheap CPU
+    import; the pure-Python fallback keeps CI at zero deps.
     """
     if not q_colbert or not d_colbert:
         return 0.0
     try:
-        import torch
-        q = torch.tensor(q_colbert, dtype=torch.float32)
-        d = torch.tensor(d_colbert, dtype=torch.float32)
+        import numpy as np
+        q = np.asarray(q_colbert, dtype=np.float32)
+        d = np.asarray(d_colbert, dtype=np.float32)
         # [n_q, n_d] sims -> max over doc tokens -> sum over query tokens
-        sims = q @ d.T
-        return float(sims.max(dim=1).values.sum().item())
-    # FAILOPEN: not actually open -- falls back to an equivalent pure-Python computation (CI-testable, no torch) instead of raising.
+        return float((q @ d.T).max(axis=1).sum())
+    # FAILOPEN: not actually open -- falls back to an equivalent pure-Python computation (CI-testable, no numpy) instead of raising.
     except Exception:
         total = 0.0
         for qv in q_colbert:

@@ -291,6 +291,26 @@ def degraded_nodes(conn: sqlite3.Connection) -> list:
 _LAST_QUERY_FALLBACK = None   # reason str for THIS process's last vector_search, or None
 
 
+def _clear_query_degraded(conn: sqlite3.Connection) -> None:
+    """Clear the query-encoder degraded trail (in-process reason AND the
+    sentinel row) after a bge query encoded normally — including via an
+    on-demand cold start of the supervisor. Idle is not a degradation, so a
+    successful cold start must leave NO lingering warning for
+    retrieval_warnings() to surface. Best-effort: a read-only/locked
+    connection just skips the row delete."""
+    global _LAST_QUERY_FALLBACK
+    _LAST_QUERY_FALLBACK = None
+    try:
+        if not memsom_schema.table_exists(conn, "retrieval_degraded"):
+            return
+        with conn:
+            conn.execute("DELETE FROM retrieval_degraded WHERE node_id = ?",
+                         (QUERY_DEGRADED_NID,))
+    # FAILOPEN: allowed -- clearing telemetry must never break a read path (read-only conn, locked db).
+    except Exception:
+        pass
+
+
 def _record_query_degraded(conn: sqlite3.Connection, reason: str) -> None:
     """Best-effort trail: the active backend's QUERY encoder was unreachable and
     this search ran BM25-only. One sentinel row (INSERT OR REPLACE), so the
@@ -725,24 +745,40 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     # dead encoder is never again a silent "BM25 felt worse for weeks".
     try:
         if b == "bge-m3":
+            # COLD-START ON DEMAND (2026-09-04): an idle/down supervisor is no
+            # longer an instant BM25 fall. bge_usable() is True when torch is
+            # importable, the supervisor answers, OR a bge_spawn_cmd can bring
+            # it up; encode_query then spawns/awaits the DETACHED supervisor and
+            # pays the backend's cold load. Only a GENUINE failure degrades:
+            # nothing can produce a vector (no torch, supervisor down and not
+            # spawnable), the spawn never became healthy, or the embed errored.
             if not memsom_embed.bge_usable():
-                # bge selected but no encode path -> BM25-only, never a nomic mix
                 _record_query_degraded(
-                    conn, "bge-m3 has no encode path (supervisor down, FlagEmbedding "
-                          "not importable)")
+                    conn, "bge-m3 has no encode path (supervisor down with no "
+                          "bge_spawn_cmd, FlagEmbedding not importable)")
                 return []
             enc = memsom_embed.encode_query(query)
             if enc is None:
-                _record_query_degraded(conn, "bge-m3 query encode failed")
+                _record_query_degraded(
+                    conn, "bge-m3 query encode failed (supervisor spawn never "
+                          "became healthy, its /embed errored, or the in-process "
+                          "encoder raised)")
                 return []
             q_vec = enc["dense"]
+            # A successful encode — cold start included — is the healthy case:
+            # clear the whole trail (in-process reason AND the sentinel row) so
+            # no stale "unreachable" warning survives a warm-up.
+            _clear_query_degraded(conn)
         else:
             q_vec = _call_ollama_embed(query)
+            # Ollama has no memsom-driven cold start; keep the historical
+            # recency-gated trail (the split-backup regression contract) and
+            # clear only THIS process's in-process reason.
+            _LAST_QUERY_FALLBACK = None
     # FAILOPEN: swallows and returns [] -- embedder down, caller's fusion falls back to BM25-only (recorded).
     except Exception as exc:
         _record_query_degraded(conn, f"{b} query encode raised {type(exc).__name__}: {exc}")
         return []
-    _LAST_QUERY_FALLBACK = None
 
     # Load this backend's stored embeddings ONLY (dim-collision fix).
     rows = conn.execute(

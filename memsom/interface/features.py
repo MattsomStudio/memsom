@@ -125,11 +125,40 @@ def _retrieval_bge(conn):
         return _status("retrieval.bge", "disabled",
                        f"embed.backend={backend!r} (bge-m3 not selected)",
                        knobs=["embed.backend", "retrieval.bge_device"])
-    if not memsom_embed.bge_available():
-        return _status("retrieval.bge", "absent",
-                       "FlagEmbedding/torch/numpy not importable",
-                       required=False, knobs=["embed.backend", "retrieval.bge_device"])
     knobs = ["embed.backend", "retrieval.bge_device"]
+    via = memsom_embed.encode_via()
+    if via == "supervisor":
+        # Supervisor mode never imports torch into this process (the MCP server
+        # is a Claude Code child); the encode path is the local supervisor,
+        # reachable now or spawnable on demand. A cheap /health probe, no model.
+        from memsom.retrieval import bge_client
+        knobs = ["embed.backend", "retrieval.bge_encode_via", "retrieval.bge_url",
+                 "retrieval.bge_spawn_cmd", "retrieval.bge_spawn_timeout",
+                 "retrieval.bge_idle_ttl"]
+        if not bge_client.configured():
+            return _status("retrieval.bge", "degraded",
+                           "bge_encode_via=supervisor but retrieval.bge_url is unset",
+                           knobs=knobs)
+        if bge_client.supervisor_reachable():
+            path_note = f"supervisor reachable at {bge_client._url()}"
+        elif bge_client.spawn_cmd():
+            path_note = (f"supervisor idle at {bge_client._url()}; spawned on demand "
+                         f"by bge_spawn_cmd (cold start on the next query)")
+        else:
+            return _status("retrieval.bge", "degraded",
+                           f"supervisor unreachable at {bge_client._url()} and no "
+                           "bge_spawn_cmd to start it -- queries run BM25-only",
+                           knobs=knobs)
+    elif not memsom_embed.bge_available():
+        if via == "auto" and memsom_embed._supervisor_possible():
+            from memsom.retrieval import bge_client
+            path_note = f"torch not importable; supervisor path via {bge_client._url()}"
+        else:
+            return _status("retrieval.bge", "absent",
+                           "FlagEmbedding/torch/numpy not importable",
+                           required=False, knobs=["embed.backend", "retrieval.bge_device"])
+    else:
+        path_note = "bge-m3 selected and importable"
     n = _degraded_count(conn)
     if n:
         return _status("retrieval.bge", "degraded",
@@ -138,8 +167,7 @@ def _retrieval_bge(conn):
     cov = _coverage_degradation(conn)
     if cov:
         return _status("retrieval.bge", "degraded", cov, knobs=knobs)
-    return _status("retrieval.bge", "active",
-                   "bge-m3 selected and importable" + _pin_note(conn), knobs=knobs)
+    return _status("retrieval.bge", "active", path_note + _pin_note(conn), knobs=knobs)
 
 
 def _retrieval_colbert():

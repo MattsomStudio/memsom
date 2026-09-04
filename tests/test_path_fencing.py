@@ -234,6 +234,13 @@ ALLOWED: dict[str, str] = {
     "retrieval/embed.py::colbert_candidates":
         "NOT A PATH - memsom_tuning.resolve(\"retrieval.colbert_candidates\") "
         "reads a config knob. Same attribute name, unrelated call.",
+    "retrieval/bge_client.py::_int_knob":
+        "NOT A PATH - memsom_tuning.resolve(<int knob>) reads the idle_ttl / "
+        "spawn_timeout knobs. Same attribute name, unrelated call.",
+    "retrieval/bge_client.py::spawn_cmd":
+        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_spawn_cmd\") reads the "
+        "supervisor launch command (a config string, executed via effects/proc, "
+        "never joined into a path). Same attribute name, unrelated call.",
     "retrieval/bge_client.py::_url":
         "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_url\") reads a "
         "config knob. Same attribute name, unrelated call.",

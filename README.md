@@ -180,6 +180,36 @@ backend is active, so you can switch back and forth without corrupting anything.
 | `MEMDAG_BGE_UNLOAD` | off | `1` frees the ~2.2 GB model from VRAM after a `reindex` |
 | `MEMDAG_COLBERT_CANDIDATES` | `100` | How many top candidates the ColBERT step re-ranks |
 | `MEMDAG_COLBERT_MAXLEN` | `512` | Token truncation cap for encoding |
+| `MEMDAG_BGE_ENCODE_VIA` | `auto` | `auto` (local supervisor if reachable, else in-process torch), `supervisor` (HTTP only — torch is never imported into this process), `inprocess` |
+| `MEMDAG_BGE_URL` | `http://127.0.0.1:11435/embed` | The LOCAL supervisor's `/embed`; `/health` is derived from it |
+| `MEMDAG_BGE_SPAWN_CMD` | (empty) | Command memsom launches **detached** when the supervisor's `/health` is down; empty = never spawn |
+| `MEMDAG_BGE_SPAWN_TIMEOUT` | `30` | Seconds to wait for a spawned supervisor before this query degrades to BM25 |
+| `MEMDAG_BGE_IDLE_TTL` | `60` | Idle seconds the supervisor keeps its torch backend after memsom's last encode (`idle_ttl` on every `/embed`); `0` = never idle-kill |
+
+**Running bge-m3 out of process (the supervisor).** On a machine where memsom
+itself must stay light — the MCP server is a child of the editor/agent that
+launched it, and a ~5 GB torch process there is a crash waiting to happen — put
+the model in a separate HTTP *supervisor* and point `MEMDAG_BGE_URL` at it.
+memsom then only speaks loopback HTTP: it never imports torch, and with
+`MEMDAG_BGE_SPAWN_CMD` set it **cold-starts the supervisor on demand** (a
+detached process in its own group, no console, no pipes), waits for `/health`,
+and sends `idle_ttl` on every embed so the supervisor drops the model after that
+many idle seconds. An idle supervisor is *not* a degradation — the next query
+pays the cold load (~12 s measured) and is dense; the `RETRIEVAL DEGRADED` line
+appears only when the spawn never comes up or the embed itself fails. Every knob
+above is also persistable per store (see the next section), which is how the
+env-less MCP child picks them up.
+
+**Persisting knobs per store — `memsom tuning set`.** Every registered knob
+(`memsom tuning list`) can be written to `<store dir>/tuning.json`:
+```bash
+memsom tuning set retrieval.bge_encode_via supervisor
+memsom tuning set retrieval.bge_spawn_cmd '"/path/to/python" "/path/to/bge_supervisor.py"'
+memsom tuning unset retrieval.bge_spawn_cmd
+```
+Resolution is in-process flag > `tuning.json` > env var > default, and the file
+is re-read on change, so a value set here reaches the prompt hook, the Stop-hook
+importer and an already-running MCP server without a restart.
 
 > **Don't take the recommendation on faith — reproduce it.** `bench/run_recall_h2h.py` is
 > a fair-both-ways head-to-head (identical items, queries, top-k, and judge) of

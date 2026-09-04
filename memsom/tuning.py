@@ -22,6 +22,18 @@ DEFAULTS, golden parity test). This registry is for the knobs that were
 scattered bare os.environ.get() calls before Phase 8; it centralizes the
 *read*, not the parsing each call site already did on the raw value.
 
+PERSISTED OVERRIDES (2026-09-04). Resolution is in-process override >
+`<store dir>/tuning.json` > env > default. The file is the one place a knob can
+be set for EVERY process that opens the store -- the Stop-hook importer, the
+prompt hook, and the MCP server (a Claude Code child launched with no
+MEMDAG_* shell env) -- and it is what `memsom tuning set` writes and what a
+panel json-file provider targets. It sits beside the DB (MEMDAG_DB's parent >
+MEMDAG_HOME > ~/.memdag, the same bootstrap read storage/db.py does; tuning
+sits BELOW storage in the layer order so it cannot import db_path()) so a test
+pointed at a temp DB never reads the real one. Values are validated exactly
+like env values (type, bounds, choices); a bad value warns once and falls
+through to env/default, never raises.
+
 Every knob carries an explicit `type` -- one of the Python types `int`,
 `float`, `bool`, `str`, or the string sentinels `"path"` (a str, semantically
 a filesystem path) and `"enum"` (a str restricted to `choices`). Numeric
@@ -37,10 +49,13 @@ whether the raw value is safe to hand to that call site at all.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 _LOG = logging.getLogger("memsom.tuning")
 
@@ -125,8 +140,138 @@ def _clear_warned(key: str | None = None) -> None:
             _warned_keys.discard(key)
 
 
+def _in_bounds(knob: Knob, value) -> bool:
+    if knob.bounds is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True
+    lo, hi = knob.bounds
+    return lo <= value <= hi
+
+
+# ---------------------------------------------------------------------------
+# Persisted overrides -- <store dir>/tuning.json (see the module docstring)
+# ---------------------------------------------------------------------------
+
+PERSISTED_NAME = "tuning.json"
+_file_lock = threading.Lock()
+_file_cache: dict = {"path": None, "mtime": None, "data": {}, "checked": 0.0}
+_FILE_STAT_TTL_S = 1.0   # re-stat at most once a second; a hot loop never pays a stat per resolve
+_ABSENT = object()
+
+
+def persisted_path() -> Path:
+    """`<store dir>/tuning.json`. The store dir is MEMDAG_DB's parent, else
+    MEMDAG_HOME, else ~/.memdag -- storage/db.py's bootstrap rule, repeated
+    here because tuning cannot import upward into storage."""
+    db = os.environ.get("MEMDAG_DB")
+    if db:
+        return Path(db).parent / PERSISTED_NAME
+    home = os.environ.get("MEMDAG_HOME")
+    return Path(home or (Path.home() / ".memdag")) / PERSISTED_NAME
+
+
+def _invalidate_persisted() -> None:
+    with _file_lock:
+        _file_cache.update(path=None, mtime=None, data={}, checked=0.0)
+
+
+def persisted() -> dict:
+    """The tuning.json contents ({} when absent/unreadable/not a dict), cached
+    on (path, mtime) so a panel or `tuning set` write is seen on the next
+    resolve without a restart. Never raises."""
+    p = persisted_path()
+    now = time.monotonic()
+    with _file_lock:
+        c = _file_cache
+        if c["path"] == p and (now - c["checked"]) < _FILE_STAT_TTL_S:
+            return c["data"]
+        try:
+            mtime = p.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        if c["path"] == p and c["mtime"] == mtime:
+            c["checked"] = now
+            return c["data"]
+        data: dict = {}
+        if mtime is not None:
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                data = raw if isinstance(raw, dict) else {}
+            except (OSError, ValueError):
+                data = {}
+        c.update(path=p, mtime=mtime, data=data, checked=now)
+        return data
+
+
+def _validate_persisted(knob: Knob, value):
+    """A tuning.json value -> the value resolve() returns, or _ABSENT when it
+    is malformed/out of bounds (warned once, like a bad env value). A string
+    is validated like an env string and returned as-is; a native JSON
+    number/bool is type-checked and returned natively (like a default)."""
+    if value is None:
+        return _ABSENT
+    t = knob.type
+    if isinstance(value, str):
+        try:
+            coerced = _coerce(knob, value)
+        except (ValueError, TypeError) as exc:
+            _warn_once(knob.key, f"{knob.key} (tuning.json={value!r}): {exc}; ignoring the file value")
+            return _ABSENT
+        if not _in_bounds(knob, coerced):
+            _warn_once(knob.key, f"{knob.key} (tuning.json={value!r}) out of bounds {knob.bounds}; "
+                                 "ignoring the file value")
+            return _ABSENT
+        return value
+    ok = ((t is bool and isinstance(value, bool))
+          or (t is int and isinstance(value, int) and not isinstance(value, bool))
+          or (t is float and isinstance(value, (int, float)) and not isinstance(value, bool)))
+    if not ok:
+        _warn_once(knob.key, f"{knob.key} (tuning.json={value!r}): not a {_type_name(t)}; "
+                             "ignoring the file value")
+        return _ABSENT
+    if not _in_bounds(knob, value):
+        _warn_once(knob.key, f"{knob.key} (tuning.json={value!r}) out of bounds {knob.bounds}; "
+                             "ignoring the file value")
+        return _ABSENT
+    return float(value) if t is float else value
+
+
+def set_persisted(key: str, value) -> Path:
+    """Validate *value* for *key* and merge it into tuning.json atomically.
+    Raises KeyError for an unknown knob and ValueError for a value the knob
+    rejects (type, choices, bounds) -- a persisted knob is never written
+    invalid. Strings are stored coerced to the knob's native type."""
+    knob = REGISTRY[key]
+    if isinstance(value, str):
+        value = _coerce(knob, value)
+    else:
+        if _validate_persisted(knob, value) is _ABSENT:
+            raise ValueError(f"{key}: {value!r} is not a valid {_type_name(knob.type)}")
+    if not _in_bounds(knob, value):
+        raise ValueError(f"{key}: {value!r} out of bounds {knob.bounds}")
+    data = dict(persisted())
+    data[key] = value
+    return _write_persisted(data)
+
+
+def unset_persisted(key: str) -> Path:
+    """Remove *key* from tuning.json (no-op when absent)."""
+    data = dict(persisted())
+    data.pop(key, None)
+    return _write_persisted(data)
+
+
+def _write_persisted(data: dict) -> Path:
+    p = persisted_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    _invalidate_persisted()
+    return p
+
+
 def resolve(key: str, *, conn=None):
-    """In-process override > env > default.
+    """In-process override > tuning.json > env > default.
 
     Every real knob here is `source="env:..."`. When the env var is unset,
     `default` is returned as-is (its native type -- a bool/int/float for a
@@ -136,6 +281,10 @@ def resolve(key: str, *, conn=None):
     string -- callers keep doing the same coercion they always did. A value
     that fails coercion or falls outside bounds never raises: it logs one
     warning for this key (this process) and falls back to `default`.
+
+    A tuning.json value (see `persisted()`) sits between the in-process
+    override and the env: validated the same way, and a bad one falls through
+    to the env/default rather than shadowing it.
     """
     knob = REGISTRY[key]
     with _lock:
@@ -143,6 +292,11 @@ def resolve(key: str, *, conn=None):
             return _overrides[key]
     if not knob.source.startswith("env:"):
         return knob.default
+    file_vals = persisted()
+    if key in file_vals:
+        fv = _validate_persisted(knob, file_vals[key])
+        if fv is not _ABSENT:
+            return fv
     var = knob.source[len("env:"):]
     raw = os.environ.get(var)
     if raw is None:
@@ -154,12 +308,11 @@ def resolve(key: str, *, conn=None):
         _warn_once(key, f"{key} ({var}={raw!r}): {exc}; falling back to default {knob.default!r}")
         return knob.default
 
-    if knob.bounds is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+    if not _in_bounds(knob, value):
         lo, hi = knob.bounds
-        if not (lo <= value <= hi):
-            _warn_once(key, f"{key} ({var}={raw!r}) out of bounds [{lo}, {hi}]; "
-                             f"falling back to default {knob.default!r}")
-            return knob.default
+        _warn_once(key, f"{key} ({var}={raw!r}) out of bounds [{lo}, {hi}]; "
+                         f"falling back to default {knob.default!r}")
+        return knob.default
 
     return raw
 
@@ -189,6 +342,7 @@ def _type_name(t) -> str:
 
 def as_json(conn=None) -> dict[str, dict]:
     out = {}
+    file_vals = persisted()
     for key, knob in REGISTRY.items():
         out[key] = {
             "key": key,
@@ -201,6 +355,7 @@ def as_json(conn=None) -> dict[str, dict]:
             "doc": knob.doc,
             "feature": knob.feature,
             "value": resolve(key, conn=conn),
+            "persisted": file_vals.get(key),
         }
     return out
 
@@ -357,6 +512,29 @@ _register("retrieval.bge_encode_via", type="enum",
                "/health answers, else in-process torch, else BM25), 'supervisor' "
                "(prefer the HTTP supervisor), 'inprocess' (FlagEmbedding only, never "
                "probe the supervisor).", feature="retrieval.bge")
+# --- supervisor cold-start-on-demand + idle keep-alive (2026-09-04) ----------
+# The supervisor is a DETACHED process (never a child of the caller): memsom
+# launches bge_spawn_cmd only when bge_url's /health is down, waits up to
+# bge_spawn_timeout for it, and every /embed carries idle_ttl so the supervisor
+# knows how long to hold the torch backend after memsom's last encode. A fresh
+# clone leaves bge_spawn_cmd empty and behaves exactly as before (no spawn).
+_register("retrieval.bge_idle_ttl", type=int, default=60, bounds=(0, 86400),
+           source="env:MEMDAG_BGE_IDLE_TTL",
+           doc="Idle keep-alive (seconds) the local BGE-M3 supervisor holds its torch "
+               "backend after memsom's last encode; sent as `idle_ttl` on every "
+               "/embed (last request wins) and as BGE_PROC_IDLE_SEC to a supervisor "
+               "memsom spawns. 0 = never idle-kill.", feature="retrieval.bge")
+_register("retrieval.bge_spawn_cmd", type=str, default="", source="env:MEMDAG_BGE_SPAWN_CMD",
+           doc="Command line memsom launches DETACHED (own process group, no console, "
+               "no pipes) when bge_url's /health is down, e.g. the supervisor's "
+               "launcher script. Empty = never spawn (a fresh clone falls back to "
+               "in-process torch / BM25 as before). One launch per outage; a broken "
+               "command is retried only after a cooldown.", feature="retrieval.bge")
+_register("retrieval.bge_spawn_timeout", type=int, default=30, bounds=(1, 300),
+           source="env:MEMDAG_BGE_SPAWN_TIMEOUT",
+           doc="Seconds to wait for a spawned supervisor's /health before giving the "
+               "query up as degraded (the spawn keeps running; the next query is "
+               "dense).", feature="retrieval.bge")
 _register("retrieval.bge_dense", type=bool, default=True, source="env:MEMDAG_BGE_DENSE",
            doc="Store + score the BGE-M3 dense vector. Off -> no dense signal on the "
                "bge path (reindex to apply).", feature="retrieval.bge")
@@ -396,24 +574,26 @@ _register("telemetry.episodic_db", type="path", default="", source="env:MEMSOM_E
 
 
 # ---------------------------------------------------------------------------
-# CLI -- `memsom tuning list|get|set`
+# CLI -- `memsom tuning list|get|set|unset`
 #
 # The 13 forget params + memory_budget are NOT registered here (module
-# docstring) -- `tuning set` therefore refuses every key today, honestly: it
-# has zero canonical-sourced knobs to write, not a bug. `tuning list`/`get`
-# already cover the ~47 knobs that used to be scattered os.environ.get()
-# calls, which is the ratchet this phase actually closes.
+# docstring). `tuning set` writes the persisted override file
+# (`<store dir>/tuning.json`, see the module docstring), which every process
+# that opens this store -- hook, Stop-hook importer, the env-less MCP child --
+# reads on its next resolve. `tuning unset` removes the file value so the
+# env/default applies again.
 # ---------------------------------------------------------------------------
 
 def _cmd_tuning_list(args) -> None:
-    import json
     if getattr(args, "json", False):
         print(json.dumps(as_json()))
         return
+    file_vals = persisted()
     for key in sorted(REGISTRY):
         knob = REGISTRY[key]
+        tag = " [tuning.json]" if key in file_vals else ""
         print(f"{key:<32} {resolve(key)!r:<20} type={_type_name(knob.type):<6} "
-              f"default={knob.default!r} source={knob.source}")
+              f"default={knob.default!r} source={knob.source}{tag}")
 
 
 def _cmd_tuning_get(args) -> None:
@@ -425,15 +605,22 @@ def _cmd_tuning_get(args) -> None:
 def _cmd_tuning_set(args) -> None:
     if args.key not in REGISTRY:
         raise SystemExit(f"unknown knob: {args.key!r}")
-    knob = REGISTRY[args.key]
-    raise SystemExit(
-        f"refused: {args.key!r} is {knob.source} -- env-sourced knobs are "
-        f"read-only through this API (PLAN.md Sec2.2); set ${knob.source[4:]} "
-        f"instead. No canonical-block (file-writable) knob is registered yet.")
+    try:
+        path = set_persisted(args.key, args.value)
+    except (ValueError, TypeError) as exc:
+        raise SystemExit(f"refused: {exc}")
+    print(f"{args.key} = {resolve(args.key)!r}  (persisted in {path})")
+
+
+def _cmd_tuning_unset(args) -> None:
+    if args.key not in REGISTRY:
+        raise SystemExit(f"unknown knob: {args.key!r}")
+    path = unset_persisted(args.key)
+    print(f"{args.key} = {resolve(args.key)!r}  (removed from {path})")
 
 
 def register(sub) -> None:
-    p = sub.add_parser("tuning", help="report/inspect every tunable knob")
+    p = sub.add_parser("tuning", help="report/inspect/persist every tunable knob")
     tsub = p.add_subparsers(dest="tuning_command", required=True)
     p_list = tsub.add_parser("list", help="list every registered knob")
     p_list.add_argument("--json", action="store_true")
@@ -441,7 +628,11 @@ def register(sub) -> None:
     p_get = tsub.add_parser("get", help="resolve one knob")
     p_get.add_argument("key")
     p_get.set_defaults(func=_cmd_tuning_get)
-    p_set = tsub.add_parser("set", help="write a canonical-block knob (none registered yet)")
+    p_set = tsub.add_parser("set", help="persist a knob in <store dir>/tuning.json "
+                                        "(beats env; seen by every process on the store)")
     p_set.add_argument("key")
     p_set.add_argument("value")
     p_set.set_defaults(func=_cmd_tuning_set)
+    p_unset = tsub.add_parser("unset", help="remove a knob from tuning.json (env/default applies again)")
+    p_unset.add_argument("key")
+    p_unset.set_defaults(func=_cmd_tuning_unset)
