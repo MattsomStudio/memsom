@@ -653,10 +653,25 @@ def numpy_for_scoring():
 
 def numpy_scoring_available() -> bool:
     """True iff colbert_maxsim would score with numpy on THIS thread (see
-    numpy_for_scoring). The pure-Python fallback is ~100x slower — fine for a
-    unit test, far too slow for a 100-candidate rerank inside a hook budget —
-    so the rerank is skipped outright when this is False."""
+    numpy_for_scoring)."""
     return numpy_for_scoring() is not None
+
+
+def numpy_import_blocked() -> bool:
+    """True in exactly the one case where scoring would trigger a wedging
+    import: numpy is INSTALLED, not yet loaded, and this is not the main
+    thread. A box with no numpy at all (CI) is not blocked -- it takes the
+    pure-Python path, ~100x slower but correct, as it always did."""
+    if sys.modules.get("numpy") is not None:
+        return False
+    if threading.current_thread() is threading.main_thread():
+        return False
+    try:
+        import importlib.util
+        return importlib.util.find_spec("numpy") is not None
+    # FAILOPEN: allowed -- a broken spec lookup means "not installed", i.e. the pure path, never a skipped rerank.
+    except Exception:
+        return False
 
 
 def colbert_maxsim_blob(q_np, blob: bytes, n_tokens: int, dim: int):

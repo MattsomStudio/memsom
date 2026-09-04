@@ -62,6 +62,18 @@ class TestNumpyThreadRule(unittest.TestCase):
                 imp.assert_not_called()
             self.assertFalse(_in_thread(memsom_embed.numpy_scoring_available))
 
+    def test_import_blocked_only_when_installed_unloaded_and_off_main_thread(self):
+        with mock.patch.dict(sys.modules, {"numpy": None}):
+            # installed (find_spec finds it) + not loaded + off main thread -> blocked
+            with mock.patch("importlib.util.find_spec", return_value=object()):
+                self.assertTrue(_in_thread(memsom_embed.numpy_import_blocked))
+                self.assertFalse(memsom_embed.numpy_import_blocked())  # main thread
+            # NOT installed (the CI box) -> never blocked: the pure path runs
+            with mock.patch("importlib.util.find_spec", return_value=None):
+                self.assertFalse(_in_thread(memsom_embed.numpy_import_blocked))
+        with mock.patch.dict(sys.modules, {"numpy": object()}):
+            self.assertFalse(_in_thread(memsom_embed.numpy_import_blocked))
+
     def test_already_loaded_numpy_is_used_from_any_thread(self):
         sentinel = object()
         with mock.patch.dict(sys.modules, {"numpy": sentinel}):

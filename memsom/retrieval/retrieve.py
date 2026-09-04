@@ -902,10 +902,11 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
     if (memsom_embed.backend(conn) != "bge-m3" or not memsom_embed.colbert_enabled()
             or not memsom_embed.bge_usable()):
         return [(nid, 0.0) for nid in candidate_ids]
-    if not memsom_embed.numpy_scoring_available():
-        # numpy is not loaded and this is not the main thread: importing it
-        # here wedges the process (embed.numpy_for_scoring). Keep the fused
-        # order rather than pay a pure-Python MaxSim over the whole window.
+    if memsom_embed.numpy_import_blocked():
+        # numpy is installed but not loaded and this is not the main thread:
+        # importing it here wedges the process (embed.numpy_for_scoring). Keep
+        # the fused order rather than pay a pure-Python MaxSim over the window.
+        # (No numpy at all -> the pure path below, as before.)
         _warn_colbert_skipped_once()
         return [(nid, 0.0) for nid in candidate_ids]
     enc = memsom_embed.encode_query(query)
