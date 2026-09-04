@@ -344,8 +344,15 @@ def probe(stream):
              if not m.name.endswith(".__main__")]
     out["missing"] = sorted(n for n in names if n not in sys.modules)
     out["pinned"] = len(names) - len(out["missing"])
-    out["heavy"] = sorted(m for m in ("torch", "numpy", "FlagEmbedding", "transformers")
+    # numpy is EXPECTED after startup: mcp.preload_numeric loads it on the main
+    # thread on purpose (a first import from a request thread wedges the
+    # server while the main thread blocks in the stdin read; 2026-09-04).
+    # Everything torch-shaped must still be absent.
+    out["heavy"] = sorted(m for m in ("torch", "FlagEmbedding", "transformers", "sklearn")
                           if m in sys.modules)
+    import importlib.util
+    out["numpy_installed"] = importlib.util.find_spec("numpy") is not None
+    out["numpy_loaded"] = "numpy" in sys.modules
 mcp._serve_lines = probe
 buf = io.StringIO()
 real_stdout = sys.stdout
@@ -363,7 +370,7 @@ print(json.dumps(out))
         """After serve_stdio's startup, every memsom.* submodule on disk is
         already in sys.modules -- so no later tool call can import a newer
         file against older in-memory modules -- and the pin dragged in no
-        torch/numpy, wrote nothing to stdout, and opened no DB."""
+        torch (numpy alone is preloaded on purpose), wrote nothing to stdout, and opened no DB."""
         # A path setUp has NOT created, so "db_exists" measures the pin alone.
         probe_db = Path(self.tmp.name) / "probe_untouched.db"
         env = {**os.environ, "MEMDAG_DB": str(probe_db), "MEMDAG_WARM_ENDPOINT": "0"}
@@ -378,6 +385,9 @@ print(json.dumps(out))
                          f"after startup: {out['missing'][:8]}...")
         self.assertGreater(out["pinned"], 50, out)
         self.assertEqual(out["heavy"], [], f"startup pin imported heavy deps: {out['heavy']}")
+        self.assertEqual(out["numpy_loaded"], out["numpy_installed"],
+                         "preload_numeric must load numpy on the main thread at startup "
+                         "(when installed) -- request threads must never import it first")
         self.assertEqual(out["stdout_bytes"], 0, "startup wrote to stdout (protocol corruption)")
         self.assertFalse(out["db_exists"], "startup pin opened/created the DB")
 

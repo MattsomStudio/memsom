@@ -104,7 +104,7 @@ class TestEmbedDispatch(unittest.TestCase):
 
     def test_colbert_candidates_default_and_override(self):
         os.environ.pop("MEMDAG_COLBERT_CANDIDATES", None)
-        self.assertEqual(memsom_embed.colbert_candidates(), 100)
+        self.assertEqual(memsom_embed.colbert_candidates(), 30)
         os.environ["MEMDAG_COLBERT_CANDIDATES"] = "7"
         try:
             self.assertEqual(memsom_embed.colbert_candidates(), 7)

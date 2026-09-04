@@ -227,7 +227,14 @@ def handle_request(raw: bytes, peer_ip: str, token: str, open_conn) -> dict:
 # BACKOFF_S after two consecutive failures against a live pid.
 
 CONN_TIMEOUT_S = 0.3         # per-connection recv/send timeout on the server
-WARM_BUDGET_S = 0.25         # client: total connect+send+recv budget
+# 0.25 s until 2026-09-04. MEASURED that day, warm, on the live store (757 dense
+# rows, bge-m3 via the local supervisor): encode 0.03-0.15 s + dense 0.01 s +
+# sparse 0.035 s + ColBERT rerank 0.26 s over the 30-candidate window (I/O
+# bound: ~0.8 MB of fp16 per candidate, 8.5 ms each) ~= 0.5 s. A 0.25 s budget
+# made every dense answer "too slow", tripped the backoff and read as "warm
+# endpoint down" while the encoder was healthy. 0.6 s leaves the hook's 0.8 s
+# deadline room for the in-process BM25 fallback when the endpoint IS slow.
+WARM_BUDGET_S = 0.6          # client: total connect+send+recv budget
 BACKOFF_S = 30.0             # client: skip the warm path this long after 2 failures
 BACKOFF_AFTER = 2            # consecutive failures before the backoff engages
 WATCHDOG_INTERVAL_S = 60.0   # MCP-side self-ping cadence

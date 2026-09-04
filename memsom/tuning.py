@@ -483,9 +483,14 @@ _register("embed.backend", type="enum", choices=("ollama", "bge-m3", "bm25"),
            doc="Embedding backend: ollama | bge-m3 | bm25. Unknown/unset falls "
                "back to embed.py's own DEFAULT_BACKEND ('ollama').",
            feature="retrieval.bge")
-_register("retrieval.colbert_candidates", type=int, default=100, bounds=(1, 1_000_000),
+_register("retrieval.colbert_candidates", type=int, default=30, bounds=(1, 1_000_000),
            source="env:MEMDAG_COLBERT_CANDIDATES",
-           doc="ColBERT re-rank window size (int).", feature="retrieval.colbert")
+           doc="ColBERT re-rank window size (int). 100 until 2026-09-04; MEASURED "
+               "then at ~8.5 ms per candidate (I/O: ~0.8 MB of fp16 vectors each), so "
+               "100 cost 0.85 s and blew the prompt hook's warm budget on every "
+               "query; 30 costs ~0.26 s and fits. Raise it for batch/CLI quality, "
+               "not for the hook.",
+           feature="retrieval.colbert")
 _register("retrieval.colbert_maxlen", type=int, default=512, bounds=(1, 1_000_000),
            source="env:MEMDAG_COLBERT_MAXLEN",
            doc="ColBERT passage/query token cap (int).", feature="retrieval.colbert")

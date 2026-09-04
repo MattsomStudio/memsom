@@ -788,14 +788,41 @@ def vector_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
     if not rows:
         return []
 
-    scored = []
-    for nid, blob in rows:
-        d_vec = _blob_to_vec(blob)
-        sim = _cosine(q_vec, d_vec)
-        scored.append((nid, sim))
-
+    scored = _dense_scores(q_vec, rows)
     scored.sort(key=lambda x: -x[1])
     return scored[:k]
+
+
+def _dense_scores(q_vec: list, rows: list) -> list:
+    """[(nid, cosine)] for every (nid, blob) row. numpy when it is already
+    loaded on this thread (one matmul: MEASURED 0.29 s -> ~5 ms over 757
+    bge-m3 rows, the difference between fitting the prompt hook's warm budget
+    and not), else the pure-Python loop. Rows whose blob is not q_vec's
+    dimension score 0.0 on both paths."""
+    from memsom.retrieval import embed as memsom_embed
+    np = memsom_embed.numpy_for_scoring()
+    dim = len(q_vec)
+    if np is not None and dim:
+        try:
+            q = np.asarray(q_vec, dtype=np.float32)
+            qn = float(np.linalg.norm(q))
+            if qn == 0.0:
+                return [(nid, 0.0) for nid, _ in rows]
+            keep = [(nid, blob) for nid, blob in rows if len(blob) == 4 * dim]
+            out = [(nid, 0.0) for nid, blob in rows if len(blob) != 4 * dim]
+            if keep:
+                m = np.frombuffer(b"".join(blob for _, blob in keep), dtype="<f4")
+                m = m.reshape(len(keep), dim)
+                norms = np.linalg.norm(m, axis=1)
+                dots = m @ q
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    sims = np.where(norms > 0.0, dots / (norms * qn), 0.0)
+                out.extend((nid, float(s)) for (nid, _), s in zip(keep, sims))
+            return out
+        # FAILOPEN: not actually open -- any numpy-path error (odd dtype, shape) falls back to the exact pure-Python computation below.
+        except Exception:
+            pass
+    return [(nid, _cosine(q_vec, _blob_to_vec(blob))) for nid, blob in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +869,20 @@ def sparse_search(conn: sqlite3.Connection, query: str, k: int = 8) -> list:
 # ColBERT late-interaction RE-RANKER (bge backend only)
 # ---------------------------------------------------------------------------
 
+_COLBERT_SKIP_WARNED = False
+
+
+def _warn_colbert_skipped_once() -> None:
+    global _COLBERT_SKIP_WARNED
+    if _COLBERT_SKIP_WARNED:
+        return
+    _COLBERT_SKIP_WARNED = True
+    print("[memsom] ColBERT rerank skipped: numpy is not loaded in this process and "
+          "this is not the main thread (a first import here hangs on Windows). Dense "
+          "order stands. Long-lived servers preload numpy on their main thread at "
+          "startup. This warning shows once.", file=sys.stderr)
+
+
 def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) -> list:
     """Re-order an ALREADY-POOL-GATED candidate id list by ColBERT MaxSim.
 
@@ -861,6 +902,12 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
     if (memsom_embed.backend(conn) != "bge-m3" or not memsom_embed.colbert_enabled()
             or not memsom_embed.bge_usable()):
         return [(nid, 0.0) for nid in candidate_ids]
+    if not memsom_embed.numpy_scoring_available():
+        # numpy is not loaded and this is not the main thread: importing it
+        # here wedges the process (embed.numpy_for_scoring). Keep the fused
+        # order rather than pay a pure-Python MaxSim over the whole window.
+        _warn_colbert_skipped_once()
+        return [(nid, 0.0) for nid in candidate_ids]
     enc = memsom_embed.encode_query(query)
     if enc is None or not memsom_schema.table_exists(conn, "colbert_vecs"):
         return [(nid, 0.0) for nid in candidate_ids]
@@ -872,7 +919,23 @@ def colbert_rerank(conn: sqlite3.Connection, query: str, candidate_ids: list) ->
         [memsom_embed.active_model_name(conn)] + list(candidate_ids),
     ).fetchall()
     have = {}
+    np = memsom_embed.numpy_for_scoring()
+    q_np = None
+    if np is not None and q_colbert:
+        try:
+            q_np = np.asarray(q_colbert, dtype=np.float32)
+        # FAILOPEN: not actually open -- a malformed query matrix just takes the list path below.
+        except Exception:
+            q_np = None
     for nid, n_tokens, dim, blob in rows:
+        if q_np is not None:
+            # Decode the fp16 blob straight into numpy (MEASURED: the
+            # struct.unpack -> list -> asarray route cost 1.6 s per 100
+            # candidates; frombuffer is ~30 ms) and score in one matmul.
+            score = memsom_embed.colbert_maxsim_blob(q_np, blob, n_tokens, dim)
+            if score is not None:
+                have[nid] = score
+                continue
         d_colbert = memsom_embed.blob_to_colbert(blob, n_tokens, dim)
         have[nid] = memsom_embed.colbert_maxsim(q_colbert, d_colbert)
     # Preserve incoming (fused) order for ties / missing-vector candidates: build

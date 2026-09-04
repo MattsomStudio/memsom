@@ -45,6 +45,8 @@ unload()                               # drop the model, free VRAM
 
 import struct
 import sqlite3
+import sys
+import threading
 
 from memsom.storage import schema as memsom_schema
 from memsom import tuning as memsom_tuning
@@ -59,7 +61,7 @@ BGE_MODEL_NAME = "bge-m3"          # the `model` tag stored alongside bge vector
 BGE_HF_REPO = "BAAI/bge-m3"        # the FlagEmbedding load path
 BGE_DENSE_DIM = 1024
 DEFAULT_MAXLEN = 512               # passage/query token cap (FlagEmbedding default)
-DEFAULT_COLBERT_CANDIDATES = 100   # ColBERT re-rank window (see memsom_retrieve)
+DEFAULT_COLBERT_CANDIDATES = 30    # ColBERT re-rank window (see memsom_retrieve); 100 until 2026-09-04, see tuning.py
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -142,7 +144,7 @@ def active_model_name(conn=None) -> str:
 
 
 def colbert_candidates() -> int:
-    """Re-rank window size from MEMDAG_COLBERT_CANDIDATES (default 100)."""
+    """Re-rank window size from MEMDAG_COLBERT_CANDIDATES (default 30; 100 until 2026-09-04)."""
     raw = memsom_tuning.resolve("retrieval.colbert_candidates")
     if isinstance(raw, int):  # unset -> the registered (typed) default
         return max(1, raw)
@@ -230,12 +232,23 @@ def bge_available() -> bool:
     """
     global _BGE_AVAILABLE
     if _BGE_AVAILABLE is None:
+        # find_spec, NOT import. This probe runs in every process that calls
+        # migrate_all / `memsom features` / a retrieve gate -- the MCP server
+        # (a Claude Code child) included -- and an import here pulled torch,
+        # transformers, sklearn, pandas and pyarrow (~6 s, GBs of address
+        # space) into all of them. MEASURED 2026-09-04: while any thread sits
+        # in a blocking stdin pipe read (the MCP main loop, always), a
+        # C-extension load on another thread blocks until that read returns,
+        # so the warm-endpoint request thread hung in this import for minutes;
+        # and the same import chain access-violated in pyarrow's DLL init in a
+        # long test process. A broken install is still caught: the real
+        # import lives in _get_model(), whose callers already fall back.
         try:
-            import numpy  # noqa: F401
-            import torch  # noqa: F401
-            import FlagEmbedding  # noqa: F401
-            _BGE_AVAILABLE = True
-        # FAILOPEN: swallows and marks unavailable -- any numpy/torch/FlagEmbedding import or DLL failure means bge is unavailable, never raises.
+            import importlib.util
+            _BGE_AVAILABLE = all(
+                importlib.util.find_spec(name) is not None
+                for name in ("numpy", "torch", "FlagEmbedding"))
+        # FAILOPEN: swallows and marks unavailable -- a package whose spec lookup itself errors (broken metadata) means bge is unavailable, never raises.
         except Exception:
             _BGE_AVAILABLE = False
     return _BGE_AVAILABLE
@@ -289,6 +302,15 @@ def _get_model():
     """
     global _MODEL
     if _MODEL is None:
+        if ("FlagEmbedding" not in sys.modules
+                and threading.current_thread() is not threading.main_thread()):
+            # A FIRST torch/FlagEmbedding import off the main thread wedges a
+            # process whose main thread is blocked in a stdin pipe read (the
+            # MCP server) -- see bge_available(). Refuse; callers fall back
+            # (BM25 + degraded signal), which is the honest outcome for a
+            # server that was never meant to hold torch anyway.
+            raise RuntimeError("in-process bge-m3 load refused off the main thread "
+                               "(use the supervisor path: retrieval.bge_encode_via)")
         from FlagEmbedding import BGEM3FlagModel
         kwargs = {"use_fp16": True}
         dev = _device()
@@ -599,6 +621,60 @@ def sparse_dot(q_sparse: dict, d_sparse: dict) -> float:
     return float(total)
 
 
+def numpy_for_scoring():
+    """The numpy module for ColBERT scoring, or None — and NEVER a fresh import
+    off the main thread.
+
+    MEASURED 2026-09-04 (py-spy on the live MCP server AND a self-spawned
+    repro): `import numpy` from a socketserver request thread of the MCP
+    process hangs forever inside the `_multiarray_umath` DLL load
+    (create_module), while the same import on the main thread — or from a
+    thread of a plain process — takes 80 ms. Every warm-endpoint query then
+    wedged in colbert_maxsim, the prompt hook burned its budget and backed off,
+    and retrieval read as "warm endpoint down" with a healthy encoder.
+
+    So: an already-imported numpy is used from any thread; a first import is
+    only ever attempted on the main thread (the MCP server preloads it there at
+    startup, see mcp.preload_numeric). Off the main thread with numpy absent
+    this returns None and callers take a numpy-free path.
+    """
+    mod = sys.modules.get("numpy")
+    if mod is not None:
+        return mod
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    try:
+        import numpy
+        return numpy
+    # FAILOPEN: allowed -- no numpy on this box means the pure-Python / skip path, never an error.
+    except Exception:
+        return None
+
+
+def numpy_scoring_available() -> bool:
+    """True iff colbert_maxsim would score with numpy on THIS thread (see
+    numpy_for_scoring). The pure-Python fallback is ~100x slower — fine for a
+    unit test, far too slow for a 100-candidate rerank inside a hook budget —
+    so the rerank is skipped outright when this is False."""
+    return numpy_for_scoring() is not None
+
+
+def colbert_maxsim_blob(q_np, blob: bytes, n_tokens: int, dim: int):
+    """MaxSim of a query matrix (numpy float32 [n_q, dim]) against a stored
+    fp16-LE colbert blob, decoded with frombuffer -- no Python lists. Returns
+    None (caller falls back to blob_to_colbert + colbert_maxsim) when numpy is
+    not loaded on this thread or the blob does not match its declared shape."""
+    np = numpy_for_scoring()
+    if np is None or n_tokens <= 0 or dim <= 0 or len(blob) != 2 * n_tokens * dim:
+        return None
+    try:
+        d = np.frombuffer(blob, dtype="<f2").reshape(n_tokens, dim).astype(np.float32)
+        return float((q_np @ d.T).max(axis=1).sum())
+    # FAILOPEN: not actually open -- a shape/dtype error returns None and the caller takes the exact list path.
+    except Exception:
+        return None
+
+
 def colbert_maxsim(q_colbert, d_colbert) -> float:
     """ColBERT late-interaction score: sum over query tokens of the max dot
     product against any doc token. Vectors are L2-normalized by BGE-M3, so a dot
@@ -612,7 +688,9 @@ def colbert_maxsim(q_colbert, d_colbert) -> float:
     if not q_colbert or not d_colbert:
         return 0.0
     try:
-        import numpy as np
+        np = numpy_for_scoring()
+        if np is None:
+            raise ImportError("numpy not loaded on this thread")
         q = np.asarray(q_colbert, dtype=np.float32)
         d = np.asarray(d_colbert, dtype=np.float32)
         # [n_q, n_d] sims -> max over doc tokens -> sum over query tokens

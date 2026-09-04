@@ -121,13 +121,27 @@ def main(argv=None):
     ap.add_argument("--record-file")
     ap.add_argument("--ttl", type=float, default=30.0, help="exit after this many seconds")
     ap.add_argument("--delay", type=float, default=0.0, help="sleep before binding")
+    ap.add_argument("--log-file", help="append startup/bind/error lines here (stdio is DEVNULL "
+                                       "when memsom spawns us, so this is the only trace)")
     args = ap.parse_args(argv)
+
+    def note(msg):
+        if args.log_file:
+            with open(args.log_file, "a", encoding="utf-8") as f:
+                f.write(f"{time.time():.3f} {msg}\n")
+
+    note(f"main pid={__import__('os').getpid()} port={args.port} argv={argv or sys.argv[1:]}")
     if args.delay:
         time.sleep(args.delay)
     if args.count_file:
         with open(args.count_file, "a", encoding="utf-8") as f:
             f.write(f"started {time.time():.3f}\n")
-    srv, _st = serve_in_thread(args.port, args.host, record_file=args.record_file)
+    try:
+        srv, _st = serve_in_thread(args.port, args.host, record_file=args.record_file)
+    except Exception as exc:  # the one place a spawn can fail invisibly
+        note(f"bind failed: {exc!r}")
+        raise
+    note(f"listening on {args.host}:{args.port}")
     deadline = time.monotonic() + args.ttl
     try:
         while time.monotonic() < deadline:
@@ -135,8 +149,22 @@ def main(argv=None):
     finally:
         srv.shutdown()
         srv.server_close()
+        note("stopped")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+        lf = None
+        for i, a in enumerate(sys.argv):
+            if a == "--log-file" and i + 1 < len(sys.argv):
+                lf = sys.argv[i + 1]
+        if lf:
+            with open(lf, "a", encoding="utf-8") as f:
+                f.write(traceback.format_exc())
+        raise

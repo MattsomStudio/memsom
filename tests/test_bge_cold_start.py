@@ -263,10 +263,15 @@ class TestSpawnOnce(Base):
     def test_eight_concurrent_callers_spawn_one_supervisor(self):
         port = free_port()
         count = Path(self.tmp.name) / "count.txt"
+        child_log = Path(self.tmp.name) / "child.log"
+        # A generous spawn budget: CI runners (macOS especially) can take
+        # seconds to start a python; the contract under test is "one launch,
+        # everyone served", not "fast".
         self.env(MEMDAG_BGE_URL=f"http://127.0.0.1:{port}/embed",
                  MEMDAG_BGE_SPAWN_CMD=f"{_quote(sys.executable)} {_quote(HELPER)} "
-                                      f"--port {port} --count-file {_quote(count)} --ttl 40",
-                 MEMDAG_BGE_SPAWN_TIMEOUT="20", MEMDAG_BGE_ENCODE_VIA="supervisor")
+                                      f"--port {port} --count-file {_quote(count)} "
+                                      f"--log-file {_quote(child_log)} --ttl 90",
+                 MEMDAG_BGE_SPAWN_TIMEOUT="60", MEMDAG_BGE_ENCODE_VIA="supervisor")
         results = []
         lock = threading.Lock()
 
@@ -275,16 +280,30 @@ class TestSpawnOnce(Base):
             with lock:
                 results.append(ok)
 
+        def diagnostics():
+            """Everything a failure needs to be diagnosable from a CI log:
+            the child's own trace (its stdio is DEVNULL by design), its exit
+            code, the launch count and a direct probe of the port."""
+            time.sleep(1.0)
+            child = bge_client._CHILDREN[-1] if bge_client._CHILDREN else None
+            probe = bge_client.bge_http_available(force=True)
+            return (f"spawn_count={bge_client._SPAWN_COUNT} child_rc="
+                    f"{child.poll() if child else 'no-handle'} direct_probe={probe} "
+                    f"count_file={count.read_text() if count.exists() else '<absent>'!r} "
+                    f"child_log={child_log.read_text() if child_log.exists() else '<absent>'!r} "
+                    f"cmd={os.environ['MEMDAG_BGE_SPAWN_CMD']!r}")
+
         try:
             t0 = time.monotonic()
             threads = [threading.Thread(target=go) for _ in range(8)]
             for t in threads:
                 t.start()
             for t in threads:
-                t.join(30)
+                t.join(90)
             elapsed = time.monotonic() - t0
-            self.assertEqual(results, [True] * 8, results)
-            self.assertLess(elapsed, 25.0)
+            if results != [True] * 8:
+                self.fail(f"results={results} after {elapsed:.1f}s; {diagnostics()}")
+            self.assertLess(elapsed, 70.0)
             time.sleep(0.5)
             self.assertEqual(count.read_text().count("started"), 1,
                              "single-flight: exactly one launch")

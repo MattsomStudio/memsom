@@ -334,8 +334,18 @@ def degraded_lines(source: str, configured_backend: str, store_lines) -> list:
     bm25 store BM25-only is the design, not a degradation."""
     out = list(store_lines or [])
     if source in _WARM_DOWN_SOURCES and configured_backend not in ("", "bm25"):
-        out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint down → BM25-only for this "
-                   "prompt (no dense recall; reconnect the memsom MCP server)")
+        if source == "timeout":
+            # The endpoint accepted but did not answer inside the hook budget:
+            # with cold-start-on-demand (2026-09-04) that is usually the bge
+            # supervisor booting its encoder for THIS query, which keeps loading
+            # after we gave up — the next prompt is served dense. Say that, not
+            # "down", so the reader does not reconnect a healthy server.
+            out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint timed out (encoder "
+                       "cold-starting or busy) → BM25-only for this prompt; dense "
+                       "recall resumes on the next prompt once it is warm")
+        else:
+            out.append("⚠️ RETRIEVAL DEGRADED: warm endpoint down → BM25-only for this "
+                       "prompt (no dense recall; reconnect the memsom MCP server)")
     return out
 
 

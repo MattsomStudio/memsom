@@ -823,6 +823,28 @@ def _pin_code_snapshot():
     return names
 
 
+def preload_numeric():
+    """Import numpy on the MAIN thread before any request thread exists.
+
+    MEASURED 2026-09-04 (py-spy, live server + self-spawned repro): a first
+    `import numpy` from a warm-endpoint request thread of this process hangs
+    forever inside the `_multiarray_umath` DLL load, so every ColBERT rerank
+    wedged and the prompt hook backed off to BM25 with a healthy encoder. The
+    same import on the main thread takes ~80 ms. retrieval/embed.numpy_for_scoring
+    refuses to import off the main thread; this is the other half — do it here,
+    once, while this IS the main thread. Import-time stdout is routed to stderr
+    (stray stdout corrupts the protocol). Returns True when numpy is loaded.
+    """
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            import numpy  # noqa: F401
+            return True
+        # FAILOPEN: allowed -- no numpy on this box means ColBERT rerank is skipped (dense order stands), never a dead server.
+        except Exception as exc:
+            print(f"[memsom-mcp] numpy preload skipped: {exc!r}", file=sys.stderr)
+            return False
+
+
 def serve_stdio():
     """Run the stdio server loop. Reads until EOF; writes one JSON line per response."""
     # Reconfigure streams to UTF-8 line-buffered
@@ -836,6 +858,7 @@ def serve_stdio():
         pass
 
     _pin_code_snapshot()
+    preload_numeric()
     warm = _start_warm_endpoint()
     try:
         _serve_lines(sys.stdin)
