@@ -338,15 +338,6 @@ _register("retrieval.bge_device", type=str, default="", source="env:MEMDAG_BGE_D
            doc="Force the BGE-M3 device (cuda/cpu); unset auto-selects.", feature="retrieval.bge")
 _register("retrieval.bge_unload", type=bool, default=False, source="env:MEMDAG_BGE_UNLOAD",
            doc="Unload the BGE-M3 model after a batch reindex.", feature="retrieval.bge")
-_register("retrieval.bge_idle_ttl", type=int, default=60, bounds=(0, 86400),
-           source="env:MEMDAG_BGE_IDLE_TTL",
-           doc="Idle keep-alive (seconds) for memsom's IN-PROCESS BGE-M3 model. "
-               "After a cold-start-on-demand query encode loads the model, it "
-               "stays resident this long with no further encode, then unloads to "
-               "free VRAM. 0 disables eviction (stay warm forever). The GPU "
-               "supervisor process has its OWN idle-kill (BGE_PROC_IDLE_SEC); "
-               "this knob governs only the in-process fallback path.",
-           feature="retrieval.bge")
 # --- BGE-M3 encode path + signal toggles (portable / opt-in) --------------
 # bge_url ships as LOCALHOST, never a mesh/host IP: memsom only ever talks to a
 # LOCAL embedding supervisor. A fresh clone with no supervisor running just

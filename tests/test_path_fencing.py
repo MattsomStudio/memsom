@@ -234,9 +234,6 @@ ALLOWED: dict[str, str] = {
     "retrieval/embed.py::colbert_candidates":
         "NOT A PATH - memsom_tuning.resolve(\"retrieval.colbert_candidates\") "
         "reads a config knob. Same attribute name, unrelated call.",
-    "retrieval/embed.py::bge_idle_ttl":
-        "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_idle_ttl\") reads "
-        "the in-process idle keep-alive knob. Same attribute name, unrelated call.",
     "retrieval/bge_client.py::_url":
         "NOT A PATH - memsom_tuning.resolve(\"retrieval.bge_url\") reads a "
         "config knob. Same attribute name, unrelated call.",
