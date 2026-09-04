@@ -224,7 +224,7 @@ def handle_request(raw: bytes, peer_ip: str, token: str, open_conn) -> dict:
 # loop that exits for any reason is re-entered; (3) the MCP server runs a
 # watchdog that pings the endpoint (no DB work) and restarts it on failure,
 # while the client caps the warm path at WARM_BUDGET_S and backs off for
-# BACKOFF_S after two consecutive failures against a live pid.
+# BACKOFF_S after BACKOFF_AFTER consecutive failures against a live pid.
 
 CONN_TIMEOUT_S = 0.3         # per-connection recv/send timeout on the server
 # 0.25 s until 2026-09-04. MEASURED that day, warm, on the live store (757 dense
@@ -236,7 +236,7 @@ CONN_TIMEOUT_S = 0.3         # per-connection recv/send timeout on the server
 # deadline room for the in-process BM25 fallback when the endpoint IS slow.
 WARM_BUDGET_S = 0.6          # client: total connect+send+recv budget
 BACKOFF_S = 30.0             # client: skip the warm path this long after 2 failures
-BACKOFF_AFTER = 2            # consecutive failures before the backoff engages
+BACKOFF_AFTER = 3            # consecutive failures before the backoff engages (2 until 2026-09-04: a cold-start miss + one cold-cache miss tripped it on a healthy server)
 WATCHDOG_INTERVAL_S = 60.0   # MCP-side self-ping cadence
 PING_TIMEOUT_S = 1.0         # watchdog ping budget (off the prompt path)
 

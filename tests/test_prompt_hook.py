@@ -294,7 +294,7 @@ class TestWarmResilience(_StoreCase):
         self.assertEqual(source, "bm25")
         self.assertTrue(hits)
 
-    def test_backoff_engages_after_two_failures_and_clears(self):
+    def test_backoff_engages_after_threshold_failures_and_clears(self):
         gate = {"hang": True}
 
         def open_conn():
@@ -303,14 +303,14 @@ class TestWarmResilience(_StoreCase):
             return memsom.get_connection()
         self.srv = warm.WarmServer(self.db, open_conn=open_conn).start()
         ep = warm.read_endpoint(self.db)
-        with self.assertRaises(warm.WarmUnavailable):
-            warm.warm_query("nebula", db_path=self.db)
-        self.assertEqual(warm.read_backoff(self.db)["failures"], 1)
-        self.assertFalse(warm.in_backoff(ep, self.db))
-        with self.assertRaises(warm.WarmUnavailable):
-            warm.warm_query("nebula", db_path=self.db)
-        self.assertEqual(warm.read_backoff(self.db)["failures"], 2)
-        self.assertTrue(warm.in_backoff(ep, self.db))
+        # One miss short of the threshold never backs off (a cold start plus a
+        # cold-cache miss on a healthy server must not cost 30 s of BM25);
+        # the BACKOFF_AFTER-th consecutive miss does.
+        for n in range(1, warm.BACKOFF_AFTER + 1):
+            with self.assertRaises(warm.WarmUnavailable):
+                warm.warm_query("nebula", db_path=self.db)
+            self.assertEqual(warm.read_backoff(self.db)["failures"], n)
+            self.assertEqual(warm.in_backoff(ep, self.db), n >= warm.BACKOFF_AFTER)
         # while backed off the warm path is skipped outright (no socket, no wait)
         gate["hang"] = False
         t0 = time.monotonic()
@@ -347,8 +347,8 @@ class TestWarmResilience(_StoreCase):
     def test_restart_clears_backoff_and_rewrites_endpoint(self):
         self.srv = warm.WarmServer(self.db).start()
         ep = warm.read_endpoint(self.db)
-        warm.note_warm_failure(ep, self.db, alive=lambda pid: True)
-        warm.note_warm_failure(ep, self.db, alive=lambda pid: True)
+        for _ in range(warm.BACKOFF_AFTER):
+            warm.note_warm_failure(ep, self.db, alive=lambda pid: True)
         self.assertTrue(warm.in_backoff(ep, self.db))
         self.srv.restart()
         ep2 = warm.read_endpoint(self.db)
