@@ -45,6 +45,8 @@ unload()                               # drop the model, free VRAM
 
 import struct
 import sqlite3
+import threading
+import time
 
 from memsom.storage import schema as memsom_schema
 from memsom import tuning as memsom_tuning
@@ -60,6 +62,13 @@ BGE_HF_REPO = "BAAI/bge-m3"        # the FlagEmbedding load path
 BGE_DENSE_DIM = 1024
 DEFAULT_MAXLEN = 512               # passage/query token cap (FlagEmbedding default)
 DEFAULT_COLBERT_CANDIDATES = 100   # ColBERT re-rank window (see memsom_retrieve)
+DEFAULT_IDLE_TTL = 60              # in-process model keep-alive (seconds) before eviction
+# Bounded wait for a cold-start-on-demand QUERY encode. A cold model load is
+# ~12 s MEASURED (2026-09-04, supervisor spawn + torch + model into VRAM); this
+# is that plus headroom, and it is the cap the retrieve path waits before it
+# gives up and degrades to BM25 for THIS query (the load continues in the
+# background and warms the encoder for the next one). Never hang a prompt forever.
+COLD_START_TIMEOUT_S = 25.0
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -220,6 +229,82 @@ def colbert_enabled() -> bool:
 _MODEL = None            # process-global BGEM3FlagModel (None until first use)
 _BGE_AVAILABLE = None    # cached tri-state import probe
 
+# --- in-process idle keep-alive (retrieval.bge_idle_ttl) -------------------
+# The in-process torch model holds ~2.2 GB of VRAM. Cold-start-on-demand loads
+# it when a query needs it; this evictor hands the VRAM back after the model has
+# sat idle for `bge_idle_ttl` seconds, so we do NOT pin VRAM permanently. The
+# GPU supervisor process manages its own backend lifetime (BGE_PROC_IDLE_SEC);
+# this covers only the in-process fallback (a box with local torch, no
+# supervisor). One daemon thread, guarded so at most one runs.
+_LAST_USE = 0.0
+_EVICTOR = None
+_EVICTOR_LOCK = threading.Lock()
+
+
+def bge_idle_ttl() -> int:
+    """Idle keep-alive in seconds from retrieval.bge_idle_ttl (default 60).
+
+    0 (or negative) disables eviction — the model stays warm until the process
+    exits or `unload()` is called explicitly.
+    """
+    raw = memsom_tuning.resolve("retrieval.bge_idle_ttl")
+    if isinstance(raw, int):  # unset -> the registered (typed) default
+        return max(0, raw)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_IDLE_TTL
+    try:
+        return max(0, int(str(raw).strip()))
+    except (ValueError, TypeError):
+        return DEFAULT_IDLE_TTL
+
+
+def _touch_model() -> None:
+    """Mark the in-process model as used now (resets the idle clock)."""
+    global _LAST_USE
+    _LAST_USE = time.monotonic()
+
+
+def _evict_if_idle(now=None) -> bool:
+    """Unload the in-process model iff it is loaded and has been idle for at
+    least `bge_idle_ttl`. Returns True when it evicted. Pure/deterministic
+    (pass *now* to test without sleeping); ttl<=0 never evicts."""
+    ttl = bge_idle_ttl()
+    if ttl <= 0 or _MODEL is None:
+        return False
+    now = time.monotonic() if now is None else now
+    if now - _LAST_USE >= ttl:
+        unload()
+        return True
+    return False
+
+
+def _ensure_evictor() -> None:
+    """Start (at most one) daemon thread that evicts the idle in-process model.
+    A no-op when eviction is disabled (ttl<=0) or a live evictor already runs."""
+    global _EVICTOR
+    ttl = bge_idle_ttl()
+    if ttl <= 0:
+        return
+    with _EVICTOR_LOCK:
+        if _EVICTOR is not None and _EVICTOR.is_alive():
+            return
+
+        def _run():
+            # Poll at a fraction of the TTL (bounded 1..30 s) so a short TTL
+            # evicts promptly and a long one costs almost nothing. Exits once
+            # it has evicted or the model is already gone.
+            gap = min(max(bge_idle_ttl() / 4.0, 1.0), 30.0)
+            while True:
+                time.sleep(gap)
+                if _MODEL is None:
+                    return
+                if _evict_if_idle():
+                    return
+
+        _EVICTOR = threading.Thread(target=_run, name="memsom-bge-evictor",
+                                    daemon=True)
+        _EVICTOR.start()
+
 
 def bge_available() -> bool:
     """True iff FlagEmbedding + torch + numpy import cleanly. Cached; never raises.
@@ -316,6 +401,10 @@ def _encode(text: str) -> dict:
     raw_sparse = out["lexical_weights"][0]
     sparse = {str(k): float(v) for k, v in raw_sparse.items()}
     colbert = [[float(x) for x in row] for row in out["colbert_vecs"][0]]
+    # The in-process model is now warm: reset the idle clock and make sure the
+    # evictor is running so it hands the VRAM back after bge_idle_ttl idle.
+    _touch_model()
+    _ensure_evictor()
     return {"dense": dense, "sparse": sparse, "colbert": colbert}
 
 
@@ -383,6 +472,49 @@ def encode_query(text: str):
     here without touching the doc path.
     """
     return _dispatch_encode(text, "query encoding")
+
+
+def cold_start_encode_query(text: str, timeout_s: float = None):
+    """Cold-start-on-demand QUERY encode, bounded by *timeout_s*.
+
+    The retrieve path calls THIS instead of gating encode_query() behind a
+    cheap bge_usable() probe. The difference is the whole point of option 2:
+    when the encoder is idle/down we no longer fall straight to BM25 — we
+    ATTEMPT the encode and WAIT for it. encode_query() loads the in-process
+    model or POSTs to the local supervisor (which spawns its torch backend on
+    demand), so calling it IS the cold start.
+
+    Bounded so a prompt never hangs forever: the encode runs on a daemon thread
+    and we wait at most *timeout_s* (default COLD_START_TIMEOUT_S ~25 s, cover
+    the ~12 s MEASURED cold load with headroom). Returns:
+      * the signal dict — a live (already-warm) OR successfully cold-started
+        encoder; the caller returns DENSE with NO degraded signal;
+      * None — the encoder genuinely could not produce a vector (import/CUDA/
+        model error) OR did not come up inside the window; the caller degrades
+        to BM25 and emits the degraded line. A load still in flight keeps
+        running in the background and warms the encoder for the next query.
+    Never raises.
+    """
+    if timeout_s is None:
+        timeout_s = COLD_START_TIMEOUT_S
+    box = {}
+
+    def _run():
+        try:
+            box["enc"] = encode_query(text)
+        # FAILOPEN: any encode error becomes None -> the caller degrades to BM25;
+        # a raise here would only die on this daemon thread anyway.
+        except Exception:
+            box["enc"] = None
+
+    th = threading.Thread(target=_run, name="memsom-bge-coldstart", daemon=True)
+    th.start()
+    th.join(max(0.1, float(timeout_s)))
+    if th.is_alive():
+        # Cold start exceeded the bound; degrade THIS query. The thread finishes
+        # (and warms the model) in the background — the next query gets dense.
+        return None
+    return box.get("enc")
 
 
 # ---------------------------------------------------------------------------

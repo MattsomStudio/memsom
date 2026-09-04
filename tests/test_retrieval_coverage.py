@@ -254,10 +254,15 @@ class TestQueryFallbackTrail(Base):
         st = memsom_features._retrieval_dense(self.conn)
         self.assertEqual(st["state"], "degraded", st)
 
-    def test_bge_without_an_encode_path_leaves_a_trail(self):
+    def test_bge_cold_start_failure_leaves_a_trail(self):
+        # Cold-start-on-demand (2026-09-04): a down encoder is no longer an
+        # instant BM25 fall on a bge_usable() probe -- vector_search cold-starts
+        # via encode_query. So the trail is left only when the cold start
+        # GENUINELY fails (the encode returns None), not merely because the
+        # encoder was idle. Force a genuine failure.
         self.set_backend("bge-m3")
         self.put_vec(self.add("a bge vector"), BGE)
-        with patch.object(memsom_embed, "bge_usable", return_value=False):
+        with patch.object(memsom_embed, "encode_query", lambda t: None):
             self.assertEqual(memsom_retrieve.vector_search(self.conn, "q"), [])
         trail = memsom_retrieve.last_query_fallback(self.conn)
         self.assertIsNotNone(trail)
