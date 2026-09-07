@@ -10,7 +10,7 @@
       "name": "memsom",
       "source": "./",
       "description": "Provenance-aware memory for Claude Code: generated MEMORY.md index, per-prompt retrieval hook, memsom MCP tools.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": {
         "name": "MattsomStudio"
       },

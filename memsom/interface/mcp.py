@@ -30,6 +30,7 @@ from memsom import tuning as memsom_tuning
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "memsom"
+# MCP server protocol version, NOT the package version (that is pyproject.toml / memsom --version).
 SERVER_VERSION = "0.4.0"
 
 TOOLS = [

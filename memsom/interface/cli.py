@@ -88,6 +88,18 @@ from memsom.bridge import consolidate as memsom_consolidate
 from memsom.interface import index_stats as memsom_index_stats
 
 
+def _pkg_version() -> str:
+    """Installed package version, for `--version`. Never opens the store."""
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            return version("memsom")
+        except PackageNotFoundError:
+            return "0+unknown"
+    except Exception:  # FAILOPEN: a broken metadata backend must not kill the CLI
+        return "0+unknown"
+
+
 # ---------------------------------------------------------------------------
 # Plugin subcommands — the `memsom.commands` entry-point group.
 #
@@ -743,6 +755,7 @@ def frozen_main(argv=None):
         except AttributeError:  # io.StringIO under tests has no reconfigure
             pass
     p = argparse.ArgumentParser()
+    p.add_argument("--version", action="version", version=f"memsom {_pkg_version()}")
     sub = p.add_subparsers(dest="command", required=True)
     s_seed = sub.add_parser("seed")
     s_seed.add_argument("--offline", action="store_true")
@@ -846,6 +859,7 @@ def main(argv=None):
             pass
 
     p = argparse.ArgumentParser(prog="memsom")
+    p.add_argument("--version", action="version", version=f"memsom {_pkg_version()}")
     sub = p.add_subparsers(dest="command", required=True)
 
     # ---- Core seed ----

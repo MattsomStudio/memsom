@@ -299,11 +299,14 @@ The repo is also a Claude Code plugin + single-plugin marketplace
 (`.claude-plugin/plugin.json`, `hooks/hooks.json`, `.mcp.json`, skills from
 `claude/skills/`). The plugin registers the `memsom` MCP server, the Stop hook and
 the prompt hook, and ships the skills — it does NOT install the Python package, so
-`pip install memsom` comes first (the hooks call `memsom` and `memsom-mcp` by name
-on your PATH):
+installing the wheel comes first (the hooks call `memsom` and `memsom-mcp` by name
+on your PATH). memsom is not on PyPI; every `v*` tag publishes a GitHub Release
+carrying `memsom-<version>-py3-none-any.whl` + `SHA256SUMS` (zero runtime
+dependencies, so `--no-index --no-deps` works offline once the wheel is on disk):
 
 ```bash
-pip install memsom
+pip install https://github.com/MattsomStudio/memsom/releases/download/v0.3.0/memsom-0.3.0-py3-none-any.whl
+# or: gh release download v0.3.0 -R MattsomStudio/memsom -p '*.whl' && pip install memsom-0.3.0-py3-none-any.whl
 claude plugin marketplace add MattsomStudio/memsom
 claude plugin install memsom@memsom
 ```
@@ -320,7 +323,7 @@ GUI-launched Claude never sees it, so the hooks fail silently. A plugin's files
 must stay machine-agnostic (`${CLAUDE_PLUGIN_ROOT}` points at the cached plugin
 copy, not at your Python environment, and `python -m` would just move the same
 assumption onto `python`), so the fix is on the install side: use `pipx install
-memsom` (or `pip install --user`) so the console script lands on a PATH dir, or
+<release-wheel-url>` (or `pip install --user <wheel>`) so the console script lands on a PATH dir, or
 symlink `<venv>/bin/memsom` into `~/.local/bin`. If memsom lives in a venv and you
 would rather not, use `memsom wire-claude` instead — it writes the **absolute**
 path of the running console script into `settings.json` (falling back to

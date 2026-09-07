@@ -1,0 +1,79 @@
+# Release: on a v* tag, build the wheel, refuse if the package grew a runtime
+# dependency (the desktop app installs and upgrades memsom OFFLINE with
+# `pip install --no-index --no-deps <wheel>`), attach wheel + SHA256SUMS.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Zero-dependency gate
+        run: |
+          python - <<'EOF'
+          import sys, tomllib
+          deps = tomllib.load(open("pyproject.toml", "rb"))["project"].get("dependencies", [])
+          if deps:
+              print("REFUSED: project.dependencies is not empty:", deps)
+              print("The app installs and upgrades memsom with --no-index --no-deps; a runtime")
+              print("dependency breaks every offline user. Vendor it or bundle it.")
+              sys.exit(1)
+          print("dependencies = [] (ok)")
+          EOF
+
+      - name: Tag/version gate
+        if: github.event_name == 'push'
+        run: |
+          python - "${GITHUB_REF_NAME}" <<'EOF'
+          import sys, tomllib
+          tag = sys.argv[1]
+          ver = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          if tag != f"v{ver}":
+              print(f"REFUSED: tag {tag} != v{ver} (pyproject.toml)"); sys.exit(1)
+          print(f"tag {tag} matches pyproject {ver}")
+          EOF
+
+      - name: Build wheel
+        run: |
+          python -m pip install --disable-pip-version-check 'build==1.6.0'
+          python -m build --wheel --outdir dist
+          ls -la dist
+          test "$(ls dist/*.whl | wc -l)" = 1
+
+      - name: Smoke-install the wheel offline
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/python -m pip install --no-index --no-deps --disable-pip-version-check dist/*.whl
+          out="$(/tmp/v/bin/memsom --version)"
+          echo "$out"
+          ver="$(python -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          test "$out" = "memsom $ver"
+
+      - name: Checksums
+        run: |
+          cd dist && sha256sum *.whl > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" \
+            --notes "memsom $GITHUB_REF_NAME — wheel + SHA256SUMS. Install offline: pip install --no-index --no-deps memsom-*.whl"
