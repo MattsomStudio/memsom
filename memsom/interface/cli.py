@@ -89,14 +89,25 @@ from memsom.interface import index_stats as memsom_index_stats
 
 
 def _pkg_version() -> str:
-    """Installed package version, for `--version`. Never opens the store."""
+    """Package version, for `--version`. Never opens the store.
+
+    Installed (wheel / editable): the dist metadata. Source checkout with no
+    install (CI runs the suite straight from the tree): the `[project].version`
+    in the repo's pyproject.toml. Anything else: `0+unknown`.
+    """
     try:
         from importlib.metadata import version, PackageNotFoundError
         try:
             return version("memsom")
         except PackageNotFoundError:
-            return "0+unknown"
-    except Exception:  # FAILOPEN: a broken metadata backend must not kill the CLI
+            pass
+        import tomllib
+        pyproject = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "..", "..", "pyproject.toml")
+        with open(pyproject, "rb") as f:
+            return str(tomllib.load(f)["project"]["version"])
+    # FAILOPEN: allowed, a broken metadata backend or a missing pyproject.toml must not kill the CLI.
+    except Exception:
         return "0+unknown"
 
 
